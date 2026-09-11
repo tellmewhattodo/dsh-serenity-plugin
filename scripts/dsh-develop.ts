@@ -1667,6 +1667,116 @@ async function cmdSessionDoctor(argv: string[]): Promise<void> {
 }
 
 /**
+ * session-repair — 修复**已知形态**的会话日志损坏（重建机制写坏的 `user/message` 缺 `id`/`role`）。
+ *
+ * 与 `session-doctor` 的分工（单一真相源，不重叠）：
+ *   - `session-doctor` = **诊断**（只读分诊 + 探针实测），永不写
+ *   - `session-repair` = **治疗**（缺省 dry-run 只报计划；`--apply` 才备份 + 原子替换 + 自检）
+ *
+ * 纪律（R↓）：
+ *   - 判据来自宿主源码 `dsh-session/lib/types/index.js:241-268`（消息形状门），**不自写复刻**
+ *   - 只补 `id`/`role` 两项；`content`/`source` 形状不齐的事件一律报告不动（不替宿主猜内容）
+ *   - 缺省排除"近期仍在写入"的日志（`--min-age-min`，缺省 10 分钟）⇒ 绝不改写活动会话
+ *   - 每次 `--apply` 必先落备份；备份含会话原文 ⇒ `_tmp/` 下（gitignore，仅本地）
+ *   - `--probe` 用宿主真实读取路径 (`open(id,'read')`) 复验，不靠"应该好了"
+ *
+ * 用法: dsh-develop session-repair [--root <dir>] [--session <id,...>] [--apply]
+ *       [--backup-dir <dir>] [--min-age-min <n>] [--force] [--probe] [--json]
+ */
+async function cmdSessionRepair(argv: string[]): Promise<void> {
+  let root: string | undefined
+  const ids: string[] = []
+  let apply = false
+  let json = false
+  let probe = false
+  let force = false
+  let backupDir: string | undefined
+  let mirrorTo: string | undefined
+  let minAgeMin = 10
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] as string
+    if (a === '--root') { root = argv[++i]; continue }
+    if (a.startsWith('--root=')) { root = a.slice('--root='.length); continue }
+    if (a === '--session' || a === '--sessions') {
+      for (const id of (argv[++i] ?? '').split(',')) if (id.trim() !== '') ids.push(id.trim())
+      continue
+    }
+    if (a === '--apply') { apply = true; continue }
+    if (a === '--json') { json = true; continue }
+    if (a === '--probe') { probe = true; continue }
+    if (a === '--force') { force = true; continue }
+    if (a === '--backup-dir') { backupDir = argv[++i]; continue }
+    if (a.startsWith('--backup-dir=')) { backupDir = a.slice('--backup-dir='.length); continue }
+    if (a === '--mirror-to') { mirrorTo = argv[++i]; continue }
+    if (a.startsWith('--mirror-to=')) { mirrorTo = a.slice('--mirror-to='.length); continue }
+    if (a === '--min-age-min') { minAgeMin = Number(argv[++i]); continue }
+    fail(`session-repair 未知参数: ${a}（用法: session-repair [--root <dir>] [--session <id,...>] [--apply] [--backup-dir <dir>] [--mirror-to <dir>] [--min-age-min <n>] [--force] [--probe] [--json]）`)
+  }
+  const storeRoot = sessionStoreRoot(root)
+  const script = join(SCRIPTS_DIR, 'session-repair.mjs')
+  if (!existsSync(script)) fail(`修复脚本缺失: ${script}`, 2)
+
+  let effectiveBackup = backupDir
+  if (apply && (effectiveBackup === undefined || effectiveBackup === '')) {
+    // 缺省备份目录放在 CCC 的 `_tmp/`（gitignore；**含会话原文，仅本地**）
+    effectiveBackup = join(REPO_ROOT, '_tmp', 'session-repair-backup', `bak-${Date.now()}`)
+    console.log(`[session-repair] 未指定 --backup-dir ⇒ 缺省 ${effectiveBackup}`)
+  }
+
+  const args = [script, storeRoot, ...ids, '--min-age-min', String(minAgeMin)]
+  if (apply) args.push('--apply', '--backup-dir', effectiveBackup as string)
+  if (mirrorTo !== undefined) args.push('--mirror-to', mirrorTo)
+  if (force) args.push('--force')
+  const r = run('node', args, { cwd: SCRIPTS_DIR, quiet: true })
+
+  interface RepairReport {
+    id: string; project?: string; artifact?: string; ageMin?: number; compressedBytes?: number
+    events?: number; patches?: Array<{ seq: number | null; added: string[] }>
+    problems?: Array<{ seq?: number | null; type?: string; reason: string }>
+    ok?: boolean; applied?: boolean; backup?: string; error?: string; note?: string; skipped?: string
+    verified?: { patchesRemaining?: number; problemsRemaining?: number; events?: number; error?: string }
+  }
+  const reports: RepairReport[] = []
+  for (const line of r.stdout.split('\n')) {
+    const t = line.trim()
+    if (!t.startsWith('{')) continue
+    try { reports.push(JSON.parse(t) as RepairReport) } catch { /* 单行解析失败不影响其余会话 */ }
+  }
+
+  if (json) {
+    console.log(JSON.stringify({ root: storeRoot, apply, backupDir: effectiveBackup ?? null, reports }, null, 2))
+  } else {
+    console.log('')
+    console.log(`[session-repair] ${apply ? '写回模式' : 'dry-run 模式（只报告，不写任何文件）'}｜root=${storeRoot}`)
+    let patched = 0
+    let failed = 0
+    for (const rep of reports) {
+      const n = rep.patches?.length ?? 0
+      if (n > 0) patched++
+      if (rep.ok !== true) failed++
+      const bits = [
+        rep.patches === undefined ? '（无报告）' : `${n} 处缺口`,
+        rep.problems !== undefined && rep.problems.length > 0 ? `${rep.problems.length} 处不可自动修` : null,
+        rep.applied === true ? `已写回${rep.verified?.patchesRemaining === 0 ? '（自检零缺口）' : `（自检残留 ${rep.verified?.patchesRemaining ?? '?'}）`}` : null,
+        rep.error ?? rep.note ?? null,
+      ].filter((x): x is string => x !== null)
+      console.log(`  ${rep.ok === true ? '✓' : '✗'} ${rep.id}（${rep.project ?? '?'}）｜${rep.artifact ?? '?'}｜${bits.join('｜')}`)
+      for (const p of rep.patches ?? []) console.log(`      seq ${p.seq ?? '?'} 补 ${p.added.join('+')}`)
+      for (const p of rep.problems ?? []) console.log(`      ⚠️ seq ${p.seq ?? '?'} ${p.type ?? ''} ${p.reason}`)
+      if (rep.backup !== undefined) console.log(`      备份: ${rep.backup}`)
+    }
+    console.log(`  合计: 有缺口 ${patched} / ${reports.length}｜未成功 ${failed}`)
+  }
+
+  if (probe) {
+    console.log('')
+    console.log('[session-repair] 复验：宿主真实读取路径（open(id,\'read\')）')
+    await runSessionProbe(storeRoot, ids.length > 0 ? new Set(ids) : undefined, json, undefined, false)
+  }
+  if (r.status !== 0 && reports.length === 0) fail(`session-repair 执行失败（exit ${r.status}）: ${r.stderr.trim().slice(0, 300)}`, 2)
+}
+
+/**
  * npm-install-dev — 安装 hooks 开发依赖（v1.24.6：二维码绑定引入 qrcode-generator）。
  * 在 HOOKS_DIR 执行 `pnpm install --save-dev <pkgs>`（hooks 是 pnpm 项目——
  * pnpm-lock.yaml + .pnpm-store，npm 与 pnpm node_modules 布局冲突会崩）；
@@ -1821,6 +1931,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       case 'restart-web': cmdRestartWeb(); break
       case 'host-upgrade': cmdHostUpgrade(rest); break
       case 'session-doctor': await cmdSessionDoctor(rest); break
+      case 'session-repair': await cmdSessionRepair(rest); break
       case 'api-status': cmdApiStatus(rest[0]); break
       case 'inspect-dsh': cmdInspectDsh(rest[0]); break
       case 'read-dsh': cmdReadDsh(rest[0], rest[1], rest[2]); break
@@ -1828,7 +1939,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       case 'dump-config': cmdDumpConfig(rest[0]); break
       case '--list':
       case 'list':
-        console.log('typecheck | typecheck-host <ver> | test [--filter] | coverage | build | status | commit <msg> | push | version | bump <ver> | deploy | npm-install [<profile>] [<version>] [<registry>] | restart-web | host-upgrade <ver|tag> [--registry <url>] [--dry-run] | session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--limit <n>] | squash-history [<msg>] | github-push [--force] | pack-check | readme-sync | publish | inspect-dsh <pattern> | host-fetch <ver> [pkg[@ver]]')
+        console.log('typecheck | typecheck-host <ver> | test [--filter] | coverage | build | status | commit <msg> | push | version | bump <ver> | deploy | npm-install [<profile>] [<version>] [<registry>] | restart-web | host-upgrade <ver|tag> [--registry <url>] [--dry-run] | session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--limit <n>] | session-repair [--root <dir>] [--session <id,...>] [--apply] [--backup-dir <dir>] [--min-age-min <n>] [--force] [--probe] [--json] | squash-history [<msg>] | github-push [--force] | pack-check | readme-sync | publish | inspect-dsh <pattern> | host-fetch <ver> [pkg[@ver]]')
         break
       case '--schema': {
         const target = rest[0] ?? 'dsh-develop'
@@ -1864,6 +1975,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   restart-web           kill + setsid 重启 dsh web（健康检查）
   host-upgrade <ver|tag> 全局升级 DSH 宿主 CLI（包名硬编码 @deepseek-ai/dsh；默认官方源；--dry-run 预览）
   session-doctor        会话日志体检（只读）：逐份判定宿主读取门（未知事件词表/格式版本/结构），列出会被拒的会话
+  session-repair        会话日志治疗（缺省 dry-run）：补 rebuild 写坏的 user/message 缺 id/role；--apply 才备份+原子替换+自检
   squash-history [msg]  抹除历史为单个初始 commit（公开发布前清敏感历史；不可逆）
   pack-check            npm pack --dry-run 核对 tarball 完整性（chunk/双 bundle/类型）
   readme-sync           包内 README ← 仓库 README（机械同步，相对链接转绝对 URL）
