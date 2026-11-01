@@ -889,3 +889,142 @@
   word-break: break-word;
   overflow-wrap: anywhere;
 }
+
+/* ── v1.111.0：把「谁盯谁」从一句话改成卡片（owner：「太丑陋了 这怎么让人看得懂呢」）──
+   旧形态 = 一整行 `2026-10-23--butler--家庭容器治理管家 盯 2026-10-20--logistics--…、…`，
+   130+ 字符塞进 420px 栏 ⇒ 截断位置恰好落在**后半批成员**上，
+   于是"它到底管哪几条"这件事在界面上**根本读不到**（不是不好看，是信息丢失）。
+   新形态 = 卡头一行（观察者 → N 个）＋ 成员各占一行 ＋ note 灰字，都是短名。 */
+.sp-subsCard {
+  flex: none;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sp-subsCardHead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 观察者名：**加粗且不截断主体**（它是这条卡片的标题） */
+.sp-subsWho {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 17px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sp-subsArrow {
+  flex: none;
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 「7 个」计数：用小徽章形状，让"它管几条"一眼可数（不必逐行数） */
+.sp-subsCount {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 99px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  font-family: var(--ds-font-family-code, monospace);
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* 成员清单：每个成员一行，前面一个淡淡的圆点（读起来是"名单"，不是段落） */
+.sp-subsMembers {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sp-subsMember {
+  position: relative;
+  padding-left: 12px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sp-subsMember::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 50%;
+  background: var(--dsw-alias-label-tertiary);
+}
+
+/* note：多行截断（3 行封顶）。它是**说明**不是数据 ⇒ 允许被截，全文走 title。
+   不给无限高度是因为 note 可以很长（管家那条 100+ 字），会把卡片撑成一整屏。 */
+.sp-subsNote {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--dsw-alias-label-tertiary);
+  border-top: 1px dashed var(--dsw-alias-border-l1);
+  padding-top: 4px;
+  margin-top: 1px;
+}
+
+/* 投递一行：左=谁（成员短名） 右=成功/失败徽章。
+   🔴 键是 `watcher←member`，旧形态把两端原始目录名拼在一起显示 ⇒ 更读不懂；
+      这里只显示**成员**（"谁跑完了"），watcher 已在上方卡片里，重复写只会挤爆。 */
+.sp-subsDelivery {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 4px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.sp-subsDlvWho {
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sp-subsDlvStat {
+  flex: none;
+  font-family: var(--ds-font-family-code, monospace);
+  font-size: 10px;
+  padding: 0 5px;
+  border-radius: 4px;
+}
+.sp-subsDlvOk {
+  color: #10b981;
+  background: color-mix(in srgb, #10b981 14%, transparent);
+}
+.sp-subsDlvBad {
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, transparent);
+}

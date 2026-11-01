@@ -92,3 +92,68 @@ describe('「轨迹订阅」块的落点：必须在 CCC 面板，且只能在�
     expect(settingsRaw.length).toBeGreaterThan(settings.length)
   })
 })
+
+/**
+ * ── v1.111.0：展示名（owner：「功能正常，但太丑陋了 这怎么让人看得懂呢」）──
+ *
+ * 🔴 这一组守的是**可读性**这个真实缺陷，不是审美偏好。旧形态把原始目录名
+ * `2026-10-23--butler--家庭容器治理管家` 直接放进 420px 窄栏 ⇒ 被截断成
+ * `2026-10-23--butler--家庭容器…`：用户看到的是一串**日期**，"谁"被挤没了。
+ * 更严重的是 note 与成员清单被拼成一个长句 ⇒ **后半批成员根本读不到**（信息丢失）。
+ */
+describe('订阅展示名：原始目录名不得直接上屏', () => {
+  /** 与 `surface/http.ts` 的 `trajectoryLabel` / 客户端 `labelOf` 同一条纯规则 */
+  function labelOf(name: string): string {
+    const m = /^\d{4}-\d{2}-\d{2}--(.*)$/.exec(name)
+    if (!m) return name
+    return (m[1] as string).replace(/--/g, ' · ')
+  }
+
+  it('目录名 → 短名：日期前缀让位，`--` 变成分隔符', () => {
+    expect(labelOf('2026-10-23--butler--家庭容器治理管家')).toBe('butler · 家庭容器治理管家')
+    expect(labelOf('2026-10-20--logistics--苏州家庭后勤与智能家居')).toBe('logistics · 苏州家庭后勤与智能家居')
+    // issue 型目录（只有 ticket，没有描述段）
+    expect(labelOf('2026-10-01--apaas-26116')).toBe('apaas-26116')
+  })
+
+  it('🔴 已经是编码 / 形态不认识 ⇒ **原样返回**（⛔ 不猜、不吞）', () => {
+    expect(labelOf('butler')).toBe('butler')
+    expect(labelOf('S142')).toBe('S142')
+    expect(labelOf('some-random-name')).toBe('some-random-name')
+  })
+
+  it('🔴 展示名必须**不含** `YYYY-MM-DD--` 前缀（这正是"看不懂"的根因）', () => {
+    const dirs = [
+      '2026-10-23--butler--家庭容器治理管家',
+      '2026-10-22--guard--中断守护',
+      '2026-10-24--desk-observer--书桌观察员',
+    ]
+    for (const d of dirs) {
+      const shown = labelOf(d)
+      expect(shown, `${d} 的展示名仍带日期前缀`).not.toMatch(/^\d{4}-\d{2}-\d{2}--/)
+      expect(shown, '展示名不得残留 `--` 分隔符').not.toContain('--')
+    }
+  })
+
+  it('🔴 服务端与客户端用**同一条**规则，且面板真的用了它（参数对 ≠ 效果达成）', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const httpCode = stripComments(readFileSync(join(here, '..', 'src', 'surface', 'http.ts'), 'utf8'))
+    // ① 服务端导出展示名函数，且**复用**既有解析（⛔ 不另写一份剥日期逻辑 —— 会长出第二真相源）
+    expect(httpCode, '服务端应有 trajectoryLabel').toContain('export function trajectoryLabel')
+    expect(httpCode, '服务端应复用既有解析函数').toContain('parseTrajectoryCode')
+    // ② 客户端有同形的纯字符串规则
+    expect(panel, '客户端应有展示名规则').toMatch(/\\d\{4\}-\\d\{2\}-\\d\{2\}--/)
+    // ③ 面板**实际使用**展示名（定义了却没接上，是本仓反复踩的形态）。
+    // 🔴 这一条最初写成 `toContain('watcherLabel')` —— 而**接口声明里就有这个词**，
+    //    于是把实现改成 `s.watcher` 它照样绿（变异检验当场抓到，D222 的假绿）。
+    //    改为钉**赋值表达式本身**：`??` 回落形式说明"优先用服务端展示名、缺了才本地算"。
+    expect(panel, '面板必须真的用 watcherLabel 渲染（钉赋值式，⛔ 不钉字段名）').toMatch(
+      /watcherLabel\s*\?\?\s*labelOf\(/,
+    )
+    expect(panel, '成员也必须用展示名（同样钉赋值式）').toMatch(/memberLabels\?\.\[j\]\s*\?\?\s*labelOf\(/)
+    // ④ 负控：旧形态"原始名 盯 原始成员名"这一整句不得复活
+    expect(panel, '不得再有「原始 watcher 名 盯 原始成员名」长句').not.toMatch(
+      /<strong>\{s\.watcher\}<\/strong>\s*盯/,
+    )
+  })
+})

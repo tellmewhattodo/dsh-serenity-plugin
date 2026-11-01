@@ -19,6 +19,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { hostService, hostSessions } from '../host/access.js'
 import { getStatus, setSafeMode } from './status.js'
 import { DEFAULT_SERENITY_CONFIG_PATHS, readTrajectorySubscriptions } from '../kernel/ccc.js'
+import { parseTrajectoryCode, trajectoryDescOf } from '../trajectory/core.js'
 import { subscriptionStats, subscriptionEval } from '../trajectory/subscriptions.js'
 // C2（CCC 发现面归一）：L1 单根解析 / L2 枚举一律问 ccc-roots（本文件不再自写上溯包裹）
 import { cccRootForCwd, listCccs } from '../kernel/ccc-roots.js'
@@ -132,6 +133,28 @@ function sendJson(res: ServerResponse, code: number, body: unknown): void {
   const payload = JSON.stringify(body)
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(payload)
+}
+
+/**
+ * 轨迹的**展示名**（v1.111.0）：`2026-10-23--butler--家庭容器治理管家` → `butler · 家庭容器治理管家`。
+ *
+ * 🔴 为什么要它（owner 原话：「功能正常，但太丑陋了 这怎么让人看得懂呢」）：
+ *   面板是 420px 窄栏，而原始目录名 20+ 字符 ⇒ 被截断成 `2026-10-23--butler--家庭容器…`，
+ *   用户看到的是**一串日期**，而身份信息（谁）被挤到看不见的地方。
+ *   日期前缀是**排序/归档信息，不是身份** ⇒ 展示时让位。
+ *
+ * 判据：解析走 {@link parseTrajectoryCode} / {@link trajectoryDescOf} 两个**既有**函数
+ *   —— 它们与 `create --id` 的写入侧同源（互逆）。⛔ 不在这里另写剥日期的正则：
+ *   那会长出第二份会漂的实现（同 `resolveWorkspace` 那条纪律）。
+ *
+ * @param name 轨迹编码（`S142` / `butler`）**或** AGENT_SESSIONS 目录名（配置里两种都允许）
+ * @returns 展示名；解析不出（不是目录名形态）⇒ **原样返回**（不吞信息，也不假装认识它）
+ */
+export function trajectoryLabel(name: string): string {
+  const code = parseTrajectoryCode(name)
+  if (code === null) return name // 已经是编码，或形态不认识 ⇒ 原样（⛔ 不猜）
+  const desc = trajectoryDescOf(name)
+  return desc === '' ? code : `${code} · ${desc}`
 }
 
 /**
@@ -429,8 +452,22 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
         const { subs, problems } = root ? readTrajectorySubscriptions(root) : { subs: [], problems: [] }
         sendJson(res, 200, {
           root,
-          subscriptions: subs.map((s) => ({ watcher: s.watcher, members: s.members, note: s.note ?? null })),
+          // 🔴 每条轨迹同时给**原始名**与**展示名**（v1.111.0，owner：面板「太丑陋了…怎么让人看得懂呢」）。
+          //    原始目录名形如 `2026-10-23--butler--家庭容器治理管家`（20+ 字符）⇒ 在 420px 窄栏里
+          //    被 `text-overflow: ellipsis` 截成一团，**看不懂谁盯谁**。
+          //    展示名 = 编码（`butler`）＋ `--` 之后的描述（`家庭容器治理管家`），日期前缀是**排序信息**，不是身份。
+          //    ⚠️ 解析用 `trajectory/core.ts` 的既有函数（`parseTrajectoryCode` / `trajectoryDescOf`）——
+          //    ⛔ 不在这里另写一份"剥日期"的逻辑：那会长出第二份会漂的实现（同 `resolveWorkspace` 的理由）。
+          //    ⚠️ 原始名**仍然保留**：配置里写的就是它，用户要按它去 serenity.json 改。
+          subscriptions: subs.map((s) => ({
+            watcher: s.watcher,
+            members: s.members,
+            note: s.note ?? null,
+            watcherLabel: trajectoryLabel(s.watcher),
+            memberLabels: s.members.map((m) => trajectoryLabel(m)),
+          })),
           problems,
+          // 投递键是 `watcher←member`（两端都是原始名）；展示名在面板侧按同一函数解析。
           deliveries: subscriptionStats(),
           // 🔴 评估计数：回答「**这个机制到底有没有在跑**」。
           //    只有 deliveries 时，「没装配」与「装配了但从未命中」在面板上完全同形（都空）。

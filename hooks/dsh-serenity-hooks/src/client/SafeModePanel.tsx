@@ -90,8 +90,15 @@ const API = '/serenity/status'
  */
 interface SubscriptionsWire {
   root: string
-  /** 配置的订阅（**意图**：谁盯谁） */
-  subscriptions: Array<{ watcher: string; members: string[]; note: string | null }>
+  /** 配置的订阅（**意图**：谁盯谁）。原始名（配置里的写法）＋ 展示名（人读的短名）都带。 */
+  subscriptions: Array<{
+    watcher: string
+    members: string[]
+    note: string | null
+    /** 展示名：`butler · 家庭容器治理管家`（缺省回落到原始名 —— 老后端不返回该字段时不崩） */
+    watcherLabel?: string
+    memberLabels?: string[]
+  }>
   /** 配置坏项（配了但不生效 —— 必须显形） */
   problems: string[]
   /** 投递读数（**实际**：发生了没有；键 = `watcher←member`） */
@@ -104,6 +111,31 @@ interface SubscriptionsWire {
     turnFinished: number
     skips: Record<string, number>
   }
+}
+
+/**
+ * 轨迹名 → 展示名（v1.111.0）。
+ *
+ * 🔴 **为什么需要它**（owner 原话：「功能正常，但太丑陋了 这怎么让人看得懂呢」）：
+ *   原始目录名 `2026-10-23--butler--家庭容器治理管家` 在 420px 窄栏里被截断成
+ *   `2026-10-23--butler--家庭容器…` —— 用户看到的是一串**日期**，而"谁"被挤没了。
+ *   日期前缀是**排序/归档信息，不是身份** ⇒ 展示时让位。
+ *
+ * 规则与 `surface/http.ts` 的 `trajectoryLabel` **同源**（剥 `YYYY-MM-DD--`，`--` → ` · `）。
+ * ⚠️ 这里是**纯字符串**副本，刻意不在 client bundle 里引入 node 侧的 `trajectory/core.ts`；
+ *   若展示规则哪天变复杂（要查盘/要本地化）⇒ **必须改为服务端下发**，别让两份规则漂。
+ */
+function labelOf(name: string): string {
+  const m = /^\d{4}-\d{2}-\d{2}--(.*)$/.exec(name)
+  if (!m) return name
+  return (m[1] as string).replace(/--/g, ' · ')
+}
+
+/** 投递键 `watcher←member` → 两端展示名 */
+function splitDeliveryKey(key: string): { watcher: string; member: string } {
+  const at = key.indexOf('←')
+  if (at === -1) return { watcher: labelOf(key), member: '' }
+  return { watcher: labelOf(key.slice(0, at)), member: labelOf(key.slice(at + 1)) }
 }
 
 const SUBSCRIPTIONS_API = '/serenity/subscriptions'
@@ -578,9 +610,11 @@ function SubscriptionsView(props: {
     <div className={cx('sp-subs')}>
       <div className={cx('sp-subsBar')}>
         <button type="button" className={cx('sp-subsBtn')} disabled={busy} onClick={onRefresh}>
-          {busy ? '读取中…' : '刷新读数'}
+          {busy ? '读取中…' : '刷新'}
         </button>
-        <span className={cx('sp-subsHint')}>计数只在宿主进程内有效（重启清零）</span>
+        <span className={cx('sp-subsHint')} title="投递计数只存在于宿主进程内存，重启即清零">
+          计数重启清零
+        </span>
       </div>
 
       {error !== null && <p className={cx('sp-subsError')}>⚠ {error}</p>}
@@ -595,52 +629,82 @@ function SubscriptionsView(props: {
             </p>
           )}
 
-          <div className={cx('sp-subsSectionTitle')}>配置（意图：谁盯谁）</div>
+          {/* ── 一、谁盯谁（意图）──
+              形态 = **一张卡一件事**：首行 `观察者 → 成员…`，次行 note。
+              🔴 为什么不是「一句话把所有成员拼起来」：butler 盯 7 条 ⇒ 那行 130+ 字符，
+                 在 420px 栏里必然截断，而**截断处恰好是后半批成员**（看不见 = 不知道它在管谁）。
+                 改成卡片后每个成员占一行，读起来是清单，不是一个长句子。 */}
+          <div className={cx('sp-subsSectionTitle')}>谁盯谁（配置）</div>
           {data.subscriptions.length === 0 ? (
             <p className={cx('sp-panelEmpty')}>
-              未配置任何订阅 —— 在 .opencode/serenity.json 里写 trajectorySubscriptions
+              未配置 —— 在 .opencode/serenity.json 的 trajectorySubscriptions 里写
             </p>
           ) : (
-            <ul className={cx('sp-list')} role="tabpanel">
-              {data.subscriptions.map((s, i) => (
-                <li key={`${s.watcher}-${i}`} className={cx('sp-item')}>
-                  <span className={cx('sp-itemName', 'sp-itemNameFull')} title={`${s.watcher} 盯 ${s.members.join('、')}`}>
-                    <strong>{s.watcher}</strong> 盯 {s.members.join('、')}
-                    {s.note !== null ? `（${s.note}）` : ''}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            data.subscriptions.map((s, i) => {
+              const wLabel = s.watcherLabel ?? labelOf(s.watcher)
+              return (
+                <div key={`${s.watcher}-${i}`} className={cx('sp-subsCard')}>
+                  <div className={cx('sp-subsCardHead')} title={`观察者：${s.watcher}`}>
+                    <span className={cx('sp-subsWho')}>{wLabel}</span>
+                    <span className={cx('sp-subsArrow')}>→</span>
+                    <span className={cx('sp-subsCount')}>{s.members.length} 个</span>
+                  </div>
+                  <ul className={cx('sp-subsMembers')}>
+                    {s.members.map((m, j) => (
+                      <li key={m} className={cx('sp-subsMember')} title={m}>
+                        {s.memberLabels?.[j] ?? labelOf(m)}
+                      </li>
+                    ))}
+                  </ul>
+                  {s.note !== null && (
+                    <div className={cx('sp-subsNote')} title={s.note}>
+                      {s.note}
+                    </div>
+                  )}
+                </div>
+              )
+            })
           )}
 
-          <div className={cx('sp-subsSectionTitle')}>投递（实际：发生了没有）</div>
+          {/* ── 二、投递（实际）──
+              🔴 键 `watcher←member` 也拆开美化：否则这一栏是 `2026-10-23--butler--…←2026-10-22--guard--…`
+                 这种**两个长目录名拼在一起**，比上面那行更看不懂。 */}
+          <div className={cx('sp-subsSectionTitle')}>投递（实际发生过）</div>
           {data.deliveries.length === 0 ? (
             <p className={cx('sp-panelEmpty')}>
-              本进程内还没有任何投递 —— 配了但没出现 = 还没触发过，不等于在工作
+              还没投递过 —— 配了但没出现＝还没触发，不等于在工作
             </p>
           ) : (
-            <ul className={cx('sp-list')} role="tabpanel">
-              {data.deliveries.map((d) => (
-                <li key={d.key} className={cx('sp-item')}>
-                  <span className={cx('sp-itemName', 'sp-itemNameFull')} title={d.lastError ?? d.key}>
-                    {d.key}：成功 {d.ok} ／ 失败 {d.failed}
-                    {d.failed > 0 && <span className={cx('sp-subsError')}>　⚠ {d.lastError ?? '（无说明）'}</span>}
-                  </span>
-                </li>
-              ))}
+            <ul className={cx('sp-subsMembers')}>
+              {data.deliveries.map((d) => {
+                const { watcher, member } = splitDeliveryKey(d.key)
+                return (
+                  <li key={d.key} className={cx('sp-subsDelivery')} title={d.lastError ?? d.key}>
+                    <span className={cx('sp-subsDlvWho')}>{member || watcher}</span>
+                    <span className={cx('sp-subsDlvStat', d.failed > 0 ? 'sp-subsDlvBad' : 'sp-subsDlvOk')}>
+                      {d.failed > 0 ? `失败 ${d.failed}` : `成功 ${d.ok}`}
+                    </span>
+                  </li>
+                )
+              })}
             </ul>
           )}
 
+          {/* ── 三、机制（在跑吗）──
+              这段是**背景读数**，压成两行小字；重要性与上面两张清单不同，所以视觉层级更低。 */}
           <div className={cx('sp-subsSectionTitle')}>机制（在跑吗）</div>
           <p className={cx('sp-subsMeter')}>
-            收到 agent/status {data.eval.statusEvents} 次 ｜ running {data.eval.runningSeen} ／ idle{' '}
+            收到状态事件 {data.eval.statusEvents} 次 ｜ 认出在跑 {data.eval.runningSeen} ／ 空闲{' '}
             {data.eval.idleSeen} ｜ 判成一轮结束 {data.eval.turnFinished}
-            {Object.keys(data.eval.skips).length > 0 &&
-              ` ｜ 跳过 ${Object.entries(data.eval.skips).map(([k, v]) => `${k}=${v}`).join('、')}`}
           </p>
+          {Object.keys(data.eval.skips).length > 0 && (
+            <p className={cx('sp-subsMeter')}>
+              跳过：{Object.entries(data.eval.skips).map(([k, v]) => `${k}×${v}`).join('、')}
+            </p>
+          )}
           {data.eval.statusEvents === 0 && (
             <p className={cx('sp-panelEmpty')}>
-              ⚠ 一次 agent/status 都没收到 —— 可能此刻没人跑轮次，也可能订阅未装配；两者在读数上同形。
+              ⚠ 一次状态事件都没收到 —— 此刻没人跑轮次，或订阅未装配；两者读数同形。
             </p>
           )}
         </div>
