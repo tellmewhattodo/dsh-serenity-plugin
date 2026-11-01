@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { runKit } from '../src/tools/kit/service.js'
+import { runKit, KIT_ACTIONS } from '../src/tools/kit/service.js'
 // C5（2026-09-15）：`checkRegistryHealth` 迁入 container-status（唯一取数出口；实现逐字未变）
 import { checkRegistryHealth } from '../src/surface/observation.js'
 import { runGit } from '../src/tools/git/service.js'
@@ -67,6 +67,25 @@ describe('kit-ops', () => {
     await expect(runKit(dir, { action: 'wait', seconds: 0 })).rejects.toThrow(/positive integer/)
     // 负秒数拒绝
     await expect(runKit(dir, { action: 'wait', seconds: -1 })).rejects.toThrow(/positive integer/)
+  })
+
+  // 🔴 v1.106.0：`diag` 动作（原独立工具 acc-diag 并入）。
+  //    这一组钉的是**接线**，不是诊断内容本身（内容见 `diag.test.ts`）——
+  //    两个失败面必须分开测：① 动作声明了但分支没接 ⇒ 落到 default 抛 "Unknown action"
+  //    ② 没有 ctx 却静默返回空报告（"零 live 会话"与"读不了"同形，D233）
+  it('🔴 diag 已接线：不落到 default 的 "Unknown action"（KIT_ACTIONS 与 switch 同真源）', async () => {
+    const out = (await runKit(dir, { action: 'diag' }, {})) as string
+    expect(typeof out).toBe('string')
+    expect(out).toContain('ACC 运行态诊断')
+    expect(out).not.toContain('Unknown action')
+  })
+
+  it('🔴 diag 缺 ctx ⇒ 响亮失败，⛔ 不返回空报告（"读不了"不得冒充"没有"）', async () => {
+    await expect(runKit(dir, { action: 'diag' })).rejects.toThrow(/plugin context/i)
+  })
+
+  it('KIT_ACTIONS 含 diag 且与 switch 分支一致（防"声明了但没接"）', () => {
+    expect(KIT_ACTIONS).toContain('diag')
   })
 
   it('wait 1 秒耗时 ≥ 约 1 秒', async () => {

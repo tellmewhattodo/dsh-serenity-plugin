@@ -20,7 +20,7 @@ function renderText(value: unknown): ContentBlock[] {
 export function createKitTool(ctx: Context) {
   return defineTool({
     name: 'dashboard',
-    description: 'Dashboard — always-on container instruments (works any time, no side effects): health (CCC three-principle check P1/P2/config + MSM registry integrity + host-contract probe, healthy/degraded) / time (now_iso/now_local/epoch_ms) / wait (wait N seconds, default 1). Routine self-check before entering a CCC.',
+    description: 'Dashboard — always-on container instruments (works any time, no side effects): health (CCC three-principle check P1/P2/config + MSM registry integrity + host-contract probe, healthy/degraded) / time (now_iso/now_local/epoch_ms) / wait (wait N seconds, default 1) / diag (ACC runtime diagnosis, read-only: live sessions across all CCCs / wake scheduler clock / CRO-enabled trajectories / wake registry split into future vs overdue / trajectory-subscription delivery readings). Routine self-check before entering a CCC.',
     parameters: {
       action: { type: 'string', enum: [...KIT_ACTIONS], required: true, description: 'Subcommand' },
       seconds: { type: 'integer', description: 'Seconds to wait (positive integer, default 1)' },

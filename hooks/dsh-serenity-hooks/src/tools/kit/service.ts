@@ -23,9 +23,9 @@
 import type { JsonValue } from '../../kernel/json.js'
 import { isoLocal } from '../../kernel/time.js'
 
-type KitAction = 'health' | 'time' | 'wait'
+type KitAction = 'health' | 'time' | 'wait' | 'diag'
 
-export const KIT_ACTIONS: readonly KitAction[] = ['health', 'time', 'wait']
+export const KIT_ACTIONS: readonly KitAction[] = ['health', 'time', 'wait', 'diag']
 
 interface KitArgs {
   action: KitAction
@@ -97,6 +97,18 @@ export async function runKit(root: string | null, args: KitArgs, hostCtx?: unkno
       }
       await new Promise((r) => setTimeout(r, seconds * 1000))
       return `waited ${seconds}s`
+    }
+    case 'diag': {
+      // 原 `acc-diag` 工具整体并入（owner 2026-11-01 裁「方案 C」）。
+      // 🔴 动态 import：`diag/service.ts` 静态链带 `cro/core.js` → node:fs 等，
+      //    而本模块的约定是**零 DSH 依赖**（见文件头）；动态 import 保持这条边界。
+      // ⚠️ 需要 `hostCtx`（Context）才能读 live 会话 —— 无 ctx 时**响亮失败**，
+      //    ⛔ 不返回空报告（"零个 live 会话"与"读不了"在阅读面上同形，D233）。
+      if (hostCtx === undefined) {
+        throw new Error('diag requires the plugin context (live session data unavailable without it)')
+      }
+      const { runDiag, renderDiag } = await import('../diag/service.js')
+      return renderDiag(await runDiag(hostCtx as never, root ?? ''))
     }
     default:
       throw new Error(`Unknown action: ${args.action as string}`)

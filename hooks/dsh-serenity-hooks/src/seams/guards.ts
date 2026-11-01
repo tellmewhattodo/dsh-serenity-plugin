@@ -18,7 +18,6 @@ import {
   readBlacklist,
   pathInside,
   readCccName,
-  readExclusiveTools,
   readSafeModeHiddenTools,
   type BlacklistRule,
 } from '../kernel/ccc.js'
@@ -318,7 +317,7 @@ export function computeVisibilitySources(sessionId: string, root: string | null)
 
   // 非 CCC 时其余五源都没有意义（没有 CCC 就没有配置可读）⇒ 显式记空
   if (root === null) {
-    for (const id of ['safeMode', 'imBridge', 'exclusive', 'hostSchedule', 'trajectoryConstraint'] as const) {
+    for (const id of ['safeMode', 'imBridge', 'hostSchedule', 'trajectoryConstraint'] as const) {
       out.push({ id, deny: [], ok: false })
     }
     return out
@@ -361,13 +360,13 @@ export function computeVisibilitySources(sessionId: string, root: string | null)
     ),
   )
 
-  // ④ 专属工具：未声明 ⇒ 隐藏（fail-closed）
-  out.push(
-    sourceOf('exclusive', () => {
-      const declared = readExclusiveTools(root)
-      return { deny: EXCLUSIVE_TOOL_NAMES.filter((t) => !declared.includes(t)) }
-    }),
-  )
+  // ④ （原「专属工具」源已于 v1.106.0 删除 —— owner 2026-11-01 裁「机制整体删」）
+  //    原语义：`EXCLUSIVE_TOOL_NAMES` 里的名字要 CCC 在 `exclusiveTools` 点名才可见（fail-closed）。
+  //    删除理由（刻意的，不是顺手）：那张表**永远只有一个成员** `acc-diag`，而它已并入常驻的
+  //    `dashboard`。表空之后 `filter` 恒回 `[]` ⇒ 机制**静默空转、且任何测试都证伪不了它**
+  //    （一个验不出死活的机制比没有它更坏：它提供"这里还有一层保护"的错觉）。
+  //    ⚠️ 连带：CCC 配置键 `exclusiveTools` 同批删除（见 `kernel/ccc.ts`）。
+  //    ⛔ 别为了"将来可能还要专属工具"把它留下 —— 将来再加时重建的成本低于长期养死代码。
 
   // ⑤ 宿主定时器工具：CCC 内一律屏蔽（owner 2026-10-17 令：与 CRO 冲突）
   out.push(sourceOf('hostSchedule', () => ({ deny: [...HOST_SCHEDULE_TOOL_NAMES] })))
@@ -383,6 +382,11 @@ export function computeVisibilitySources(sessionId: string, root: string | null)
       return { deny: REGISTERED_TOOLS.filter((n) => !allowed.has(n)) }
     }),
   )
+
+  // ⑦ 常驻拒绝表：与安全模式**无关**，任何 CCC、任何时刻都藏（v1.106.0）
+  //    ⚠️ 放在 exclusive 之后、其余之后都行——本模块只做并集，顺序不影响结果；
+  //    放在这里是为了让"常驻项"与"条件项"在源码上仍读得出来是两回事。
+  out.push(sourceOf('alwaysDeny', () => ({ deny: [...ALWAYS_DENY_TOOLS] })))
 
   return out
 }
@@ -414,6 +418,27 @@ function resolveAgentCwd(exec: ToolExecution): string {
  * 它**恒隐**、与 CCC 配置无关；CCC 声明的 `safeMode.hiddenTools` 是**附加**项（见下）。
  */
 const SAFE_MODE_DENY_TOOLS = ['bash']
+
+/**
+ * **常驻拒绝表** —— 与安全模式**无关**，任何 CCC、任何时刻都隐藏（v1.106.0，owner 2026-11-01 令）。
+ *
+ * 为什么与 `SAFE_MODE_DENY_TOOLS` 分开成两张表（而不是往那张里加一项）：
+ * 那张表的**名字即语义**——"安全模式期间的附加拒绝"。把常驻项塞进去会让"名字与行为不符"，
+ * 而这类错位**没有机械信号**（D151：退役/错位的开关零信号）。⇒ 两张表、两条来源，各说各的。
+ *
+ * ## 首个条目：`ask_user_question`
+ *
+ * owner 原话（2026-11-01）：**「宁静号追求更高程度的自动化和轨迹协作，这种阻塞性的东西会降低效率」**
+ * ⇒ 它会让一轮停下来等人回答，与"轨迹自驱 + 轨迹间协作"直接冲突。
+ *
+ * ⚠️ **边界（诚实标注，D255）**：
+ *  - 本表是**藏**（`tools.restrict({deny})` 让模型看不见），**不是禁** —— 它不阻止经别的路径调用。
+ *    要真禁得住需在 tool-call 层拦截，那是另一件事，不在本次范围。
+ *  - 它**不依赖** `.serenity-safe-on`：安全模式关着也照样藏。
+ *  - 宿主若不认识某个名字，`applyVisibilityDecision` 会从它的错误里解析并只剔掉那几个
+ *    （⇒ 本表写错一个名字**不会**连累其它来源，也不会静默冻结）。
+ */
+const ALWAYS_DENY_TOOLS = ['ask_user_question'] as const
 
 /**
  * agent key → 安全模式下的隐藏状态（v1.51.4：由"一次性 disposer"升级为"签名 ＋ 实际 deny ＋ disposer"）。
@@ -541,22 +566,10 @@ const HOST_SCHEDULE_TOOL_NAMES = [
 ] as const
 
 /**
- * ACC 注册但**默认对所有 CCC 隐藏**的专属工具清单。
- *
- * 语义（通用机制，不绑定任何具体 CCC）：只有在 CCC 的 `.opencode/serenity.json`
- * `exclusiveTools` 里**显式声明**过的名字才可见——ACC 侧不出现 CCC 的名字（D23）。
- * 与 im-bridge 的区别：im-bridge 是"配置了通道才可见"（能力由 CCC 配置决定），
- * 本族是"被点名才可见"（能力归属 ACC 负责人）。
+ * （已删除）原「专属工具」表 `EXCLUSIVE_TOOL_NAMES` 与 `exclusiveRestrictions` / 
+ * `getExclusiveToolsDiagnostics` —— v1.106.0 随 `exclusiveTools` 机制整体删除。
+ * 删除理由见 {@link computeVisibilitySources} ④ 处的注释（空表不可证伪）。
  */
-const EXCLUSIVE_TOOL_NAMES = ['acc-diag'] as const
-
-/** `${sessionId}::${toolName}` → restrict disposer */
-const exclusiveRestrictions = new Map<string, () => void>()
-
-/** 专属工具隐藏诊断（排查"工具为什么不在清单里"） */
-export function getExclusiveToolsDiagnostics(): { hidden: string[] } {
-  return { hidden: [...exclusiveRestrictions.keys()] }
-}
 
 // ── 轨迹约束工具面：可见性同步（owner 2026-10-19 令「工具清单也要热加载」）──
 

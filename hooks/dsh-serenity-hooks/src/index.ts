@@ -49,6 +49,7 @@ import { registerOutputGuardHook } from './guard/seam.js'
 import { migrateLegacyLocalstore, globalConfigPath } from './kernel/config.js'
 import { registerWakeScheduler } from './wake/scheduler.js'
 import { registerCroTurnTracking } from './cro/turns.js'
+import { registerTrajectorySubscriptions, defaultSubscriptionDeps } from './trajectory/subscriptions.js'
 import { registerWeixinBridge } from './im/bridge.js'
 import { registerWeixinSendApi } from './im/send.js'
 import { registerWeixinOutputGuard } from './im/guard.js'
@@ -60,7 +61,6 @@ import { registerImChannel } from './im/channels.js'
 import { weixinChannel } from './im/weixin-channel.js'
 import { feishuChannel } from './im/feishu-channel.js'
 import { createImBridgeTool } from './tools/im-bridge.js'
-import { createAccDiagTool } from './tools/diag/index.js'
 import { createDiagramTool } from './tools/diagram.js'
 // §0L（S142 2026-09-19）：绑定载体迁到宿主存储域——装载期开域 + 注入句柄 + 一次性迁移
 import { openBindingDomain, bindingStore } from './host/storage-domain.js'
@@ -402,9 +402,9 @@ export function apply(ctx: Context, config: Config): void {
     ctx.tools.register(createContainerAdminTool(ctx))
     // v1.31.0：IM 消息发送（条件可见——本 CCC 未配置任何 IM 通道时由 guards 移除）
     ctx.tools.register(createImBridgeTool())
-    // v1.33：运行态诊断（**专属工具**——默认对所有 CCC 隐藏，只有在自己配置的
-    // `exclusiveTools` 里声明的 CCC 可见；由 guards 逐 agent restrict）
-    ctx.tools.register(createAccDiagTool(ctx))
+    // ⚠️ v1.106.0：原 `acc-diag`（专属工具）**已整体并入 `dashboard` 的 `diag` 动作**
+    // （owner 2026-11-01 裁「方案 C」）——连 `exclusiveTools` 机制一起删除。
+    // ⇒ 这里**不再注册**任何诊断工具；`dashboard` 是常驻的，诊断入口随之对所有轨迹可见。
   }
   if (config.guards) {
     registerGuards(ctx, { configPaths: config.serenityConfigPaths })
@@ -498,6 +498,16 @@ export function apply(ctx: Context, config: Config): void {
   // 永不因闸跳过；tick 内**另一层**总闸是 CRO 阶段的 `croEnabled`（只停 CRO，**不影响**本注册表
   // 投递）。这是 ACC 唯一的轨迹调度机制。
   registerWakeScheduler(ctx)
+  // 🆕 v1.107.0 轨迹消息订阅（owner 2026-11-01 令）：观察者盯一组轨迹，
+  // **任一成员「一轮结束」就通知观察者**。⚠️ 它是**通知不是控制** —— 不带"它做了什么"，
+  // 也不赋予指挥权。判据复用 `agent/status` running→idle（D244 已定死：turn-stopping 不是轮结束），
+  // ⛔ 不另立判据。配置 = `.opencode/serenity.json` 的 `trajectorySubscriptions`。
+  // 🔴 放在 `registerWakeScheduler` **之后**：订阅的投递走调度器的 `sendToCognitiveTrajectory`，
+  //    时钟先武装再挂订阅，避免"事件来了但投递通道还没起"的窗口。
+  // ⚠️ **root 不在装配期固定**：一个宿主进程可能服务多个 CCC（实测 3 个），
+  //    装配期只拿得到一个根 ⇒ 必然错。⇒ 每次事件按**该会话自己的 cwd** 解析根
+  //    （注入 `rootForSession`，见下方 `defaultSubscriptionDeps`）。
+  registerTrajectorySubscriptions(ctx, defaultSubscriptionDeps(ctx))
   // F4c-3 微信桥（v1.27.0 实验性）：CCC 级配置（serenity.json weixin + localstore 凭据）→
   // 多账号 iLink 轮询 + 消息路由到 轨迹约束 role。enabled=false 未配置 → 零资源占用。
   registerWeixinBridge(ctx)

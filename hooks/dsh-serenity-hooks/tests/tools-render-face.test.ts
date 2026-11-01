@@ -44,7 +44,6 @@ import { localstoreTool } from '../src/tools/localstore/index.js'
 import { createKitTool } from '../src/tools/kit/index.js'
 import { createContainerAdminTool } from '../src/tools/container-admin.js'
 import { createImBridgeTool } from '../src/tools/im-bridge.js'
-import { createAccDiagTool } from '../src/tools/diag/index.js'
 import { createOntologyTool } from '../src/tools/ontology-eng.js'
 
 /** 单个内容块的**结构性**视图（本件只关心 `type` 与 `text`，不引宿主类型） */
@@ -85,7 +84,7 @@ function renderOf(tool: unknown, label: string): (args: unknown, value: unknown)
   return out.render as (args: unknown, value: unknown) => Block[]
 }
 
-/** 9 个靶（schema 决定"非字符串值"是否属契约内 —— 见文件头；🔴 2026-10-28 cheap-worker 下线 ⇒ 10→9） */
+/** 8 个靶（schema 决定"非字符串值"是否属契约内 —— 见文件头；🔴 2026-10-28 cheap-worker 下线 ⇒ 10→9；v1.106.0 acc-diag 并入 dashboard diag ⇒ 9→8） */
 const TOOLS: Array<{ label: string; schema: 'string' | 'json'; make: () => unknown }> = [
   { label: 'praxis', schema: 'string', make: () => praxisTool },
   { label: 'cc-fs', schema: 'json', make: () => ccFsTool },
@@ -94,16 +93,15 @@ const TOOLS: Array<{ label: string; schema: 'string' | 'json'; make: () => unkno
   { label: 'dashboard（kit）', schema: 'json', make: () => createKitTool(ctx) },
   { label: 'container_admin', schema: 'json', make: () => createContainerAdminTool(ctx) },
   { label: 'im-bridge', schema: 'json', make: () => createImBridgeTool() },
-  { label: 'acc-diag', schema: 'json', make: () => createAccDiagTool(ctx) },
   // v1.52（D121）：本体工程引擎。**schema 刻意是 string 而非 json** —— 引擎报告是多行 Markdown 式，
   // 走 json 会被 `JSON.stringify` 把换行转义成 `\n`（模型读到的是一坨转义串）。见 `ontology-eng.ts` 的 receiptOf。
   { label: 'ontology', schema: 'string', make: () => createOntologyTool() },
 ]
 
 describe('tools/*：`output.render` 通路（⑤ 第 32 件）', () => {
-  it('🔴 可达性自证：9 个工具对象都真的暴露 output.render（本件全部断言的前提）', () => {
-    // ⚠️ 扫描域自证：先钉"靶确实是 9 个"，否则"零个不合格"会永远绿（同 §3-9 #7 的写法）
-    expect(TOOLS).toHaveLength(9)
+  it('🔴 可达性自证：8 个工具对象都真的暴露 output.render（本件全部断言的前提）', () => {
+    // ⚠️ 扫描域自证：先钉"靶确实是 8 个"，否则"零个不合格"会永远绿（同 §3-9 #7 的写法）
+    expect(TOOLS).toHaveLength(8)
     const unreachable = TOOLS.filter((t) => {
       try {
         renderOf(t.make(), t.label)

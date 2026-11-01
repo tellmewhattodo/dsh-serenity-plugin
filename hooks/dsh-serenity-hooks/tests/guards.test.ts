@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -423,34 +423,68 @@ describe('guards: im-bridge 条件可见（源 = computeVisibilitySources.imBrid
     expect(denyOf('imBridge', dir)).toEqual([])
   })
 })
-describe('guards: 专属工具条件可见（源 = computeVisibilitySources.exclusive）', () => {
-  function writeConfig(v: unknown): void {
+describe('guards: 常驻拒绝表（源 = computeVisibilitySources.alwaysDeny，v1.106.0）', () => {
+  // owner 2026-11-01 令：ask_user_question 是阻塞式提问，与「自动化 + 轨迹协作」冲突
+  //   ⇒ 常驻隐藏，**与安全模式无关**。
+  // 🔴 本组的主判据是**第二、三条**（安全模式开关都不改变本源的集合）——那是本机制区别于
+  //    `safeMode.hiddenTools` 的**唯一那一维**。只测"藏了"会被 safeMode 的实现顺手满足（假绿）。
+
+  it('CCC 内 ⇒ 恒贡献 deny ask_user_question', () => {
+    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
+  })
+
+  it('🔴 安全模式**关着**：safeMode 源为空，而 alwaysDeny 仍非空（解耦判据）', () => {
+    const safeOn = join(dir, '.serenity-safe-on')
+    if (existsSync(safeOn)) rmSync(safeOn)
+    // 正控：关掉安全模式后 safeMode 源确实退化为空（证明下面那条非空不是"安全模式恰好开着"）
+    expect(denyOf('safeMode', dir)).toEqual([])
+    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
+  })
+
+  it('🔴 安全模式**开着**也不会被并进 safeMode 那张表（两表分离判据）', () => {
+    writeFileSync(join(dir, '.serenity-safe-on'), 'on')
+    // 正控：安全模式开着时基础表生效
+    expect(denyOf('safeMode', dir)).toContain('bash')
+    // 🔴 主断言：ask_user_question **不得**出现在 safeMode 源 ——
+    //    若它出现在那里，说明被错放进 SAFE_MODE_DENY_TOOLS，于是"与安全模式无关"就假了
+    //    （D151：错放没有机械信号，只有这条断言能抓住它）
+    expect(denyOf('safeMode', dir)).not.toContain('ask_user_question')
+    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
+  })
+
+  it('CCC 的 hiddenTools 声明改变不了本源的集合（本源不读配置）', () => {
+    writeFileSync(join(dir, '.serenity-safe-on'), 'on')
     mkdirSync(join(dir, '.opencode'), { recursive: true })
-    writeFileSync(join(dir, '.opencode', 'serenity.json'), JSON.stringify({ exclusiveTools: v }))
-  }
-
-  it('未声明（字段缺失）→ deny acc-diag', () => {
-    writeConfig(undefined)
-    expect(denyOf('exclusive', dir)).toEqual(['acc-diag'])
+    // 故意声明**别的**工具：本源的集合必须纹丝不动
+    writeFileSync(
+      join(dir, '.opencode', 'serenity.json'),
+      JSON.stringify({ safeMode: { hiddenTools: ['workflow'] } }),
+    )
+    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
   })
 
-  it('声明 ["acc-diag"] → 不隐藏（工具可见）', () => {
-    writeConfig(['acc-diag'])
-    expect(denyOf('exclusive', dir)).toEqual([])
-  })
-
-  it('非字符串项被忽略（只认字符串工具名）', () => {
-    writeConfig(['acc-diag', 42, null, '  '])
-    expect(denyOf('exclusive', dir)).toEqual([])
-  })
-
-  it('🔴 配置损坏 → fail-closed（专属工具默认不可见）', () => {
-    mkdirSync(join(dir, '.opencode'), { recursive: true })
-    writeFileSync(join(dir, '.opencode', 'serenity.json'), '{ bad')
-    const src = computeVisibilitySources('s-test', dir).find((x) => x.id === 'exclusive')!
-    expect([...src.deny]).toEqual(['acc-diag'])
+  it('非 CCC（root=null）⇒ 本源缺席，且插件整体退让（不干预宿主工具）', () => {
+    // 🔴 这是一条**边界判据**，不是"藏住了"的判据，别读反：
+    //    非 CCC 时 `computeVisibilitySources` 在 ① 之后早返回，⑦ 根本不发射。
+    //    而 ① 的 deny 是 `[...REGISTERED_TOOLS]`（ACC 自己的 14 个工具），
+    //    **不含** `ask_user_question` —— 它是 DSH 宿主工具，不归 ACC 登记。
+    // ⇒ 事实：**在 CCC 之外，本插件不干预 ask_user_question**（与"插件在非 CCC 时整体退让、
+    //    只藏自己那批工具"一致）。owner 的令针对的是"宁静号里的阻塞式提问"，
+    //    非 CCC 不是 ACC 的管辖面。若将来要在非 CCC 也拦，必须把 ⑦ 提到早返回**之前**，
+    //    那时这条断言会变红 —— 这正是它存在的意义。
+    const ids = computeVisibilitySources('s-test', null).map((x) => x.id)
+    expect(ids).not.toContain('alwaysDeny')
+    expect(denyOf('nonCcc', null)).not.toContain('ask_user_question')
+    // 正控：插件确实退让了（藏的是自己的全表）
+    expect(denyOf('nonCcc', null).length).toBeGreaterThan(0)
   })
 })
+
+// 🔴 v1.106.0（owner 2026-11-01 裁「exclusive 机制整体删」）：
+//    「专属工具条件可见（源 = computeVisibilitySources.exclusive）」**整组删除**，不改为 skip。
+//    判据消灭了（`EXCLUSIVE_TOOL_NAMES` 空表 ⇒ 恒回 []，任何测试都证伪不了它），
+//    留着 skip 只会让下一个人以为"以后要补上"。原语义与删除理由见
+//    `src/seams/guards.ts` 的 computeVisibilitySources ④ 处注释。
 describe('guards: 非 CCC 会话的全工具面隐藏（源 = computeVisibilitySources.nonCcc）', () => {
   it('🔴 root=null ⇒ 该源的 deny = 全部 REGISTERED_TOOLS', () => {
     expect(denyOf('nonCcc', null)).toEqual([...REGISTERED_TOOLS].sort())
@@ -460,13 +494,24 @@ describe('guards: 非 CCC 会话的全工具面隐藏（源 = computeVisibilityS
     expect(denyOf('nonCcc', dir)).toEqual([])
   })
 
-  it('🔴 非 CCC 时其余五源一律不贡献（没有 CCC 就没有配置可读）', () => {
+  it('🔴 非 CCC 时其余四源一律不贡献（没有 CCC 就没有配置可读）', () => {
+    // v1.106.0：候选从五源降为四源（`exclusive` 已删）
     const sources = computeVisibilitySources('s-test', null)
-    for (const id of ['safeMode', 'imBridge', 'exclusive', 'hostSchedule', 'trajectoryConstraint']) {
+    for (const id of ['safeMode', 'imBridge', 'hostSchedule', 'trajectoryConstraint']) {
       const s = sources.find((x) => x.id === id)!
       expect(s.ok, `${id} 在非 CCC 下应当 ok=false`).toBe(false)
       expect([...s.deny]).toEqual([])
     }
+  })
+
+  it('🔴 非 CCC 时 `alwaysDeny` **根本不发射**（早返回在第七源之前）—— 如实钉住而非假装藏住了', () => {
+    // ⚠️ 别读反：这不是"藏住了"的判据，而是**边界判据**。
+    //    §nonCcc 的 deny 只含 ACC 自己那批工具，`ask_user_question` 是宿主工具 ⇒ 不在内。
+    //    ⇒ 事实：**CCC 之外本插件不干预 ask_user_question**（与"非 CCC 整体退让"一致）。
+    //    若将来把第七源提到早返回之前，本断言会变红 —— 这正是它存在的意义。
+    const ids = computeVisibilitySources('s-test', null).map((x) => x.id)
+    expect(ids).not.toContain('alwaysDeny')
+    expect(denyOf('nonCcc', null)).not.toContain('ask_user_question')
   })
 })
 describe('guards: CCC 治理文件保护（agent 不可写 .serenity/.serenity-safe-on）', () => {  it('写 .serenity-safe-on 被拒（无论安全模式）', () => {

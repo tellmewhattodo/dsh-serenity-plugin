@@ -126,7 +126,7 @@ Directory of ACC capabilities — each area lists where to go for details (guide
                           与 praxis ontology 的分工 = 那个是**方法文本**、这个是**能跑的那个**）
   ③ 工具与执行        → container_fs（容器文件系统 15 子命令）/ container_git（git）/ dashboard（health 含注册表检查/time/wait）
                          acc_msm 已并入 msm（执行+发现）与 container_admin（管理）——msm("<name>", ["<args>"])；inspect=true 查用法
-                         专属工具（**默认对所有 CCC 隐藏**，只有在自己 exclusiveTools 里点名的 CCC 可见）→ acc-diag（运行态诊断）
+                         （v1.106.0 已删 exclusiveTools 机制：原专属工具 acc-diag **已并入 dashboard diag**）
   ④ 轨迹约束与对外面  → container_admin config（轨迹约束四动作 guide/validate/apply/list——**原 role 域已并入 config**，旧名作过渡别名仍可用；说明类配置走**两层菜单** config docs 目录 ／ config docs <章节> 详情）
                          外部程序化接入用官方 dsh --profile acp
                          ＋ 现成 ACP 客户端；本插件不提供 ACP 面
@@ -137,7 +137,7 @@ Directory of ACC capabilities — each area lists where to go for details (guide
                           或 container_admin msm ccc-config（同一份正文的旧入口，保留）
   ⑦ 注册表与安全      → mech-registry.json 由 container_admin msm register/deregister 管理（写保护——不可直接编辑）
                          dashboard health 输出 registry 完整性检查；损坏恢复指引见 health registry.issues
-                         CCC 级开关：exclusiveTools（声明专属工具）/ safeMode.blacklist（写路径黑名单）
+                         CCC 级开关：safeMode.blacklist（写路径黑名单）
                          / safeMode.hiddenTools（**安全模式开启期间**额外隐藏的工具，v1.51.4）
                          CCC 级 skill 供给：cognitiveTrajectory.skills（v1.44.0——**本 CCC 每条轨迹都带**，含 轨迹约束会话；与轨迹自己的 frontmatter 声明取并集）
 
@@ -390,20 +390,17 @@ CCC 级微信个人号接入（iLink 协议）：dsh 一进程多 CCC，每 CCC 
   微信桥消息处理/回复不受 hook 影响；脚本须在 CCC 根内（路径逃逸拒绝）。
   媒体 relPath 指向 _tmp/weixin-inbound/（临时目录）——需持久保存媒体文件请自行 copy。
 
-── 8. exclusiveTools（专属工具声明，v1.33）──
-**ACC 注册但默认对所有 CCC 隐藏**的工具，只有在自己这里**点名**的 CCC 可见。
-这是通用机制（任何工具名皆可），判据由 CCC 声明——ACC 代码里不出现任何具体 CCC 的名字。
-当前专属工具：acc-diag（运行态诊断——live 会话 / agent 定位 / 唤醒注册表 / 唤起条件链）。
+── 8. （已删除）exclusiveTools（专属工具声明，v1.33 → v1.106.0 删除）──
+🔴 **本键已不存在**（owner 2026-11-01 裁「机制整体删」）。
+原语义：ACC 注册但默认对所有 CCC 隐藏的工具，只有在 CCC 配置里点名才可见（fail-closed）。
+**删除理由**：那张表永远只有一个成员 acc-diag，而它已并入**常驻**的 dashboard 的 diag 动作。
+表空之后那个 filter 恒回空数组 ⇒ 机制**静默空转、且任何测试都证伪不了它**
+（一个验不出死活的机制比没有它更坏：它提供"这里还有一层保护"的错觉）。
 
-  ▸ 可见性语义：未声明 ⇒ 由 guards 逐 agent tools.restrict({deny:[tool]}) 从**模型工具清单移除**
-    （不是"看得到但被拒"）。配置热更新：改本文件即时生效（无需重启）。
-  ▸ 失败方向 **fail-closed**：未配置 / 字段缺失 / 配置损坏（JSON 坏）⇒ 一律按"未声明"处理
-    （专属工具保持隐藏；配置损坏本身另有响亮告警）。与 im-bridge 相反——隐藏一个**已在使用**
-    的通道才会静默损害能力，而专属工具的默认态本就是隐藏。
-  ▸ 配置损坏的响亮告警只出现一次（每路径），dashboard health 同样能看到。
-
-  Config:
-    { "exclusiveTools": ["acc-diag"] }
+  ▸ 要运行态诊断 ⇒ 直接用 dashboard 的 diag 动作（**无需任何声明，所有轨迹可见**）。
+  ▸ 旧配置里残留 exclusiveTools ⇒ **静默忽略**（schemastery 非 strict），不影响加载。
+  ▸ ⚠️ 连带后果（owner 已知并确认）：dashboard 是常驻工具 ⇒ diag 段对**所有轨迹**可见，
+    而它的 live 会话清单是**全部 CCC** 的（跨容器）。这是「方案 C」的既定代价，不是缺陷。
 `
 
 

@@ -160,15 +160,16 @@ export function assertManifestProse(
  * 同规格：**条件可见与否不影响这里列它**（本常量 = "插件**具备**的工具面"）。
  */
 export const REGISTERED_TOOLS = [
-  // ⚠️ **顺序有意义**：**常驻在前、条件在后**（条件者 = `im-bridge` / `acc-diag` / `diagram`）。
-  //   它被 `assertManifestProse`（本文件）用来把"后三个按条件出现"这类句子**钉成可判**——
+  // ⚠️ **顺序有意义**：**常驻在前、条件在后**（条件者 = `im-bridge` / `diagram`）。
+  //   它被 `assertManifestProse`（本文件）用来把"后两个按条件出现"这类句子**钉成可判**——
   //   所以**别按字母序重排**，加工具时**加在对应段的末尾**（常驻加在 `serenity-skill-creator` 之后、
   //   条件加在末位），否则那条钉子会对**正确的文字**报假错。
   'container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'ontology',
   'serenity-skill-creator', 'localstore', 'container_admin',
-  // ↓ 条件出现的三个（按注册期的条件钩子判可见性，见各自 `src/tools/*.ts`）
-  'im-bridge', 'acc-diag', 'diagram',
+  // ↓ 条件出现的两个（按注册期的条件钩子判可见性，见各自 `src/tools/*.ts`）
+  //   ⚠️ v1.106.0：原第三个 `acc-diag` **已并入 `dashboard diag`** ⇒ 13 项，条件 2 项。
+  'im-bridge', 'diagram',
 ] as const
 
 /** 条件出现的工具数（`REGISTERED_TOOLS` 的**末段**；`assertManifestProse` 用） */
-export const CONDITIONAL_TOOL_COUNT = 3
+export const CONDITIONAL_TOOL_COUNT = 2

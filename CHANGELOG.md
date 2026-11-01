@@ -1,3 +1,140 @@
+## v1.107.0 — 2026-11-01（轨迹消息订阅：观察者盯一组成员，任一轮结束即通知）
+
+**来源**：owner 令（`[本会话直接指令]`）——「轨迹消息订阅」，并明确三件语义：
+「**一轮结束**」／「**通知频率不设上限，结束了就通知**」／「**不需要带它做了什么**」。
+另加一句定性：「**loose notification, not control**」。
+
+---
+
+### 一、它是什么
+
+`watcher` 盯一组 `members`；任一成员「一轮结束」⇒ 唤醒 `watcher` 并递一条通知。
+
+配置（`.opencode/serenity.json`）：
+```json
+{ "trajectorySubscriptions": [
+  { "watcher": "S142", "members": ["S219", "butler"], "note": "盯部署与治理" }
+] }
+```
+
+### 二、三个必须固定的语义（都已写进代码注释与测试）
+
+| # | 语义 | 依据 |
+|---|---|---|
+| 1 | **「一轮结束」= `agent.status` running → idle** | 复用 `cro/turns.ts` 的 D243/D244：`agent/created` 证明"载体被发布"不是"在跑"；`agent/turn-stopping` 是**暂停点**不是轮结束（实测曾让一条轮连跑 9 分钟而表是空的）。⛔ 不另立判据——两个判据并存会立刻分叉 |
+| 2 | **频率不设上限** | owner 原话。不需要额外防抖：`agent/status` **只在真实状态跃迁时发** |
+| 3 | **不带"它做了什么"** | owner 原话。带上就得解析对方产出，那会让"通知"变成"代它说话" |
+
+### 三、三个失败面（一个都不静默）
+
+| # | 形态 | 处置 | 为什么 |
+|---|---|---|---|
+| ① | 会话没绑轨迹 | **跳过，不报警** | 一条 CCC 里绝大多数会话不绑轨迹；把它们当失败会每天刷上百条噪声，**淹没**②③那种真失败 |
+| ② | 观察者唤不醒 | **响亮 `console.warn`** | 否则"订阅配了但从不生效"与"没人干活"在阅读面上同形 |
+| ③ | 投递返回失败/抛错 | **响亮 ＋ 计数**（`dashboard diag` ⑤ 段可读） | 同上 |
+
+### 四、🔴 一处设计修正（写下来，因为它是我自己先写错再改对的）
+
+**根不能固定**：最初 `SubscriptionDeps` 里是 `root: string`（装配期定一个）。
+写完立刻发现——**一个宿主进程同时服务多个 CCC**，装配期只拿得到一个根
+⇒ 别的 CCC 的成员**永远命中不了自己的订阅表**，而且**不会报错**。
+⇒ 改为 `rootForSession(sessionId)`，每次事件按该会话自己的 cwd 解析（与 `trajectory/live.ts` 同源）。
+
+### 五、`dashboard diag` 增第 ⑤ 段（owner 的"看得见"要求）
+
+- **投递读数**：只列**发生过投递尝试**的键（`watcher←member`）——「没出现过」= 还没触发过，
+  「出现且失败」= 触发了但送不到。两者形态不同，混成一句话就分不出来了。
+- **配置坏项**：写法不成立的条目**必须显形**（配了但不生效 = 静默失效）。
+  ⚠️ 这与"整表读不到就空表"不矛盾：前者是**文件级**失败（无法解析），后者是**条目级**失败
+  （能解析但内容不成立）—— 两个粒度、两种处置。
+
+### 六、测试与变异检验
+
+新增 `tests/trajectory-subscriptions.test.ts`（27 例）＋ `diag.test.ts` 增 3 例。**两次变异各自精确变红**：
+
+| 变异 | 变红数 | 说明 |
+|---|---|---|
+| 去掉 `prev !== 'running'` 守卫 | **恰好 3 条**（全在"只认 running→idle"组） | 其余 24 例不动 ⇒ 判据有判别力 |
+| 投递目标从 `watcher` 改成 `member` | **恰好 1 条**（方向断言） | 这是"通知发给错的人"最真实的形态 |
+
+### 七、🔒 一处隐私违规由既有门禁抓出（如实记录）
+
+我在注释里写了本机三个私有 CCC 名，而源码 docstring 会进 `lib/*.d.ts` 随 npm 发布
+⇒ **`privacy-scan` 的 A 面与 B 面同时报红**。已改为不含具体名字的表述。
+✅ **这条门禁有效**——它不是形式主义，它抓到了我。
+
+### 八、门禁
+
+typecheck ✅ ／ test **3193 passed / 201 files** ✅ ／ coverage **95.23%**（函数 96.47%）✅ ／
+build ✅ ／ pack-check ✅（166 文件）／ privacy-scan ✅。
+
+---
+
+## v1.106.0 — 2026-11-01（`ask_user_question` 常驻隐藏 ＋ `acc-diag` 并入 `dashboard diag`、`exclusiveTools` 机制整体删除）
+
+**来源**：owner 三件令（同一条会话）。本版收其中前两件；轨迹消息订阅（P1）与面板读数（P3）另版。
+
+> 逐字（D272 标源 = `[本会话直接指令]`）：
+> ① 「我要的是和安全模式无关的，发版就发版」；理由「宁静号追求更高程度的自动化和轨迹协作，这种阻塞性的东西会降低效率」
+> ② 诊断入口并入 `dashboard`；追加裁「**连 exclusive 机制一起删**」＋ 确认方案 C（诊断段全公开）
+
+---
+
+### 一、`ask_user_question` 常驻隐藏（**与安全模式无关**）
+
+| 项 | 内容 |
+|---|---|
+| 机制 | `seams/guards.ts` 新增**第七可见性源** `alwaysDeny` ＋ 独立表 `ALWAYS_DENY_TOOLS = ['ask_user_question']` |
+| 🔴 为什么不放进 `SAFE_MODE_DENY_TOOLS` | 那张表的**名字就是它的语义**（安全模式开启时才生效）。混进去会让「与安全模式无关」这句**当场变假**，且这类错放**没有机械信号**（D151） |
+| 证据 | `tests/guards.test.ts` 新增 5 例；**两次变异各自精确变红** —— ① 清空表 ⇒ 4 条断言全红 ② 错放进 `SAFE_MODE_DENY_TOOLS` ⇒ `not.toContain` 那条单独红（证明"两表分离"有判别力，非空转） |
+
+🔴 **一条边界（如实登记，⛔ 别读成"藏住了"）**：`computeVisibilitySources` 在 `root === null`（非 CCC）时于 ① 之后**早返回**，第七源根本不发射 ⇒ **在 CCC 之外本插件不干预 `ask_user_question`**。原因 = ① 的 deny 是 `[...REGISTERED_TOOLS]`（ACC 自己的工具），**不含宿主工具**。这与「插件在非 CCC 时整体退让」一致。已写成断言钉住：将来要在非 CCC 也拦，必须把第七源提到早返回之前，**那时这条断言会红**。
+
+### 二、`acc-diag` → `dashboard` 的 `diag` 动作
+
+- **删除** `src/tools/diag/index.ts`（工具面）与 `createAccDiagTool` 注册
+- `diag/service.ts` 重写：`runAccDiag`/`renderAccDiag` → **`runDiag`/`renderDiag`**，段数三 → **四**：
+  - ① live 运行态（不变）
+  - ①b 唤醒时钟（不变）
+  - ② **CRO 已启用轨迹**（新增，owner 要求"看见哪些轨迹挂了 CRO"）—— 措辞刻意用「已启用」而非「已注册」：**CRO 没有注册表**，判据 = 目录下有 `continuous-re-occurrence.ts`；写成"注册"会让下一个人去找一个不存在的注册表
+  - ③ 唤醒注册表**分两分组**：**未来**（`at > now`，正常排队）／**已过期但仍在办**（卡在补跑窗口，多半是调度器没 tick 或目标不可解析）。owner「过去的不看」⇒ 前者是主视图；后者**必须另列**否则会被读成"排了很多活儿"（两者病情不同）
+- 🔴 **`nowMs` 可注入**：分组判据依赖"报告时刻"，参数化 ⇒ 可单测、可复算（不依赖挂钟）
+- 🔴 **坏数据归"已过期"**（`at` 解析不出来）：归"该看的那组"比归"未来"安全 —— 后者会让人以为一切按计划
+- ⚠️ **无 ctx 时响亮失败**，⛔ 不返回空报告："零个 live 会话"与"读不了"在阅读面上同形（D233）
+
+### 三、`exclusiveTools` 机制**整体删除**（owner 裁）
+
+| 删除项 | 位置 |
+|---|---|
+| `EXCLUSIVE_TOOL_NAMES` / `exclusiveRestrictions` / `getExclusiveToolsDiagnostics` | `seams/guards.ts` |
+| 第四可见性源 `exclusive`（连带非 CCC 早返回的源 id 清单） | `seams/guards.ts` |
+| 配置键 `exclusiveTools` ＋ `readExclusiveTools` | `kernel/ccc.ts` |
+| 面向用户的第 8 章配置文档 | `tools/msm/service.ts` |
+| 本 CCC 的 `.opencode/serenity.json` 声明 | CCC 侧 |
+
+**删除理由（刻意的，不是顺手）**：那张表**永远只有一个成员** `acc-diag`，而它已并入常驻的 `dashboard`。表空之后 `filter` 恒回 `[]` ⇒ 机制**静默空转、且任何测试都证伪不了它** —— 一个验不出死活的机制比没有它更坏：它提供「这里还有一层保护」的错觉。
+⚠️ **连带**：旧配置残留 `exclusiveTools` ⇒ `schemastery` 非 strict ⇒ **静默忽略**，不影响加载。
+
+### 四、工具面 14 → 12（常驻 10 ＋ 条件 2）
+
+`REGISTERED_TOOLS` 去 `acc-diag`；`CONDITIONAL_TOOL_COUNT` 3 → **2**（`im-bridge` / `diagram`）。描述面同步：`package.json` / `dsh.plugin.json` / 两份 `README.md` 的「十三个工具…另三个」→「十二个工具…另两个」。
+
+### 五、测试面的两处**假绿**修正（本轮副产物，值得单记）
+
+1. **写死的负控值会随被删工具变成"正确值"**：`invariant.test.ts` 的负控原写死「12 而不是 13」「十二个工具」。删掉 `acc-diag` 后总数正是 12 ⇒ 那两条负控**恰好指向正确值**，于是"报不出错"成了预期行为（假绿）。已改为**按 `REGISTERED_TOOLS.length` 推导错值**，并加正控断言 `wrongHeading !== toHeading`。
+2. **`diag` 动作的接线原本零覆盖**：`KIT_ACTIONS` 加了 `diag` 却没接 `runDiag` 时，落 default 抛 `Unknown action` —— 而**没有任何测试会红**。已在 `ops.test.ts` 补 3 条（接线 / 缺 ctx 响亮失败 / `KIT_ACTIONS` 含它），并做**变异检验**（把 `case 'diag'` 改名 ⇒ 恰好这 2 条变红，其余 200 条不动）。
+
+### 六、顺带修正
+
+`scripts/dsh-develop.ts` 的 `diag` 退役路牌原指「运行态诊断：`acc-diag`（专属工具）」—— 工具已不存在，会把用户引向一个空指针。已改为 `dashboard` 的 `diag` 动作（D262：**报错要指路，指错路比不指更坏**）。
+
+### 七、门禁
+
+typecheck ✅ ／ test **3163 passed / 200 files** ✅ ／ coverage **95.26%**（函数 97%）✅ ／ build ✅（node 778,565 B ／ client 223,984 B）／ pack-check ✅（161 文件）／ 三处变异检验各自精确变红。
+⚠️ **未做**：真机验证与发版（待 P1/P3 一并，避免两次宿主重启）。
+
+---
+
 ## v1.105.0 — 2026-10-29（🔴 **P0 回归修复**：`{{model}}` 严格插值 —— 「不传」不等于「安全」）
 
 **来源**：owner 报障截图 ＋ 逐字令「修 完成后发布并安装」。

@@ -1168,8 +1168,9 @@ function cmdDumpConfig(pattern?: string): void {
  * 且"为什么这轮没唤起"这个**已登记缺口**（插件仓 `docs/acc-autopilot-retirement.md` §8/§9）
  * **不因保留本命令而闭合**（它当年渲染的是 autopilot 的条件，不是 CRO / 注册表的事实）。
  *
- * **替代品（命令输出里也印）**：运行态诊断 = **`acc-diag`**（专属工具：live ／ 时钟态 ／
- * 注册表在办项）；**离线**想看一眼唤醒态 = **直接读 `<CCC>/AGENT_SESSIONS/wake-registry.json`
+ * **替代品（命令输出里也印）**：运行态诊断 = **`dashboard` 的 `diag` 动作**（v1.106.0 起，
+ * 原专属工具 `acc-diag` 已并入，**常驻可见、无需任何声明**：live ／ 时钟态 ／ CRO 已启用 ／
+ * 注册表未来+已过期项）；**离线**想看一眼唤醒态 = **直接读 `<CCC>/AGENT_SESSIONS/wake-registry.json`
  * 与 `<CCC>/AGENT_SESSIONS/cro-state.json`**（数据是它们自己的真相源，**不复制判据**）。
  */
 
@@ -1185,7 +1186,10 @@ function cmdDiag(): void {
   console.error('    （判据唯一实现 hooks/dsh-serenity-hooks/src/autopilot-chain.ts 已不在仓里，提交 2386f6f）。')
   console.error('  · 本命令是那次退场的漏网消费者 ⇒ 自 v1.35.0 起恒 exit 2，与"环境缺模块"无关。')
   console.error('  · 不留重写版：acc-diag 行的既有裁决 = 「不留第二份条件链、也不留半死的手写版」。')
-  console.error('  ⇒ 运行态诊断：`acc-diag`（专属工具：live ／ 时钟态 ／ 注册表在办项）')
+  // ⚠️ v1.106.0：`acc-diag` 已并入常驻的 `dashboard diag`（owner 2026-11-01 裁「方案 C」，
+  //    `exclusiveTools` 机制同批删除）⇒ 此处**必须**跟着改，否则这是一块把人引向
+  //    已不存在的工具的路牌（D262：报错要指路 —— 指错路比不指更坏）。
+  console.error('  ⇒ 运行态诊断：`dashboard` 的 `diag` 动作（常驻，无需声明：live ／ 时钟态 ／ CRO 已启用 ／ 注册表未来+已过期项）')
   console.error('  ⇒ 离线看一眼唤醒态：直接读 <CCC>/AGENT_SESSIONS/wake-registry.json 与 cro-state.json')
   process.exit(2)
 }

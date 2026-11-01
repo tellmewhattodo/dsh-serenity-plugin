@@ -144,10 +144,10 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     expect(typeof apply).toBe('function')
   })
 
-  it('apply 注册 12 个真实工具（v1.30 命名重构 + v1.31.0 im-bridge + v1.33 合并/专属工具 + v1.52 ontology + v1.54 serenity-skill-creator，后两者条件可见；2026-10-28 下线 cheap-worker ⇒ 13→12）', () => {
+  it('apply 注册 11 个真实工具（v1.30 命名重构 + v1.31.0 im-bridge + v1.52 ontology + v1.54 serenity-skill-creator，后两者条件可见；2026-10-28 下线 cheap-worker ⇒ 13→12；v1.106.0 acc-diag 并入 dashboard diag ⇒ 12→11）', () => {
     const { ctx, register } = mockCtx()
     apply(ctx, FULL_CONFIG)
-    expect(register).toHaveBeenCalledTimes(12)
+    expect(register).toHaveBeenCalledTimes(11)
     const names = register.mock.calls.map((c) => (c[0] as { name: string }).name)
     expect(names).toContain('container_fs')
     expect(names).toContain('cognitive_trajectory')
@@ -160,24 +160,25 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     expect(names).toContain('container_admin')
     expect(names).toContain('cognitive_trajectory')
     expect(names).toContain('im-bridge')
-    expect(names).toContain('acc-diag')
+    // 🔒 v1.106.0 回归钉：acc-diag 已并入 dashboard diag ⇒ **不得**再有独立工具
+    expect(names).not.toContain('acc-diag')
     expect(names).toContain('ontology')
     expect(names).toContain('serenity-skill-creator')
   })
 
-  it('🆕 D104：diagram 工具按开关注册 —— 关（缺省）时**不注册**，开时成为第 13 个', () => {
+  it('🆕 D104：diagram 工具按开关注册 —— 关（缺省）时**不注册**，开时成为第 12 个', () => {
     // 关（= 本文件的 FULL_CONFIG 不带 diagramEnabled）
     const off = mockCtx()
     apply(off.ctx, FULL_CONFIG)
     const offNames = off.register.mock.calls.map((c) => (c[0] as { name: string }).name)
     expect(offNames).not.toContain('diagram')
-    expect(off.register).toHaveBeenCalledTimes(12)
-    // 开 ⇒ **多一个**（不是"多注册一遍全部"：总数为 13 才算对）
+    expect(off.register).toHaveBeenCalledTimes(11)
+    // 开 ⇒ **多一个**（不是"多注册一遍全部"：总数为 12 才算对）
     const on = mockCtx()
     apply(on.ctx, { ...FULL_CONFIG, diagramEnabled: true } as Config)
     const onNames = on.register.mock.calls.map((c) => (c[0] as { name: string }).name)
     expect(onNames).toContain('diagram')
-    expect(on.register).toHaveBeenCalledTimes(13)
+    expect(on.register).toHaveBeenCalledTimes(12)
   })
 
   /**
@@ -209,7 +210,7 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
       enabled = true
       emit(ctx, 'settings/document-updated', SERENITY_SETTINGS_NS, 2)
       expect(registeredNames(register)).toContain('diagram')
-      expect(register).toHaveBeenCalledTimes(13) // 只多这一个，不是"重注册一遍全部"
+      expect(register).toHaveBeenCalledTimes(12) // 只多这一个，不是"重注册一遍全部"
 
       // ② 拨回 ⇒ **注销**（工具从模型工具清单里消失，不是"留着但不响应"）
       const idx = registeredNames(register).indexOf('diagram')
@@ -221,8 +222,8 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
       // ①b 兜底通道：宿主事件面若换名，`session/created` 仍能把开关的最新值同步过来
       enabled = true
       emit(ctx, 'session/created')
-      expect(registeredNames(register)).toHaveLength(14) // 再一次注册（前一次已注销）⇒ 第二次同名注册
-      expect(disposers[13]).not.toBe(disposers[idx])
+      expect(registeredNames(register)).toHaveLength(13) // 再一次注册（前一次已注销）⇒ 第二次同名注册
+      expect(disposers[12]).not.toBe(disposers[idx])
     } finally {
       __setSimpleSourceForTest(null) // 模块级源必须复位（跨用例泄漏会让别处的门控判据失真）
     }
@@ -262,14 +263,18 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     // 🔴 2026-10-18（v1.63.3，owner 裁「砍掉无人值守功能，整个砍掉」）：该缝整条退役
     //    ⇒ 拆卸清单少一项 ⇒ **6 → 5**。它的"进程级内存表"（代理段 + 用户轮次 + 出站账本）
     //    随模块一起消失 ⇒ 不再是拆卸对象。
+    // ⚠️ 2026-11-01（v1.107.0，轨迹消息订阅）：新增 `trajectory subscriptions`
+    //    ——它持有一张进程级内存表（会话 → 上一次观察到的 agent 状态，用于判 running→idle）
+    //    ＋ 投递计数表 ⇒ **必须在拆卸时清**，否则同属"只增不清"病族。⇒ **5 → 6**。
     const labels = effect.mock.calls.map((c) => String(c[1]))
-    expect(labels).toHaveLength(5)
+    expect(labels).toHaveLength(6)
     expect(labels.join('|')).not.toContain('autopilot')
     expect(labels.join('|')).toContain('认知轨迹唤醒调度器')
     expect(labels.join('|')).toContain('self-started resources')
     expect(labels.join('|')).toContain('opencode provider auto-config retry timer')
     expect(labels.join('|')).toContain('deepseek vision patch retry timer')
     expect(labels.join('|')).toContain('cro turn tracking')
+    expect(labels.join('|')).toContain('trajectory subscriptions')
     // 退役回归钉：无人值守代理缝不得再被装配（删了就不要再悄悄回来）
     expect(labels.join('|')).not.toContain('unattended proxy')
     // 退避重试定时器不得再出现（回归钉：删了就不要再悄悄回来）
@@ -286,7 +291,7 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     expect(() => apply(ctx, FULL_CONFIG)).not.toThrow()
     expect(warn.mock.calls.some((c) => String(c[0]).includes('ctx.effect 不可用'))).toBe(true)
     warn.mockRestore()
-    expect(register).toHaveBeenCalledTimes(12) // 其余装配不受影响
+    expect(register).toHaveBeenCalledTimes(11) // 其余装配不受影响
   })
 
   it('config 开关控制注册项', () => {

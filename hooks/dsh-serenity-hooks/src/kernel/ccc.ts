@@ -199,14 +199,52 @@ interface SerenityConfig {
   im?: ImSettings;
   // ⚠️ `im?: ImSettings`（IM 通道选择，v1.59.0）**已删除** —— 随面 E（官方 ACP）整面退役，
   //    IM 入站只剩微信一种实现，"选通道"失去意义。旧配置残留 ⇒ 静默忽略。
+  // ⚠️ `exclusiveTools?: string[]`（专属工具声明，v1.33）**已于 v1.106.0 删除**
+  //    （owner 2026-11-01 裁「机制整体删」）——那张表永远只有一个成员 `acc-diag`，
+  //    而它已并入常驻的 `dashboard diag`。表空之后机制静默空转且**不可证伪**，
+  //    留着只会提供"这里还有一层保护"的错觉。
+  //    旧配置残留 ⇒ schemastery 非 strict ⇒ **静默忽略**，不影响加载（与上面几处退役同规格）。
   /**
-   * 专属工具声明（v1.33，S142 §32.11）：**ACC 注册但默认对所有 CCC 隐藏**的工具，
-   * 只有在自己这里声明的 CCC 可见（例：`["acc-diag"]` = ACC 负责人的运行态诊断）。
+   * 轨迹消息订阅（v1.107.0，owner 2026-11-01 令）：
+   * **观察者盯一组成员，任一成员「一轮结束」就通知观察者**。
    *
-   * 归属判据（D23）：**机制在 ACC（通用，任何工具名皆可），声明在 CCC**——
-   * ACC 代码里不出现任何具体 CCC 的名字；未声明（含未配置/配置损坏）⇒ 隐藏。
+   * 🔴 **这是通知，不是控制**（owner 原话「loose notification, not control」）：
+   * 观察者收到的是「某人刚干完一轮活儿」，**不带他干了什么**（owner：「不需要带它做了什么」），
+   * 也不赋予它任何指挥权。要不要看、看了做什么，全由观察者自己决定。
+   *
+   * ## 三件必须固定的语义
+   *
+   * 1. **「一轮结束」的判据 = `agent.status` 由 running → idle**（`cro/turns.ts` D244 已定死：
+   *    `agent/turn-stopping` 是**暂停点**不是轮结束，⛔ 不得用它）。因此本机制**复用**那条事件，
+   *    不新造判据 —— 两个判据并存会立刻分叉。
+   * 2. **频率不设上限**：结束了就通知（owner：「不设定上限，结束了就通知」）。
+   *    ⚠️ 但**不额外防抖**是有依据的：`agent/status` 只在**真实状态跃迁**时发
+   *    （宿主 `AgentLoop.setPhase`，见 `cro/turns.ts` 文件头），所以"抖动"不会发生。
+   * 3. **目标的三种失败面各自显形**（见 `trajectory/subscriptions.ts` 文件头的失败面表）：
+   *    成员解析不出轨迹 / 观察者唤不醒 / 投递失败 —— ⛔ 一个都不许静默。
+   *
+   * ⚠️ **与 CRO 的区别**（别混）：CRO 是「**自己**决定要不要把自己叫起来」（自编程）；
+   * 本节是「**别人**干完活了，告诉我一声」（互观察）。两者都走唤醒链路，但**主语相反**。
    */
-  exclusiveTools?: string[];
+  trajectorySubscriptions?: TrajectorySubscription[];
+}
+
+/**
+ * 一条轨迹消息订阅：`watcher` 观察 `members`。
+ *
+ * 🔴 **方向性是本结构唯一容易写反的地方**：`watcher` 是**收通知的那个**，
+ * `members` 是**被盯的那组**。写反了照样能跑、只是通知发给了错误的人 —— 没有机械信号，
+ * 所以字段名取"谁看/看谁"而不是"a/b"（D150 同族：字面要能自证方向）。
+ */
+export interface TrajectorySubscription {
+  /** 收通知的轨迹（`S###` 或 AGENT_SESSIONS 目录名） */
+  watcher: string;
+  /** 被观察的轨迹清单（同上格式） */
+  members: string[];
+  /** 这条订阅是否生效（缺省 true —— 写了就是要用） */
+  enabled?: boolean;
+  /** 通知正文里对这个订阅的一句话说明（可选；用于让观察者分辨是哪条订阅触发的） */
+  note?: string;
 }
 
 /**
@@ -448,22 +486,75 @@ export function loadSerenityConfig(root: string, paths: string[] = DEFAULT_SEREN
 }
 
 /**
- * 读取 CCC 声明的「专属工具」清单（`exclusiveTools`，v1.33）。
+ * （已删除）`readExclusiveTools` —— v1.106.0 随 `exclusiveTools` 机制整体删除。
+ * 原语义：读 CCC 声明的专属工具清单，fail-closed（读不到 ⇒ 空数组 ⇒ 专属工具保持隐藏）。
+ * 删除理由见 `SerenityConfig.exclusiveTools` 处的注释（表空 ⇒ 不可证伪）。
+ */
+
+/**
+ * 读取 CCC 声明的轨迹消息订阅表（`trajectorySubscriptions`，v1.107.0）。
  *
- * 失败语义：无配置/字段缺失/配置损坏 → **空数组**（= 不声明任何专属工具 ⇒ 专属工具保持隐藏）。
- * 这里选 **fail-closed**（与 im-bridge 的 fail-open 相反）的理由：专属工具的默认态就是"隐藏"，
- * 判据读不到 = 没有证据表明该 CCC 要它；而配置损坏本身已在 `loadSerenityConfig` 响亮告警
- * （不会静默）。im-bridge 相反——隐藏一个**已在使用**的通道才会静默损害能力。
+ * ## 失败方向 = **fail-open，但坏项逐条报告**（与另外两处刻意不同）
+ *
+ * 不订阅 ≠ 危险动作：它只是"没有通知"，不会藏掉任何能力（对比 `safeMode.hiddenTools`
+ * 是 fail-open 因为**隐藏**才是危险方向）。⇒ 整体读不到 ⇒ 空表。
+ *
+ * 🔴 **但"坏项"不能一起吞掉**：配置里写了这一条、却因为成员名写错而**永远不触发**，
+ * 是与 `safeMode.hiddenTools` 写错工具名**同族的静默失效**（写了但不生效，且没人知道）。
+ * ⇒ 本函数返回 `{ subs, problems }`：合法项照常生效，坏项进 `problems` 供调用方响亮告警。
+ * ⚠️ 这与"整表读不到就空表"并不矛盾：前者是**文件级**失败（无法解析），
+ * 后者是**条目级**失败（能解析但内容不成立）—— **两个粒度、两种处置**（D233 同族）。
+ *
  * @param root CCC 根
  * @param paths 候选配置相对路径
- * @returns 去空白后的工具名列表（非字符串项被丢弃）
+ * @returns `subs` = 干净的订阅表；`problems` = 逐条可读的坏项说明（空数组 = 全好）
  */
-export function readExclusiveTools(root: string, paths: string[] = DEFAULT_SERENITY_CONFIG_PATHS): string[] {
-  const list = loadSerenityConfig(root, paths).exclusiveTools;
-  if (!Array.isArray(list)) return [];
-  return list
-    .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
-    .map((x) => x.trim());
+export function readTrajectorySubscriptions(
+  root: string,
+  paths: string[] = DEFAULT_SERENITY_CONFIG_PATHS,
+): { subs: TrajectorySubscription[]; problems: string[] } {
+  const raw = loadSerenityConfig(root, paths).trajectorySubscriptions;
+  if (!Array.isArray(raw)) return { subs: [], problems: [] };
+  const subs: TrajectorySubscription[] = []
+  const problems: string[] = []
+  raw.forEach((item, i) => {
+    const at = `trajectorySubscriptions[${i}]`
+    if (typeof item !== 'object' || item === null) {
+      problems.push(`${at}: 不是对象（应为 { watcher, members }）`)
+      return
+    }
+    const rec = item as unknown as Record<string, unknown>
+    const watcher = typeof rec.watcher === 'string' ? rec.watcher.trim() : ''
+    if (watcher === '') {
+      problems.push(`${at}: watcher 缺失或为空（必须指定谁来收通知）`)
+      return
+    }
+    const membersRaw = Array.isArray(rec.members) ? rec.members : null
+    if (membersRaw === null) {
+      problems.push(`${at}（watcher=${watcher}）: members 不是数组`)
+      return
+    }
+    const members = membersRaw
+      .filter((m): m is string => typeof m === 'string' && m.trim() !== '')
+      .map((m) => m.trim())
+    if (members.length === 0) {
+      problems.push(`${at}（watcher=${watcher}）: members 为空 ⇒ 这条订阅永远不会触发`)
+      return
+    }
+    // 🔴 观察自己：语法上合法但语义上是自噪声（自己每轮结束都通知自己一次 ⇒ 自激）
+    if (members.some((m) => m === watcher)) {
+      problems.push(`${at}（watcher=${watcher}）: members 含 watcher 自己 ⇒ 会形成自激通知，已剔除该项`)
+    }
+    const cleaned = members.filter((m) => m !== watcher)
+    if (cleaned.length === 0) return // 剔完就空了 ⇒ 整条不生效（已在上句报告）
+    subs.push({
+      watcher,
+      members: cleaned,
+      enabled: rec.enabled === false ? false : true,
+      ...(typeof rec.note === 'string' && rec.note.trim() !== '' ? { note: rec.note.trim() } : {}),
+    })
+  })
+  return { subs: subs.filter((s) => s.enabled !== false), problems }
 }
 
 /**
@@ -472,7 +563,7 @@ export function readExclusiveTools(root: string, paths: string[] = DEFAULT_SEREN
  * 语义（R↓）：**标记文件存在 ⇒ 才生效**。deny = `['bash', ...本清单]`（并集去重）；
  * 标记消失 ⇒ 连同 `bash` 一起解除（调用点在 `syncSafeModeRestriction`，与基础表同一处）。
  *
- * 失败方向 = **fail-open**（与 `exclusiveTools` 的 fail-closed 相反，理由不同）：
+ * 失败方向 = **fail-open**（与已删除的 `exclusiveTools` 的 fail-closed 相反，理由不同）：
  * 未配置 / 字段缺失 / 配置损坏 ⇒ **空数组** = 只隐藏基础表。本键是**附加**屏蔽，
  * 读不到声明就等于"没有证据要求多藏"；且**隐藏是危险方向**（藏掉 agent 真正要用的工具
  * 会静默损害能力），而配置损坏本身已有 `loadSerenityConfig` 的响亮告警（不静默）。
