@@ -103,11 +103,22 @@ describe('CCC 状态面板：tab 布局（活跃轨迹 ／ 技能 互斥显示�
     expect(tsx, '两个并排 panel 的形态已被 owner 修正掉，不得复活').not.toMatch(/sp-panels/)
   })
 
-  it('两个 tab 互斥显示（条件渲染，不是都挂着再 CSS 隐藏）', () => {
+  it('各 tab 互斥显示（条件渲染，不是都挂着再 CSS 隐藏）', () => {
     // 判据：tab 状态驱动条件渲染 ⇒ 同一时刻只有一个列表在 DOM 里。
-    // 若改成"都渲染 + display:none"，两份列表会同时存在于无障碍树里（读屏会念两遍）。
+    // 若改成"都渲染 + display:none"，所有列表会同时存在于无障碍树里（读屏会念一遍又一遍）。
     expect(tsx).toMatch(/tab === 'trajectories' \?/)
-    expect(tsx).toMatch(/useState<'trajectories' \| 'skills'>/)
+    // 🔴 v1.110.0 订正本行：原写死 `useState<'trajectories' | 'skills'>`，
+    //    那是**当时只有两个 tab** 的形态。本轮加了第三个（`subscriptions`，owner 纠正落点后
+    //    从设置面板搬来）⇒ 字面类型必然变宽。
+    //    本判据的**本意**是"tab 状态驱动渲染"，不是"永远只有两个 tab" ⇒
+    //    改为钉住"三个 tab 都在同一个 state 里、且每个都有条件分支"，
+    //    这样既不因为加 tab 而假红，也仍然能抓住"退回并排 panel"。
+    expect(tsx, 'tab state 必须同时容纳三个 tab').toMatch(
+      /useState<'trajectories' \| 'skills' \| 'subscriptions'>/,
+    )
+    // 每个 tab 都必须有它自己的条件分之（不是只列出按钮、内容却共用一份）
+    expect(tsx).toMatch(/tab === 'skills' \?/)
+    expect(tsx, '订阅 tab 必须有独立内容分之').toMatch(/<SubscriptionsView/)
   })
 
   it('内容区定宽一列 ＋ 动画吃剩余（顺序反了就等于没给动画让位）', () => {

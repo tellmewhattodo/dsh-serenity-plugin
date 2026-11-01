@@ -791,3 +791,101 @@
   border: 1px dashed var(--dsw-alias-border-l2);
   border-radius: 10px;
 }
+
+/* ── 订阅 tab（v1.110.0：从 DSH 设置面板搬到 CCC 面板）─────────────────
+   🔴 为什么这一段样式在**这个**文件里：面板是 420px 定宽的一栏，
+   而设置面板是宽页 ⇒ 原来用 `style={{...}}` 内联的写法搬过来会挤爆窄栏。
+   这里全部走类名，并让**内容区自身滚动**（`.sp-subsBody`），
+   与 `.sp-list` 同一套做法：清单越多不该把卡片顶长。 */
+.sp-subs {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.sp-subsBar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sp-subsBtn {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 6px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+.sp-subsBtn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 说明文字：**单行截断**（窄栏里换行会把按钮行撑高两倍），全文走 title */
+.sp-subsHint {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 内容区：**自身滚动**（订阅/投递/机制三段加起来通常比一屏高） */
+.sp-subsBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sp-subsSectionTitle {
+  flex: none;
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary);
+}
+.sp-subsSectionTitle:first-child {
+  margin-top: 0;
+}
+
+/* 机制计数：等宽（数字要能对齐扫读），可换行（它是一句完整的话） */
+.sp-subsMeter {
+  margin: 0;
+  padding: 4px 6px;
+  font-family: var(--ds-font-family-code, monospace);
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--dsw-alias-label-secondary);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* 告警：配置坏项 / 拉取失败 / 投递失败。**用告警色**（它是真异常，不是状态） */
+.sp-subsError {
+  margin: 0;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-state-error-primary);
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}

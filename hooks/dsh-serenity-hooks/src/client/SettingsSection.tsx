@@ -27,7 +27,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { AccountsEditor } from './AccountsEditor.js'
 import { PersonaEditor } from './PersonaEditor.js'
 import { ImBridgeEditor } from './ImBridgeEditor.js'
@@ -324,137 +324,14 @@ export function SettingsSection(props: SettingsSectionProps): React.JSX.Element 
         <SessionCleanupBlock />
       </Collapse>
 
-      {/* 轨迹订阅（v1.108.0，owner P3）：只读看"谁盯谁"与"实际投递过没有" */}
-      <Collapse title="轨迹订阅" desc="观察者盯一组成员，任一轮结束即通知（只读；配置在 serenity.json）">
-        <SubscriptionsBlock />
-      </Collapse>
-    </div>
-  )
-}
-
-/** /serenity/subscriptions 只读 wire（与 `surface/http.ts` 对齐，v1.108.0） */
-interface SubscriptionsWire {
-  root: string
-  /** 配置的订阅（**意图**：谁盯谁） */
-  subscriptions: Array<{ watcher: string; members: string[]; note: string | null }>
-  /** 配置坏项（配了但不生效 —— 必须显形） */
-  problems: string[]
-  /** 投递读数（**实际**：发生了没有；键 = `watcher←member`） */
-  deliveries: Array<{ key: string; ok: number; failed: number; lastError: string | null; lastAt: number | null }>
-  /** 评估计数（**机制在跑吗** —— 与"送出过吗"是两个问题） */
-  eval: {
-    statusEvents: number
-    runningSeen: number
-    idleSeen: number
-    turnFinished: number
-    skips: Record<string, number>
-  }
-}
-
-/**
- * 「轨迹订阅」块（v1.108.0，owner 2026-11-01 P3）。
- *
- * 🔴 **只读**，且刻意分两栏显示「意图」与「实际」：
- * · **意图栏** = 配置里写了谁盯谁；**实际栏** = 真的发生过投递的键。
- * · 两者**必须分开看**：一个配了却不出现在实际栏的订阅 = **还没触发过**（不是"在工作"）；
- *   出现在实际栏且 `failed>0` = **触发了但送不到**（那才是要修的）。
- *   把这两件事合成一句话，人就分不出来了（这正是 diag ⑤ 段同一个理由）。
- *
- * ⚠️ 计数是**进程内**的（重启清零）—— UI 上必须写明，否则"0"会被读成"从来没配过"。
- */
-function SubscriptionsBlock(): React.JSX.Element {
-  const [data, setData] = useState<SubscriptionsWire | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const load = async (): Promise<void> => {
-    setBusy(true); setError(null)
-    try {
-      const res = await fetch('/serenity/subscriptions', { headers: { accept: 'application/json', 'x-serenity-ui': '1' } })
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null
-        setError(body?.error ?? `HTTP ${res.status}`)
-        return
-      }
-      setData((await res.json()) as SubscriptionsWire)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // 进页面自动读一次（只读、无副作用）
-  useEffect(() => { void load() }, [])
-
-  return (
-    <div className="ss-field">
-      <div className="ss-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button type="button" className="ss-btn" disabled={busy} onClick={() => void load()}>
-          {busy ? '读取中…' : '刷新读数'}
-        </button>
-        <span style={{ opacity: 0.7, fontSize: 12 }}>
-          投递计数只在宿主进程内有效（重启清零）；配置全表在 .opencode/serenity.json
-        </span>
-      </div>
-
-      {error !== null && <div className="ss-error">⚠ {error}</div>}
-
-      {data !== null && (
-        <>
-          {data.problems.length > 0 && (
-            <div className="ss-error">
-              ⚠ 配置坏项 {data.problems.length} 条（配了但不生效）：
-              <ul style={{ margin: '4px 0 0 16px' }}>
-                {data.problems.map((p, i) => <li key={i}>{p}</li>)}
-              </ul>
-            </div>
-          )}
-
-          <h4 style={{ margin: '12px 0 4px' }}>配置（意图：谁盯谁）</h4>
-          {data.subscriptions.length === 0 ? (
-            <div style={{ opacity: 0.7 }}>
-              （未配置任何订阅 —— 在 .opencode/serenity.json 里写 trajectorySubscriptions）
-            </div>
-          ) : (
-            <ul style={{ margin: '0 0 0 16px' }}>
-              {data.subscriptions.map((s, i) => (
-                <li key={i}>
-                  <strong>{s.watcher}</strong> 盯 {s.members.join('、')}
-                  {s.note !== null ? `（${s.note}）` : ''}
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <h4 style={{ margin: '12px 0 4px' }}>投递（实际：发生了没有）</h4>
-          <div style={{ opacity: 0.75, fontSize: 12, marginBottom: 4 }}>
-            机制计数：收到 agent/status {data.eval.statusEvents} 次 ｜ running {data.eval.runningSeen} ／ idle{' '}
-            {data.eval.idleSeen} ｜ 判成一轮结束 {data.eval.turnFinished}
-            {Object.keys(data.eval.skips).length > 0 &&
-              ` ｜ 跳过 ${Object.entries(data.eval.skips).map(([k, v]) => `${k}=${v}`).join('、')}`}
-          </div>
-          {data.eval.statusEvents === 0 && (
-            <div style={{ opacity: 0.7, fontSize: 12 }}>
-              ⚠ 一次 agent/status 都没收到 —— 可能此刻没人跑轮次，也可能订阅未装配；两者在读数上同形。
-            </div>
-          )}
-          {data.deliveries.length === 0 ? (
-            <div style={{ opacity: 0.7 }}>
-              （本进程内还没有任何投递发生 —— 配了但没出现 = 还没触发过，不等于在工作）
-            </div>
-          ) : (
-            <ul style={{ margin: '0 0 0 16px' }}>
-              {data.deliveries.map((d, i) => (
-                <li key={i}>
-                  {d.key}：成功 {d.ok} ／ 失败 {d.failed}
-                  {d.failed > 0 && <span className="ss-error">　⚠ {d.lastError ?? '（无说明）'}</span>}
-                </li>
-              ))}
-            </ul>
-          )}
-        </>
-      )}
+      {/* 🔴 「轨迹订阅」块**已于 v1.110.0 搬走**（owner 2026-11-01：
+          「轨迹订阅应该显示在CCC的面板而不是ACC的，不然你数据怎么拿呢」）。
+          新落点 = `SafeModePanel.tsx` 的「订阅」tab —— 那是**每个 CCC 自己的面板**，
+          天然知道自己在显示哪个 CCC（`status.root`），不需要外部传 workspace。
+          ⛔ **不要把它搬回这里**：本页是**跨 CCC 的全局设置页**，它拿不到实例身份；
+          实测过不传 workspace 时该端点回 `{"root":"","subscriptions":[]}` ——
+          **静默空表且不报错**，看起来就像"没配订阅"。
+          🔒 落点由测试 `tests/subscriptions-panel-placement.test.ts` 钉住（三条判据）。 */}
     </div>
   )
 }

@@ -75,6 +75,57 @@ interface SkillSummary {
 
 const API = '/serenity/status'
 
+/**
+ * `/serenity/subscriptions` 只读 wire（与 `surface/http.ts` 的 SUBSCRIPTIONS_PATH 对齐）。
+ *
+ * 🔴 **为什么这个块住在 CCC 面板、而不是 DSH 设置面板**（owner 2026-11-01 纠正，
+ *    本文件即纠正的落点）：
+ *    设置面板是**跨 CCC 的全局页**，它不知道自己属于哪个 CCC ⇒ 取数只能靠调用方传
+ *    `workspace`，而浏览器侧没有任何东西"本来就知道"这个值。实测过这条路走不通：
+ *    不带 `workspace` 打该端点 ⇒ `{"root":"","subscriptions":[]}` —— 静默给空表且不报错。
+ *    CCC 面板则相反：它**已经在显示某个 CCC**（`status.root`，与轨迹/技能同源）
+ *    ⇒ 订阅跟着它走，身份天然正确。
+ *    ⇒ 本面板把 `status.root` 作为 `workspace` 传下去（与航行页 iframe 同一套做法）。
+ *    ⛔ **别再把它搬回设置面板** —— 那等于把"取数入口选错了层"这件事重做一遍。
+ */
+interface SubscriptionsWire {
+  root: string
+  /** 配置的订阅（**意图**：谁盯谁） */
+  subscriptions: Array<{ watcher: string; members: string[]; note: string | null }>
+  /** 配置坏项（配了但不生效 —— 必须显形） */
+  problems: string[]
+  /** 投递读数（**实际**：发生了没有；键 = `watcher←member`） */
+  deliveries: Array<{ key: string; ok: number; failed: number; lastError: string | null; lastAt: number | null }>
+  /** 评估计数（**机制在跑吗** —— 与"送出过吗"是两个问题） */
+  eval: {
+    statusEvents: number
+    runningSeen: number
+    idleSeen: number
+    turnFinished: number
+    skips: Record<string, number>
+  }
+}
+
+const SUBSCRIPTIONS_API = '/serenity/subscriptions'
+
+/**
+ * 拉取订阅读数（只读、无副作用）。
+ *
+ * @param workspace 本面板正在显示的那个 CCC（= `status.root`）。
+ *   🔴 **必须传**：服务端在"没有归属信息且多 CCC 共存"时**故意不猜**
+ *   （`surface/http.ts` 的 `resolveWorkspaceCore`）⇒ 不传就会拿到 `root:""` ＋ 空表。
+ *   ⚠️ 空表**不报错**，所以漏传这件事在界面上看起来像"没配订阅"——这正是要避免的形态。
+ */
+async function fetchSubscriptions(workspace: string): Promise<SubscriptionsWire> {
+  const qs = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ''
+  const res = await fetch(`${SUBSCRIPTIONS_API}${qs}`, { headers: { accept: 'application/json' } })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null
+    throw new Error(body?.error ?? `HTTP ${res.status}`)
+  }
+  return (await res.json()) as SubscriptionsWire
+}
+
 /** 盾牌 SVG（v1.24.5 校准：fill=none 纯描边；ON=绿 emerald / OFF=灰 label-secondary 由状态类控制） */
 const SHIELD_SVG = (
   <svg viewBox="0 0 16 16" fill="none" width={16} height={16} aria-hidden="true">
@@ -105,8 +156,10 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
   // ⚠️ 不再有 `busy` 状态：面板已无写操作（safe-mode 降为状态信息），见下方注释
   const [open, setOpen] = useState(false)
   /** tab 切换（2026-10-18 owner 修正：活跃轨迹 / 技能 用 tab，而不是并排两个 panel）
-   *  ⚠️ 纯前端显示状态 —— 两份数据后端一次性都给全，切换**不触发任何请求**。 */
-  const [tab, setTab] = useState<'trajectories' | 'skills'>('trajectories')
+   *  ⚠️ 前两个 tab 是纯前端显示状态 —— 那两份数据后端一次性都给全，切换**不触发请求**。
+   *  🔴 2026-11-01 新增第三个 tab「订阅」：它的数据**不在** `/serenity/status` 里
+   *  （投递计数只存在于插件进程内，见 `SubscriptionsWire` 上方说明）⇒ 首次选中时才拉一次。 */
+  const [tab, setTab] = useState<'trajectories' | 'skills' | 'subscriptions'>('trajectories')
   /** 切换在途（防重复点击；同时给按钮一个禁用态） */
   const [busy, setBusy] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -120,6 +173,12 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
   const trajectories = status?.trajectories ?? []
   // 技能清单（老后端不返回 ⇒ 空清单，面板退化为"暂无技能"而不是崩）
   const skills = status?.skills ?? []
+  // ── 订阅读数（v1.110.0，owner 2026-11-01 纠正落点后从设置面板搬来）──
+  // 三个状态刻意分开：`null` = 还没拉过 ≠ 拉到空表（后者是"确认没有"）。
+  const [subs, setSubs] = useState<SubscriptionsWire | null>(null)
+  const [subsBusy, setSubsBusy] = useState(false)
+  const [subsError, setSubsError] = useState<string | null>(null)
+  const subsRoot = status?.root ?? null
 
   const refresh = useCallback(async () => {
     const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
@@ -134,6 +193,33 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  /**
+   * 拉订阅读数。**只在切到「订阅」tab 时拉**（不是每次开卡片都拉）：
+   * 它读的是进程内计数，多拉一次只多一次噪声；而"进面板就要有数"的诉求由 tab 切换满足。
+   * 🔴 依赖 `subsRoot`：`status` 首次加载完才有 root，root 变了必须重拉
+   * （否则从 CCC 切到另一个 CCC 时会显示上一个 CCC 的订阅表）。
+   */
+  const loadSubs = useCallback(async (): Promise<void> => {
+    if (subsRoot === null) return
+    setSubsBusy(true)
+    setSubsError(null)
+    try {
+      setSubs(await fetchSubscriptions(subsRoot))
+    } catch (err) {
+      // 拉失败**不清空**已有读数：让上一次的数据留着并把错误显形，
+      // 比"失败后屏幕变空"更接近事实（同 `.sp-error` 的用法）。
+      setSubsError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSubsBusy(false)
+    }
+  }, [subsRoot])
+
+  // 切到订阅 tab 且还没拉过 ⇒ 拉一次。
+  // ⚠️ 已拉过就不重复（`subs !== null` 守卫）——用户手动刷新走「刷新读数」按钮。
+  useEffect(() => {
+    if (open && tab === 'subscriptions' && subs === null && !subsBusy) void loadSubs()
+  }, [open, tab, subs, subsBusy, loadSubs])
 
   /**
    * 切换安全模式（owner 2026-10-22：「放到 CCC 面板里吧，方便些」⇒ 快捷开关放回面板）。
@@ -370,6 +456,18 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
                       技能
                       <span className={cx('sp-count')}>{skills.length}</span>
                     </button>
+                    {/* 🔴 订阅 tab 的计数 = 配置了几条**订阅**（不是成员数，也不是投递数）：
+                        它和上面两个 tab 的"条目数"同语义，才能并排看。投递读数进 tab 内容。 */}
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={tab === 'subscriptions'}
+                      className={cx('sp-tab', tab === 'subscriptions' && 'sp-tabActive')}
+                      onClick={() => setTab('subscriptions')}
+                    >
+                      订阅
+                      <span className={cx('sp-count')}>{subs?.subscriptions.length ?? 0}</span>
+                    </button>
                   </div>
 
                   {tab === 'trajectories' ? (
@@ -393,20 +491,29 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
                         ))}
                       </ul>
                     )
-                  ) : skills.length === 0 ? (
-                    <p className={cx('sp-panelEmpty')}>暂无技能</p>
+                  ) : tab === 'skills' ? (
+                    skills.length === 0 ? (
+                      <p className={cx('sp-panelEmpty')}>暂无技能</p>
+                    ) : (
+                      <ul className={cx('sp-list')} role="tabpanel">
+                        {skills.map((s) => (
+                          <li key={s.name} className={cx('sp-item')}>
+                            <span className={cx('sp-itemName', 'sp-itemNameFull')} title={s.name}>{s.name}</span>
+                            {/* 已建模 = 有 skill.ttl。🟢 它是**信息**不是缺陷：无 skill.ttl 完全正常。 */}
+                            {s.modeled && (
+                              <span className={cx('sp-itemTag')} title="已建模（存在 skill.ttl）">建模</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    )
                   ) : (
-                    <ul className={cx('sp-list')} role="tabpanel">
-                      {skills.map((s) => (
-                        <li key={s.name} className={cx('sp-item')}>
-                          <span className={cx('sp-itemName', 'sp-itemNameFull')} title={s.name}>{s.name}</span>
-                          {/* 已建模 = 有 skill.ttl。🟢 它是**信息**不是缺陷：无 skill.ttl 完全正常。 */}
-                          {s.modeled && (
-                            <span className={cx('sp-itemTag')} title="已建模（存在 skill.ttl）">建模</span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
+                    <SubscriptionsView
+                      data={subs}
+                      busy={subsBusy}
+                      error={subsError}
+                      onRefresh={() => void loadSubs()}
+                    />
                   )}
                 </div>
               </>
@@ -439,6 +546,103 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
               tabIndex={-1}
             />
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 「订阅」tab 内容（v1.110.0）。
+ *
+ * 🔴 **刻意分三段显示，不合并不省略**：
+ *  ① **意图**（配置里写了谁盯谁）② **实际**（真的投递过没有）③ **机制**（收到过事件吗）。
+ *  三者回答三个不同问题，任一为真都不能推出另一个：
+ *   · 有意图、无实际 ⇒ 还没触发过（⛔ 不是"在工作"）
+ *   · 有实际、`failed>0` ⇒ 触发了但送不到（这才是要修的）
+ *   · `statusEvents=0` ⇒ 要么没人跑轮次，要么订阅没装配 —— **两者在读数上同形**
+ *  ⇒ 把三段合成一句话，人就分不出来了（这是本轨迹反复踩的同族形态）。
+ *
+ * ⚠️ 计数是**进程内**的（宿主重启清零）——UI 上必须写明，
+ *    否则 `0` 会被读成"从来没配过"。
+ */
+function SubscriptionsView(props: {
+  data: SubscriptionsWire | null
+  busy: boolean
+  error: string | null
+  onRefresh: () => void
+}): React.JSX.Element {
+  const { data, busy, error, onRefresh } = props
+
+  return (
+    <div className={cx('sp-subs')}>
+      <div className={cx('sp-subsBar')}>
+        <button type="button" className={cx('sp-subsBtn')} disabled={busy} onClick={onRefresh}>
+          {busy ? '读取中…' : '刷新读数'}
+        </button>
+        <span className={cx('sp-subsHint')}>计数只在宿主进程内有效（重启清零）</span>
+      </div>
+
+      {error !== null && <p className={cx('sp-subsError')}>⚠ {error}</p>}
+
+      {data === null ? (
+        <p className={cx('sp-panelEmpty')}>{busy ? '读取中…' : '尚未读取'}</p>
+      ) : (
+        <div className={cx('sp-subsBody')}>
+          {data.problems.length > 0 && (
+            <p className={cx('sp-subsError')}>
+              ⚠ 配置坏项 {data.problems.length} 条（配了但不生效）：{data.problems.join('；')}
+            </p>
+          )}
+
+          <div className={cx('sp-subsSectionTitle')}>配置（意图：谁盯谁）</div>
+          {data.subscriptions.length === 0 ? (
+            <p className={cx('sp-panelEmpty')}>
+              未配置任何订阅 —— 在 .opencode/serenity.json 里写 trajectorySubscriptions
+            </p>
+          ) : (
+            <ul className={cx('sp-list')} role="tabpanel">
+              {data.subscriptions.map((s, i) => (
+                <li key={`${s.watcher}-${i}`} className={cx('sp-item')}>
+                  <span className={cx('sp-itemName', 'sp-itemNameFull')} title={`${s.watcher} 盯 ${s.members.join('、')}`}>
+                    <strong>{s.watcher}</strong> 盯 {s.members.join('、')}
+                    {s.note !== null ? `（${s.note}）` : ''}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className={cx('sp-subsSectionTitle')}>投递（实际：发生了没有）</div>
+          {data.deliveries.length === 0 ? (
+            <p className={cx('sp-panelEmpty')}>
+              本进程内还没有任何投递 —— 配了但没出现 = 还没触发过，不等于在工作
+            </p>
+          ) : (
+            <ul className={cx('sp-list')} role="tabpanel">
+              {data.deliveries.map((d) => (
+                <li key={d.key} className={cx('sp-item')}>
+                  <span className={cx('sp-itemName', 'sp-itemNameFull')} title={d.lastError ?? d.key}>
+                    {d.key}：成功 {d.ok} ／ 失败 {d.failed}
+                    {d.failed > 0 && <span className={cx('sp-subsError')}>　⚠ {d.lastError ?? '（无说明）'}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <div className={cx('sp-subsSectionTitle')}>机制（在跑吗）</div>
+          <p className={cx('sp-subsMeter')}>
+            收到 agent/status {data.eval.statusEvents} 次 ｜ running {data.eval.runningSeen} ／ idle{' '}
+            {data.eval.idleSeen} ｜ 判成一轮结束 {data.eval.turnFinished}
+            {Object.keys(data.eval.skips).length > 0 &&
+              ` ｜ 跳过 ${Object.entries(data.eval.skips).map(([k, v]) => `${k}=${v}`).join('、')}`}
+          </p>
+          {data.eval.statusEvents === 0 && (
+            <p className={cx('sp-panelEmpty')}>
+              ⚠ 一次 agent/status 都没收到 —— 可能此刻没人跑轮次，也可能订阅未装配；两者在读数上同形。
+            </p>
+          )}
         </div>
       )}
     </div>

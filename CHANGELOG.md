@@ -1,3 +1,66 @@
+## v1.110.0 — 2026-11-01（「轨迹订阅」搬到 **CCC 面板** —— 取数入口选错了层）
+
+**来源**：owner 架构纠正。逐字：「轨迹订阅应该显示在CCC的面板而不是ACC的，**不然你数据怎么拿呢**」。
+
+---
+
+### 一、缺陷：把块放在了「不知道自己是谁」的那一层
+
+v1.108.0 我把「轨迹订阅」块做进 **DSH 设置面板**（`client/SettingsSection.tsx`）。
+那是**跨 CCC 的全局页** —— 它连"当前是哪个 CCC"都不知道 ⇒ 取数只能靠调用方传 `workspace`，
+而浏览器侧**没有任何东西"本来就知道"这个值**。真机实测（我 20:2x 打的）：
+
+| 请求 | 返回 |
+|---|---|
+| `GET /serenity/subscriptions`（不传 `workspace`） | `{"root":"","subscriptions":[],...}` —— **空** |
+| `GET /serenity/subscriptions?workspace=/…/home-serenity` | 才拿到真数据 |
+
+🔴 **这是最坏的一类失败**：它**不报错**。空表在界面上与「确实没配订阅」**完全同形**
+（与 v1.109.0 修的是同一个病根，只是换了个位置）。
+
+### 二、落点：CCC 面板 = `SafeModePanel.tsx`（不是 `voyage/page.ts`）
+
+**一处考证，值得写下来**：`surface/voyage/page.ts` 是**发 830 KB three.js 静态资产的路由**，
+不是面板、不是 SSR。而 owner 早在 2026-10-18 就说清了"CCC 面板"指哪里（档案逐字）：
+
+> 「CCC 面板全称 CCC 状态面板，**也就是宁静号飞船动画所在的地方**」
+
+飞船动画就在 `SafeModePanel` 的 `sp-pop` 右栏 ⇒ **落点 = `SafeModePanel.tsx`**。
+它**已经在显示某个 CCC**（`status.root`，与轨迹/技能同源）⇒ 订阅跟着它走，身份天然正确。
+
+### 三、改了什么
+
+| 面 | 改动 |
+|---|---|
+| `client/SafeModePanel.tsx` | 新增第三个 tab「订阅」＋ `SubscriptionsView` 子组件；`fetchSubscriptions(workspace)` 传 `status.root` |
+| `client/SettingsSection.tsx` | **删除**该块（移 ≠ 复制：两处各存一份必然漂）；顺带删掉已无用的 `useEffect` 导入 |
+| `client/SafeModePanel.css` | 新增 `.sp-subs*` 一组类（原内联 style 搬进 420px 窄栏会挤爆；内容区自身滚动） |
+| `tests/subscriptions-panel-placement.test.ts` | **新增**：三条落点判据（见下） |
+
+`/serenity/subscriptions` 端点**保留**：面板在浏览器里跑，**读不到插件进程内的投递计数**；
+且「取数单一出口」要求面板不自己解析 CCC 配置。它现在与 `/serenity/status` 同规格。
+
+### 四、判据（三条，缺一条就退化）
+
+| # | 断言 | 缺了会怎样 |
+|---|---|---|
+| ① | 块在 CCC 面板里 | 用户够不着（同「全绿但拿不到」那类） |
+| ② | 请求带 `workspace=`，取值 `status.root` | 服务端不猜 ⇒ **静默空表** |
+| ③ | 已从设置面板移除 | 两处漂 |
+
+**变异检验两次，各自精确红 1 条**（其余 3 条不动）：
+① `workspace=` → `ws=` ⇒ 只有 ② 红；② 把块塞回设置面板 ⇒ 只有 ③ 红。
+🔒 既有 `client-popover-clip-guard.test.ts` 里有一条写死 `useState<'trajectories' | 'skills'>` 的断言
+—— 那是"当时只有两个 tab"的形态，本轮字面变宽是**预期**。已按**本意**（tab 状态驱动条件渲染）
+订正为钉住三个 tab 各自的独立条件分之，**不是**放宽成 `toContain('useState')`。
+
+### 五、门禁
+
+六项全绿：typecheck ✅ ／ test **3205 passed / 202 files** ✅ ／ coverage **95.21%** ✅ ／
+build ✅（node 780,037 B ／ client 235,438 B）／ pack-check ✅（167 文件）。
+
+---
+
 ## v1.109.0 — 2026-11-01（诊断面补一格：订阅的**评估计数** —— 「没装配」与「没命中」不再同形）
 
 **来源**：我在 v1.108.0 真机验证时**自己发现的缺陷**，不是 owner 提的。
