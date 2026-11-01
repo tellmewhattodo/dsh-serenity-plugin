@@ -18,7 +18,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { hostService, hostSessions } from '../host/access.js'
 import { getStatus, setSafeMode } from './status.js'
-import { DEFAULT_SERENITY_CONFIG_PATHS } from '../kernel/ccc.js'
+import { DEFAULT_SERENITY_CONFIG_PATHS, readTrajectorySubscriptions } from '../kernel/ccc.js'
+import { subscriptionStats, subscriptionEval } from '../trajectory/subscriptions.js'
 // C2（CCC 发现面归一）：L1 单根解析 / L2 枚举一律问 ccc-roots（本文件不再自写上溯包裹）
 import { cccRootForCwd, listCccs } from '../kernel/ccc-roots.js'
 import { readAdvancedSettings, toWire, applyWirePatch, projectKnownWorkspaces } from '../kernel/config.js'
@@ -30,6 +31,7 @@ const FILE_UPLOAD_PATH = '/serenity/file-upload'
 const CONFIG_PATH = '/serenity/config'
 const CCCS_PATH = '/serenity/cccs'
 const WEIXIN_PATH = '/serenity/weixin'
+const SUBSCRIPTIONS_PATH = '/serenity/subscriptions'
 
 /** 图片落盘目录（CCC 根相对；S142 图片自动识别基础设施——粘贴图片落盘供 agent 经 CCC vlm MSM 自主处理） */
 export const IMAGE_UPLOAD_DIR = '_tmp/images_from_user'
@@ -391,6 +393,49 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
         // CccEntry 带 name + roles ⇒ 面板选择器需要的字段齐备（与旧 discoverCccs 输出同形）。
         const cccs = await listCccs(ctx, { defaultRoot: root, withRoles: true })
         sendJson(res, 200, { cccs })
+      } catch (err: any) {
+        sendJson(res, 400, { error: err.message ?? String(err) })
+      }
+    },
+  })
+
+  // /serenity/subscriptions：轨迹消息订阅的**只读**读数（v1.108.0，owner 2026-11-01 P3）
+  //
+  // 🔴 为什么必须有这个端点（而不是让面板自己读文件）：
+  //    ① **投递计数只存在于插件进程内**（`trajectory/subscriptions.ts` 的模块级表），
+  //       面板是浏览器里跑的，**读不到进程内存**；② `privacy-scan` 与「取数单一出口」都要求
+  //       面板不自己解析 CCC 配置。⇒ 服务端取数、面板只渲染（与 `/serenity/status` 同规格）。
+  //
+  // ⚠️ **只读**：本端点**不接受写**。订阅表是**配置**，改了要热生效的语义尚未定义
+  //    （CRO 开关那种热生效是另一套机制，⛔ 不要顺手把它当模板）⇒ 只读先上线，
+  //    写面等 owner 明确要"页面里改订阅"再做（D85：一次只改一件事）。
+  ctx.webServer.register({
+    kind: 'exact',
+    path: SUBSCRIPTIONS_PATH,
+    handler: async (req: IncomingMessage, res: ServerResponse) => {
+      try {
+        if (req.method !== 'GET') {
+          sendJson(res, 405, { error: 'method not allowed' })
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+        const workspace = resolveWorkspace(ctx, {
+          sessionId: url.searchParams.get('sessionId') ?? undefined,
+          workspace: url.searchParams.get('workspace') ?? undefined,
+        })
+        const root = cccRootForCwd(workspace) ?? ''
+        // 配置（**渲染成"谁盯谁"的意图**）＋ 投递读数（**实际发生了没有**）——两者必须分开给：
+        // 一个配了但从未出现在读数里的订阅 = 还没触发过，⛔ 不是"在工作"。
+        const { subs, problems } = root ? readTrajectorySubscriptions(root) : { subs: [], problems: [] }
+        sendJson(res, 200, {
+          root,
+          subscriptions: subs.map((s) => ({ watcher: s.watcher, members: s.members, note: s.note ?? null })),
+          problems,
+          deliveries: subscriptionStats(),
+          // 🔴 评估计数：回答「**这个机制到底有没有在跑**」。
+          //    只有 deliveries 时，「没装配」与「装配了但从未命中」在面板上完全同形（都空）。
+          eval: subscriptionEval(),
+        })
       } catch (err: any) {
         sendJson(res, 400, { error: err.message ?? String(err) })
       }

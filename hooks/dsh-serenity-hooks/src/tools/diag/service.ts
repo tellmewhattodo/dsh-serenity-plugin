@@ -52,7 +52,7 @@ import { WAKE_CATCH_UP_MS } from '../../wake/registry.js'
 import { diagLive, type DiagLiveReport } from '../../trajectory/live.js'
 import { containerClocks, containerWakes, type ClockSnapshot } from '../../surface/observation.js'
 import { listCroCognitiveTrajectories } from '../../cro/core.js'
-import { subscriptionStats } from '../../trajectory/subscriptions.js'
+import { subscriptionStats, subscriptionEval } from '../../trajectory/subscriptions.js'
 import { readTrajectorySubscriptions } from '../../kernel/ccc.js'
 import type { Context } from 'cordis'
 import { isoLocal } from '../../kernel/time.js'
@@ -135,6 +135,17 @@ export interface DiagReport {
   subscriptions: Array<{ key: string; ok: number; failed: number; lastError: string | null; lastAt: number | null }>
   /** 订阅配置本身的**坏项**（配了但不生效的条目 —— 必须显形，否则用户以为它在工作） */
   subscriptionProblems: string[]
+  /**
+   * 订阅机制的**评估计数**（v1.108.0）：收到多少 `agent/status`、认出多少次一轮结束、各因何跳过。
+   * 🔴 它回答的是「**机制在跑吗**」—— 与「送出过东西吗」是两个问题；缺了它两者同形（都是空）。
+   */
+  subscriptionEval: {
+    statusEvents: number
+    runningSeen: number
+    idleSeen: number
+    turnFinished: number
+    skips: Record<string, number>
+  }
 }
 
 /**
@@ -185,6 +196,7 @@ export async function runDiag(ctx: Context, root: string, nowMs: number = Date.n
     // 订阅读数：投递计数（进程内，重启清零）＋ 配置坏项（现读配置，热改即时反映）
     subscriptions: subscriptionStats(),
     subscriptionProblems: readTrajectorySubscriptions(root).problems,
+    subscriptionEval: subscriptionEval(),
   }
 }
 
@@ -254,6 +266,25 @@ export function renderDiag(r: DiagReport): string {
   // 🔴 措辞要能分清两种形态：**没出现过**=还没触发过；**出现且失败**=触发了但送不到。
   lines.push('')
   lines.push(`── ⑤ 轨迹消息订阅（投递读数；只列发生过的投递，配置全表见 serenity.json）──`)
+  // 🔴 评估计数**先于**投递读数：它回答"机制在跑吗"，而投递读数只回答"送出过吗"。
+  //    没有它，"没装配"与"装配了但从未命中"同形（都是空）——那正是本段要防的误读。
+  {
+    const e = r.subscriptionEval
+    const skipText =
+      Object.keys(e.skips).length === 0
+        ? '无'
+        : Object.entries(e.skips)
+            .map(([k, v]) => `${k}=${v}`)
+            .join(' ／ ')
+    lines.push(
+      `机制计数: 收到 agent/status ${e.statusEvents} 次｜running ${e.runningSeen}｜idle ${e.idleSeen}` +
+        `｜判成一轮结束 ${e.turnFinished}｜跳过: ${skipText}`,
+    )
+    if (e.statusEvents === 0) {
+      lines.push('  ⚠ 一次 agent/status 都没收到 ⇒ 要么此刻真的没人在跑轮次，要么订阅未装配。')
+      lines.push('    两者在读数上同形 —— 判"未装配"要看宿主日志里有没有「轨迹消息订阅未装配」。')
+    }
+  }
   if (r.subscriptionProblems.length > 0) {
     lines.push(`⚠ 配置坏项 ${r.subscriptionProblems.length} 条（**配了但不生效**）：`)
     for (const p of r.subscriptionProblems) lines.push(`  · ${p}`)

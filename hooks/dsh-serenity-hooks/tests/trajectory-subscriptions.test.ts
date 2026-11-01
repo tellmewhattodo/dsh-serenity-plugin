@@ -28,7 +28,9 @@ import {
   onTurnFinished,
   registerTrajectorySubscriptions,
   subscriptionStats,
+  subscriptionEval,
   __resetSubscriptionStatsForTest,
+  __resetSubscriptionEvalForTest,
   type SubscriptionDeps,
 } from '../src/trajectory/subscriptions.js'
 import { readTrajectorySubscriptions, type TrajectorySubscription } from '../src/kernel/ccc.js'
@@ -39,6 +41,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'subs-'))
   writeFileSync(join(dir, '.serenity'), 'test')
   __resetSubscriptionStatsForTest()
+  __resetSubscriptionEvalForTest()
 })
 
 afterEach(() => {
@@ -264,6 +267,80 @@ describe('trajectory-subscriptions: onTurnFinished 三个失败面', () => {
     const stats = subscriptionStats()
     expect(stats).toHaveLength(1)
     expect(stats[0]).toMatchObject({ key: 'W←A', ok: 2, failed: 0, lastAt: 20 })
+  })
+})
+
+describe('trajectory-subscriptions: 🔴 评估计数（判"机制在跑吗"的唯一读数）', () => {
+  // 这一组防的是我自己第一版的缺陷：只有投递计数时，
+  // **「机制没装配」与「装配了但从未命中」在面板上完全同形**（都是空表）。
+  function fakeCtx(): { ctx: unknown; emit: (e: string, p: unknown) => void } {
+    const handlers = new Map<string, (p: unknown) => void>()
+    return {
+      ctx: {
+        on: (e: string, h: (p: unknown) => void) => {
+          handlers.set(e, h)
+        },
+        effect: () => {},
+      },
+      emit: (e, p) => handlers.get(e)?.(p),
+    }
+  }
+
+  it('🔴 收到事件本身就要计数（即便没有任何投递 —— 那是"在跑但没命中"的证据）', async () => {
+    __resetSubscriptionEvalForTest()
+    const { ctx, emit } = fakeCtx()
+    registerTrajectorySubscriptions(
+      ctx,
+      deps({ rootForSession: () => '/ccc', readSubs: () => ({ subs: [], problems: [] }) }),
+    )
+    emit('agent/status', { agent: { session: { id: 's1' } }, status: 'running' })
+    emit('agent/status', { agent: { session: { id: 's1' } }, status: 'idle' })
+    await new Promise((r) => setTimeout(r, 10))
+    const e = subscriptionEval()
+    expect(e.statusEvents).toBe(2)
+    expect(e.runningSeen).toBe(1)
+    expect(e.idleSeen).toBe(1)
+    expect(e.turnFinished).toBe(1)
+    // 没有订阅 ⇒ 跳过原因被记下来（这才能区分"没配"与"没跑"）
+    expect(e.skips['no-subscriptions']).toBe(1)
+  })
+
+  it('🔴 没见 running 的 idle 记为独立原因（⛔ 不与"真一轮结束"混计）', async () => {
+    __resetSubscriptionEvalForTest()
+    const { ctx, emit } = fakeCtx()
+    registerTrajectorySubscriptions(ctx, deps({ readSubs: () => ({ subs: [], problems: [] }) }))
+    emit('agent/status', { agent: { session: { id: 's1' } }, status: 'idle' })
+    await new Promise((r) => setTimeout(r, 10))
+    const e = subscriptionEval()
+    expect(e.turnFinished).toBe(0) // ⛔ 不得算成一轮结束
+    expect(e.skips['idle-without-running']).toBe(1)
+  })
+
+  it('会话不在任何 CCC ⇒ 记 no-ccc 跳过（可与"没配订阅"区分开）', async () => {
+    __resetSubscriptionEvalForTest()
+    const { ctx, emit } = fakeCtx()
+    registerTrajectorySubscriptions(ctx, deps({ rootForSession: () => null }))
+    emit('agent/status', { agent: { session: { id: 's1' } }, status: 'running' })
+    emit('agent/status', { agent: { session: { id: 's1' } }, status: 'idle' })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(subscriptionEval().skips['no-ccc']).toBe(1)
+  })
+
+  it('绑了轨迹但不在任何 members 里 ⇒ 记 not-in-any-members（与"没绑轨迹"分开）', async () => {
+    __resetSubscriptionEvalForTest()
+    const { ctx, emit } = fakeCtx()
+    registerTrajectorySubscriptions(
+      ctx,
+      deps({
+        rootForSession: () => '/ccc',
+        readSubs: () => ({ subs: [SUB], problems: [] }),
+        dirForSession: () => 'Z',
+      }),
+    )
+    emit('agent/status', { agent: { session: { id: 's1' } }, status: 'running' })
+    emit('agent/status', { agent: { session: { id: 's1' } }, status: 'idle' })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(subscriptionEval().skips['not-in-any-members']).toBe(1)
   })
 })
 

@@ -479,6 +479,37 @@ describe('src/api.ts：其余路由（config ／ cccs ／ public-ask ／ weixin 
     }
   })
 
+  it('🆕 /serenity/subscriptions：GET ⇒ 200（两栏分开给）；POST ⇒ 405（只读）', async () => {
+    const api = await bootApi()
+    try {
+      const res = await raw({
+        port: api.port,
+        method: 'GET',
+        path: `/serenity/subscriptions?workspace=${encodeURIComponent(ccc)}`,
+        headers: UI_HEADERS,
+      })
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body) as {
+        subscriptions: unknown
+        problems: unknown
+        deliveries: unknown
+        eval: unknown
+      }
+      // 🔴 四个字段一个都不能少：它们**分工**（意图 / 坏项 / 实际 / 机制在跑吗），少一个面板就分不清
+      expect(Array.isArray(body.subscriptions)).toBe(true)
+      expect(Array.isArray(body.problems)).toBe(true)
+      expect(Array.isArray(body.deliveries)).toBe(true)
+      // eval 回答"机制在跑吗"—— 没有它，"没装配"与"装配了但从未命中"同形
+      expect(body.eval).toMatchObject({ statusEvents: expect.any(Number), turnFinished: expect.any(Number) })
+
+      // 只读端点：写方法必须 405（⛔ 不是"200 但什么都不做"——那看起来像成功）
+      const wrong = await raw({ port: api.port, method: 'POST', path: '/serenity/subscriptions' })
+      expect(wrong.status).toBe(405)
+    } finally {
+      await api.close()
+    }
+  })
+
   it('🔴 /serenity/public-ask 已随面 E 退役：GET 与 PUT 都走 404（不是"空配置"）', async () => {
     const api = await bootApi()
     try {

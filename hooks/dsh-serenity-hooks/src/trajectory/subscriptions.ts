@@ -72,6 +72,54 @@ interface DeliveryStat {
 
 const stats = new Map<string, DeliveryStat>()
 
+/**
+ * 评估计数（**"这个机制到底有没有在跑"的唯一读数**，v1.108.0）。
+ *
+ * 🔴 **为什么必须有它**（我自己在第一版里漏掉了）：只有 `stats`（投递计数）时，
+ * **「机制没装配」与「装配了但从未命中」在面板上完全同形** —— 两者都是空表。
+ * 而那正是本文件头批评过的失败形态（"配了但不生效"与"没人干活"分不开）。
+ * ⇒ 本计数把**事件流**也记下来：收到多少 `agent/status`、认出多少次 running→idle、
+ * 每次因何跳过。有它才能回答「它在跑吗」，而不只是「它送出过东西吗」。
+ *
+ * ⚠️ 上界：固定字段（不是无界 Map）⇒ 结构上不可能"只增不清"。
+ */
+export interface EvalStats {
+  /** 收到的 `agent/status` 事件数（含非 running/idle 的） */
+  statusEvents: number
+  /** 其中被认成 running 的 */
+  runningSeen: number
+  /** 其中被认成 idle 的 */
+  idleSeen: number
+  /** 真被判成「一轮结束」（= 有前置 running 的 idle）的次数 */
+  turnFinished: number
+  /** 跳过原因计数（键 = `no-ccc` / `no-subscriptions` / `unbound-member`） */
+  skips: Record<string, number>
+}
+
+const evalStats: EvalStats = { statusEvents: 0, runningSeen: 0, idleSeen: 0, turnFinished: 0, skips: {} }
+
+/** 评估计数快照（诊断/面板读） */
+export function subscriptionEval(): EvalStats {
+  return { ...evalStats, skips: { ...evalStats.skips } }
+}
+
+function bump(key: 'statusEvents' | 'runningSeen' | 'idleSeen' | 'turnFinished'): void {
+  evalStats[key] += 1
+}
+
+function bumpSkip(reason: string): void {
+  evalStats.skips[reason] = (evalStats.skips[reason] ?? 0) + 1
+}
+
+/** 测试用：评估计数复位 */
+export function __resetSubscriptionEvalForTest(): void {
+  evalStats.statusEvents = 0
+  evalStats.runningSeen = 0
+  evalStats.idleSeen = 0
+  evalStats.turnFinished = 0
+  evalStats.skips = {}
+}
+
 function statOf(key: string): DeliveryStat {
   const cur = stats.get(key)
   if (cur) return cur
@@ -176,7 +224,10 @@ export async function onTurnFinished(
 ): Promise<{ skipped: 'no-ccc' | 'no-subscriptions' | 'unbound-member' | null; delivered: number; failed: number }> {
   // 先解析根：解析不出 = 这条会话不在任何 CCC 内 ⇒ 与本机制无关（不是错误）
   const root = deps.rootForSession(sessionId)
-  if (root === null) return { skipped: 'no-ccc', delivered: 0, failed: 0 }
+  if (root === null) {
+    bumpSkip('no-ccc')
+    return { skipped: 'no-ccc', delivered: 0, failed: 0 }
+  }
 
   const { subs, problems } = deps.readSubs(root)
 
@@ -184,14 +235,23 @@ export async function onTurnFinished(
   // 触发时刻就被人看见 —— 否则用户以为它在工作。（与 fail-open 的整体方向不冲突。）
   for (const p of problems) deps.warn(`[serenity-hooks] ✗ 轨迹订阅配置有坏项（${root}）：${p}`)
 
-  if (subs.length === 0) return { skipped: 'no-subscriptions', delivered: 0, failed: 0 }
+  if (subs.length === 0) {
+    bumpSkip('no-subscriptions')
+    return { skipped: 'no-subscriptions', delivered: 0, failed: 0 }
+  }
 
   // ① 这个会话归哪条轨迹？（解析不出 ⇒ 跳过，**这不是错误**，见文件头失败面 ①）
   const memberDir = deps.dirForSession(root, sessionId)
-  if (memberDir === null) return { skipped: 'unbound-member', delivered: 0, failed: 0 }
+  if (memberDir === null) {
+    bumpSkip('unbound-member')
+    return { skipped: 'unbound-member', delivered: 0, failed: 0 }
+  }
 
   const hits = pickSubscriptionsFor(subs, memberDir)
-  if (hits.length === 0) return { skipped: 'unbound-member', delivered: 0, failed: 0 }
+  if (hits.length === 0) {
+    bumpSkip('not-in-any-members')
+    return { skipped: 'unbound-member', delivered: 0, failed: 0 }
+  }
 
   let delivered = 0
   let failed = 0
@@ -242,11 +302,13 @@ export function registerTrajectorySubscriptions(ctx: unknown, deps: Subscription
 
   try {
     ;(ctx as { on: (e: string, h: (p: unknown) => void) => void }).on('agent/status', (payload) => {
+      bump('statusEvents') // 🔴 先记"事件来了" —— 这是"机制在跑吗"的最低证据
       const p = payload as { agent?: unknown; status?: unknown }
       const sessionId = (p?.agent as { session?: { id?: unknown } } | undefined)?.session?.id
       if (typeof sessionId !== 'string' || sessionId === '') return
       const status = typeof p.status === 'string' ? p.status : ''
       if (status === 'running') {
+        bump('runningSeen')
         lastStatus.set(sessionId, 'running')
         return
       }
@@ -254,10 +316,17 @@ export function registerTrajectorySubscriptions(ctx: unknown, deps: Subscription
         lastStatus.delete(sessionId)
         return
       }
+      bump('idleSeen')
       // 到这里 = idle。**只有前一刻是 running 才算"一轮结束"**（见上方注释）
       const prev = lastStatus.get(sessionId)
       lastStatus.delete(sessionId)
-      if (prev !== 'running') return
+      if (prev !== 'running') {
+        // 🔴 单独记：**没见 running 的 idle** 与**见了 running 的 idle** 意义完全不同
+        //    （前者是宿主刚载入载体，后者才是真的一轮结束）。合成一个数就分不出来了。
+        bumpSkip('idle-without-running')
+        return
+      }
+      bump('turnFinished')
       // ⚠️ 不 await（事件处理器不该阻塞宿主），但**必须挂 catch**：
       //    否则 Promise 拒绝会成为 unhandledRejection（本容器栽过同类）。
       void onTurnFinished(deps, sessionId, Date.now()).catch((err) => {
@@ -272,6 +341,7 @@ export function registerTrajectorySubscriptions(ctx: unknown, deps: Subscription
   registerDisposer(ctx, 'trajectory subscriptions', () => {
     lastStatus.clear()
     stats.clear()
+    __resetSubscriptionEvalForTest()
   })
 }
 
