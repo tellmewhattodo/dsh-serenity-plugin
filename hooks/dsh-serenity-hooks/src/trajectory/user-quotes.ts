@@ -50,15 +50,21 @@
  * 本模块立项时留过一个开放项：「IM 消息是否也走 `agent/pre-step`、是否同为 `kind:'user'`，
  * 会与界面直话混在一起」。**已取证，答案是不会混** —— 因为 IM 入站**根本不是** `kind:'user'`：
  *
- * - 代码面：`im/inbound-event.ts` 的入站走 `deliverToTrajectory`（`trajectory/session.ts:655`），
- *   它构造消息用的是 `createUserMessage({ …, source: PLUGIN_SOURCE })` ⇒ **`kind:'plugin:dsh-serenity-hooks'`**。
- * - 日志面（`dsh-session corpus raw --session skiff-weixin-…`，同一会话两条并存）：
+ * - 代码面：**两个 IM 渠道共用一个入站投递出口** `deliverToTrajectory`
+ *   （`trajectory/session.ts:655`）—— 微信从 `im/bridge.ts` 进来、飞书从 `im/feishu-account.ts` 进来，
+ *   两者各自造"中立事件"后**都调到同一个** `handleInboundEvent`。该出口构造消息用的是
+ *   `createUserMessage({ …, source: PLUGIN_SOURCE })` ⇒ **`kind:'plugin:dsh-serenity-hooks'`**。
+ *   🔴 判据落在**那个共用的投递函数**上，**不在渠道上** ⇒ 微信与飞书同结论，不是只讲微信。
+ * - 日志面（`dsh-session corpus raw --session skiff-weixin-…`，同一会话两种并存真读）：
  *   微信那条 = `{"kind":"plugin:dsh-serenity-hooks",…}`，正文含 `[serenity:weixin-manual-output]` 标记；
  *   界面那条 = `{"kind":"user","rpcId":…,"clientTimeZone":…}`。
  *
- * ⇒ **按 `kind === 'user'` 过滤，天然只收界面直话，IM 入站一条都进不来。**
- * ⚠️ 这是**当前实现的属性**，不是协议保证：若哪天 IM 改回 `kind:'user'`，本模块会**开始**收录它。
- *   那时 `channel` 判别需要重新裁决 —— 不是靠本函数自己猜，而是要 owner 拍板（Q1 的范围问题）。
+ * ⇒ **按 `kind === 'user'` 过滤，天然只收界面直话，IM（微信／飞书）一条都进不来。**
+ * ⚠️ **两条边界，别替本模块说满**：
+ *   ① 这是**当前实现的属性，不是协议保证**——宿主只承诺"user 位置上可有任意生产者的 kind"，
+ *      没有任何东西保证 IM 永远是 `plugin:…`。若哪天 IM 改回 `kind:'user'`，本模块会**开始**收录它；
+ *      那时 `channel` 判别需 owner 重新裁决（那是 Q1 的范围问题，⛔ 不由本函数自己猜）。
+ *   ② **`_im-logs/<channel>/` 仍是 IM 原话的唯一真相源**。本台账不收录 IM ≠ 那些话丢了。
  *
  * ## 🔴 两个「冒充 user」的生产者（结构性分不开，只能靠标记排除）
  *

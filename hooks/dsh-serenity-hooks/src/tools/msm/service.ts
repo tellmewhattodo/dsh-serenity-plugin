@@ -423,8 +423,10 @@ CCC 级微信个人号接入（iLink 协议）：dsh 一进程多 CCC，每 CCC 
   ▸ **"对谁" = 按轨迹**（Q1），取绑定真相源（\`current.dsh_session_bind\`）；未绑定 ⇒ \`null\` 但**照常记**。
   ▸ **全文**（Q3）：一字不改，不做摘要；\`chars\` 是**码点数**不是 UTF-16 单元数。
   ▸ 两个**冒充 \`kind:'user'\`** 的生产者（载体开场白／rebuild 锚点）按各自标记排除。
-  ▸ IM 入站（微信/飞书）**不会混进来**：它走 \`deliverToTrajectory\`，kind 是
-    \`plugin:dsh-serenity-hooks\`（已取证，非推演）。⇒ 台账 = **界面直话**。
+  ▸ IM 入站（**微信与飞书都算**）**不会混进来**：两者共用一个投递出口 \`deliverToTrajectory\`，
+    kind 是 \`plugin:dsh-serenity-hooks\`（已取证，非推演）。⇒ 台账 = **界面直话**。
+    ⚠️ 两条边界：① 这是当前实现的属性、**不是协议保证**（IM 若改回 kind:'user' 就会开始收录，
+    那时要重新裁决）；② \`_im-logs/<channel>/\` 仍是 IM 原话的唯一真相源 —— 不收录 ≠ 丢了。
   ▸ 采集失败只 warn、**不阻断 step**（台账是旁路观测，不是被观测对象的组成部分）。
   判据全文（含取证与变异检验设计）⇒ \`src/trajectory/user-quotes.ts\` 头注释。
 `
