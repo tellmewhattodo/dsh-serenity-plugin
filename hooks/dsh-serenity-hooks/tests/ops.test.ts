@@ -62,12 +62,9 @@ describe('kit-ops', () => {
     expect(typeof t.epoch_ms).toBe('number')
   })
 
-  it('wait 需正整数秒数（对齐 osp；缺省 1）', async () => {
-    // 0 秒拒绝（osp spec：positive int）
-    await expect(runKit(dir, { action: 'wait', seconds: 0 })).rejects.toThrow(/positive integer/)
-    // 负秒数拒绝
-    await expect(runKit(dir, { action: 'wait', seconds: -1 })).rejects.toThrow(/positive integer/)
-  })
+  // 🔴 2026-11-02：`wait` 三例已随该动作整条砍掉（owner 令「砍掉 wait」）。
+  //    ⛔ 不替换成"wait 现在会抛 Unknown action"这种断言 —— 那是**退役功能的残留引用**
+  //    （D151 同族：下一个 agent 读到它会当成"wait 还在，只是坏了"）。删干净即可。
 
   // 🔴 v1.106.0：`diag` 动作（原独立工具 acc-diag 并入）。
   //    这一组钉的是**接线**，不是诊断内容本身（内容见 `diag.test.ts`）——
@@ -88,11 +85,10 @@ describe('kit-ops', () => {
     expect(KIT_ACTIONS).toContain('diag')
   })
 
-  it('wait 1 秒耗时 ≥ 约 1 秒', async () => {
-    const started = Date.now()
-    const w = await runKit(dir, { action: 'wait', seconds: 1 })
-    expect(Date.now() - started).toBeGreaterThanOrEqual(900)
-    expect(w).toBe('waited 1s') // 对齐 osp 文本输出
+  it('🔴 `wait` 已退役：不在 KIT_ACTIONS 里（退役功能不得留残留引用，D151）', () => {
+    // 正向钉"它不在清单里"，比逐个钉"它调不通"更强：后者在下一个人把它加回来时仍会绿
+    // （只要新实现没抛那个特定的错），而前者立刻红。
+    expect(KIT_ACTIONS as readonly string[]).not.toContain('wait')
   })
 })
 

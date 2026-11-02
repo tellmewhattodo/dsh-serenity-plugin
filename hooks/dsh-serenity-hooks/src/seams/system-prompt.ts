@@ -111,7 +111,7 @@ export function toolsBlock(): string {
     '',
     '  container_fs — container filesystem operations (14 subcommands: root/resolve/exists/list/tree/relative/mkdir/rm/mv/cp/touch/reveal/info/find)',
     '  cognitive_trajectory — one cognitive trajectory: its persistent body (SESSION.md) + its timeline. Lifecycle: list (inventory + stats) / show / create / use (activate; inline integrity check — silent when fine) / rebuild (clear-and-rebuild this conversation in place, Ship of Theseus); delivery: send-now (deliver one message RIGHT NOW; live target injected immediately, non-live cold-resumed like a direct wake — returns a synchronous receipt) / send-later (one future instant + one message to any cognitive trajectory; fire-and-forget — no receipt, no recall) / cro-guide (the CRO programming guide: how to give THIS cognitive trajectory its own program that decides when it should be woken)',
-    '  dashboard    — always-on container instruments: health (CCC three-principle check + registry integrity) / time (now) / wait (N seconds)',
+    '  dashboard    — always-on container instruments: health (CCC three-principle check + registry integrity) / time (now) / diag (runtime diagnosis)',
     '  container_git— git operations (status/commit/push/log/pull/diff)',
     '  msm          — execute a registered CCC MSM: msm(name, args); partial name returns candidates; inspect=true shows usage',
     '  praxis       — actionable theory injection: praxis (index) / praxis eap / praxis neat / praxis cce / praxis ontology',

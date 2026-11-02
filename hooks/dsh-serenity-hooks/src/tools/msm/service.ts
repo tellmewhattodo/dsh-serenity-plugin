@@ -124,7 +124,7 @@ Directory of ACC capabilities — each area lists where to go for details (guide
   ② 认知质量框架      → praxis（eap/neat/cce/ontology 四合一——可实践理论注入，section 渐进披露，无参即目录）
                           ontology（v1.52 D121：本体工程**引擎**——init/check/explain/verify/review/compliance；
                           与 praxis ontology 的分工 = 那个是**方法文本**、这个是**能跑的那个**）
-  ③ 工具与执行        → container_fs（容器文件系统 15 子命令）/ container_git（git）/ dashboard（health 含注册表检查/time/wait）
+  ③ 工具与执行        → container_fs（容器文件系统 15 子命令）/ container_git（git）/ dashboard（health 含注册表检查/time/diag）
                          acc_msm 已并入 msm（执行+发现）与 container_admin（管理）——msm("<name>", ["<args>"])；inspect=true 查用法
                          （v1.106.0 已删 exclusiveTools 机制：原专属工具 acc-diag **已并入 dashboard diag**）
   ④ 轨迹约束与对外面  → container_admin config（轨迹约束四动作 guide/validate/apply/list——**原 role 域已并入 config**，旧名作过渡别名仍可用；说明类配置走**两层菜单** config docs 目录 ／ config docs <章节> 详情）

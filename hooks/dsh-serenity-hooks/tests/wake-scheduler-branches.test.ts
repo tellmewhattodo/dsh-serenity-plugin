@@ -75,6 +75,16 @@ const croState = {
   dirs: [] as string[],
   /** evaluateCro 的行为：wake / no-wake / skipped / throw（B4） */
   behavior: 'no-wake' as 'wake' | 'no-wake' | 'skipped' | 'throw',
+  /** evaluateCro 的人为耗时（ms）—— 只有 §A1 并发用例需要它（其余用例恒 0，不拖慢套件） */
+  delayMs: 0,
+  /**
+   * 每次 evaluateCro 的进出时刻（§A1 用例用来量**真实并发跨度**）。
+   *
+   * 🔴 为什么不用"跑 tick 之后等 N×delay×2 再量总耗时"：那样量到的是**我自己那个 sleep**，
+   * 不是 CRO 阶段的跨度 —— 读数器与被测对象不匹配（D252），它会恒红且红得毫无信息。
+   * ⇒ 只认这条：`max(出) − min(进)` = 该阶段真实的墙上跨度。
+   */
+  spans: [] as Array<{ in: number; out: number }>,
 }
 const logState = { appendOk: true }
 
@@ -87,6 +97,12 @@ vi.mock('../src/cro/core.js', async (importActual) => {
       return croState.dirs.length > 0 ? croState.dirs : actual.listCroCognitiveTrajectories(root)
     },
     evaluateCro: async (root: string, dirName: string, input: unknown) => {
+      // §A1 并发用例的耗时与进出时刻（其余用例 delayMs=0 ⇒ 不拖慢、不记录）
+      if (croState.delayMs > 0) {
+        const tIn = Date.now()
+        await new Promise((r) => setTimeout(r, croState.delayMs))
+        croState.spans.push({ in: tIn, out: Date.now() })
+      }
       if (croState.behavior === 'throw') throw new Error('evaluateCro boom (injected)')
       if (croState.behavior === 'wake') {
         return {
@@ -185,6 +201,8 @@ beforeEach(() => {
   croState.listThrows = false
   croState.dirs = []
   croState.behavior = 'no-wake'
+  croState.delayMs = 0
+  croState.spans = []
   logState.appendOk = true
   __setSimpleSourceForTest(() => defaultSimpleSettings())
 })
@@ -333,6 +351,49 @@ describe('wake-scheduler 分支面: B CRO 与容错兜底', () => {
     return wakeSchedulerState().lastTickLog
   }
 
+  it('🔴 M1（§A1 并发）：N 条轨迹的 CRO **并发跑** ⇒ 总墙上时间 ≈ ceil(N/上限) × 单条，不是 N × 单条', async () => {
+    // 🔴 本用例是 owner 令「整体节律 60 秒」的**准入判据**（执行清单 §A5）：
+    //    串行语义下 N=8、单条 100ms ⇒ 墙上 ≈800ms；并发上限 4 ⇒ ≈200ms。
+    //    60s 节拍下若仍是串行，真实单条最坏 60s ⇒ 一拍 480s ⇒ **静默永久追不上**。
+    // ⚠️ 变异检验口径（A5）：把 `CRO_CONCURRENCY` 改回 1（或把 mapWithConcurrency 换成
+    //    `for … await`）⇒ 本断言**必须红**。它红了才证明这层护栏真在起作用。
+    const N = 8
+    const PER_ITEM_MS = 100
+    const dirs: string[] = []
+    for (let i = 0; i < N; i++) {
+      const d = `2026-09-13--S99${i}--sched-target--auto`
+      writeSessionDir(d)
+      writeCroHostBinding(hostname(), d) // 过机器绑定门，才真走到 evaluateCro
+      dirs.push(d)
+    }
+    croState.dirs = dirs
+    croState.behavior = 'no-wake'
+    croState.delayMs = PER_ITEM_MS // 只在 evaluateCro 里睡，不睡投递面
+
+    writeFileSync(join(root, '.serenity'), '')
+    registerWakeScheduler(makeCtx() as never)
+    // 等到 8 条都真被评估过（正控：先证明活了，再证明快）
+    const deadline = Date.now() + 10_000
+    while (croState.spans.length < N && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    const text = wakeSchedulerState().lastTickLog.join('\n')
+    // 正控先行：8 条**都真被评估了** —— 否则"跑得快"可能只是"根本没跑"
+    // （D205 同族：快得不合理即可疑，先证明活了再证明快）。
+    expect(text).toContain(`CRO 评估 ${N} 条`)
+    expect(croState.spans).toHaveLength(N)
+
+    // 🔴 判据 = CRO 阶段**真实墙上跨度** `max(出) − min(进)`：
+    //    串行 ⇒ ≈N×delay = 800ms；并发上限 4 ⇒ ≈2×delay = 200ms。
+    //    取串行下界的一半作阈：既吸收抖动，又不会被"稍微快一点"蒙混。
+    const spans = croState.spans
+    const span = Math.max(...spans.map((s) => s.out)) - Math.min(...spans.map((s) => s.in))
+    const serialFloor = N * PER_ITEM_MS
+    expect(span).toBeLessThan(serialFloor * 0.5)
+    // 并发上限必须**自报**（否则这层能力在日志里不存在）。⛔ 不写死数值（D257）：只证明它在。
+    expect(text).toMatch(/并发上限 \d+/)
+  })
+
   it('🔴 B1：croEnabled=false ⇒ 记一行且**既有投递照常**（闸只关 CRO 本阶段）', async () => {
     writeSessionDir()
     writeBinding(BOUND_ID)
@@ -467,7 +528,17 @@ describe('wake-scheduler 分支面: B CRO 与容错兜底', () => {
     const log = await runOneTick(makeCtx((id) => (id === BOUND_ID ? agent : undefined)))
     const text = log.join('\n')
     // 计数口径：该条算进"非本机绑定"，**不算**进"跳过"（跳过 = 异常那一档）
-    expect(text).toContain('CRO 评估 1 条（唤起 0，不唤起 0，跳过 0，非本机绑定 1）')
+    //
+    // 🔴 2026-11-02（CRO 串行 → 受控并发）：本断言原先**逐字钉死整句**，而并发化在句末
+    //   追加了 `；并发上限 4` ⇒ 逐字钉会让**一条不相关的改动**把人引到"计数错了"这个错方向。
+    //   ⇒ 改钉**本用例真正守护的那一维**（三档计数各为几），并把句末那半句单独钉住
+    //   —— 后半句是**新增的可见性**（"并发上限"一旦不报，本次并发化就失去了它的日志面）。
+    //   边界用例（1 条轨迹时它恒等于 4）已在此句的尾段被顺带覆盖。
+    expect(text).toContain('CRO 评估 1 条（唤起 0，不唤起 0，跳过 0，非本机绑定 1')
+    // ⚠️ **不写死 4**（D257 同族：正控里出现"随被测对象变化的量"就不能硬编码）——
+    //    并发上限是 scheduler 的实现常量，调它不该让**这条计数用例**变红。
+    //    这里只钉"这一层在日志里自报了一个数"；具体值由 M1 那条用例负责。
+    expect(text).toMatch(/；并发上限 \d+/)
   })
 
   it('🔴 B7：投递**真失败** ⇒ 条目退回 pending ＋ attempts+1 ＋ 留原因（不删 = 不静默丢唤醒）', async () => {    writeSessionDir()

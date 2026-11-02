@@ -4,12 +4,17 @@
  * 行为对齐 osp（opencode-serenity-plugin/src/acc-kit.ts）——osp 是 ACC 工具 spec：
  *   - health：{ccc, root, version, status: healthy|degraded, principles: {P1_rooted, P2_git_managed, P3_binary_permissions}}
  *   - time：{now_iso, now_local, epoch_ms}
- *   - wait：缺省 1s（正整数秒），返回 'waited Ns' 文本
  * 平台适配：P3 在 osp 检查 opencode.json，DSH 无 opencode.json → 检查 DSH/opencode 配置路径
  * （.opencode/serenity.json / .dsh/serenity.json 等，见 DEFAULT_SERENITY_CONFIG_PATHS）。
  * CCC 缺失时返回 degraded 报告而非抛错（对齐 osp 未激活语义）。
  * 保留 dsp 增强：accVersion/dshVersion 版本自省字段。
- * wait 用纯 Node setTimeout——不依赖外部 sleep 可执行文件（Windows 无 GNU coreutils sleep）。
+ *
+ * 🔴 `wait` 已于 2026-11-02 按 owner 令**整条砍掉**（原「砍掉 wait」令第一条）。
+ *    理由：它唯一的用途是"循环睡等长任务"，而那正是 owner 反感的形态
+ *    ——把一次等待摊成一串轮询，且**每睡一次都要占一轮模型上下文**。
+ *    替代表达：短延迟用 `send-later +0.5m`（`wake/registry.ts` 正则认小数分钟），
+ *    长任务用 `send-later` 排到点。⛔ 不要再把它加回来。
+ *    ⚠️ ACC 自己的 `dashboard` 是"时钟"，⛔ 不是"可用 sleep" —— 两者别混。
  *
  * C5「观察面归一」（S142 2026-09-15）：本文件的 health **不再自己取数**——三原则、注册表结构判据、
  * 配置、宿主契约一律经 `surface/observation.ts` 取（唯一取数出口），本文件只把事实**渲染**成 osp
@@ -23,13 +28,12 @@
 import type { JsonValue } from '../../kernel/json.js'
 import { isoLocal } from '../../kernel/time.js'
 
-type KitAction = 'health' | 'time' | 'wait' | 'diag'
+type KitAction = 'health' | 'time' | 'diag'
 
-export const KIT_ACTIONS: readonly KitAction[] = ['health', 'time', 'wait', 'diag']
+export const KIT_ACTIONS: readonly KitAction[] = ['health', 'time', 'diag']
 
 interface KitArgs {
   action: KitAction
-  seconds?: number
 }
 
 export async function runKit(root: string | null, args: KitArgs, hostCtx?: unknown): Promise<JsonValue> {
@@ -89,14 +93,6 @@ export async function runKit(root: string | null, args: KitArgs, hostCtx?: unkno
         now_local: now.toString(),
         epoch_ms: now.getTime(),
       }
-    }
-    case 'wait': {
-      const seconds = args.seconds ?? 1
-      if (!Number.isInteger(seconds) || seconds <= 0) {
-        throw new Error('wait requires a positive integer number of seconds (default 1)')
-      }
-      await new Promise((r) => setTimeout(r, seconds * 1000))
-      return `waited ${seconds}s`
     }
     case 'diag': {
       // 原 `acc-diag` 工具整体并入（owner 2026-11-01 裁「方案 C」）。

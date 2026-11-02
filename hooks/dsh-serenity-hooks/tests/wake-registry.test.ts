@@ -324,7 +324,12 @@ describe('deliverWake（live 优先 → 冷唤醒正门）', () => {
     expect(res.detail).toContain('live(bound sess-live)')
     expect(sent).toHaveLength(1)
     expect(sent[0]).toContain('继续 §30 实现')
-    expect(sent[0]).toContain(DIR_NAME)
+    // 🔴 2026-11-02 §D1（owner Q3「全砍」）：正文**不再含目录名**（那是身份锚定，已砍）。
+    //    这里**改为钉本意**：正文必须以**本来源的标记**开头（不冒充其它两种来源）。
+    //    ⛔ 不改成一堆 toContain('') 那种假绿（D274）。
+    expect(sent[0]).toContain('[认知轨迹唤醒]')
+    expect(sent[0]).not.toContain('[即时消息]')
+    expect(sent[0]).not.toContain('[CRO 唤起]')
   })
 
   it('冷会话 + sessionController 缺席 → 响亮报错（不静默、不误报成功）', async () => {
@@ -384,17 +389,23 @@ describe('deliverWake（live 优先 → 冷唤醒正门）', () => {
   })
 })
 
-describe('buildWakeText（投递正文：身份锚定 + 唤醒信息 + 任务）', () => {
-  it('含 target 目录、SESSION.md 路径、message 与发起者', () => {
+describe('buildWakeText（投递正文：来源标记 + 时间 + 正文）', () => {
+  it('含 message 与发起者；**不再**含目录名与 SESSION.md 绝对路径（§D1 已砍身份锚定）', () => {
     const entry: WakeEntry = {
       id: 'w-1', target: DIR_NAME, at: 'x', message: '做 A', state: 'pending', createdBy: 'S142',
       createdAt: 'y', attempts: 0, lastResult: null, deliveredAt: null,
     }
     const text = buildWakeText(entry, { dirName: DIR_NAME, mdPath: '/x/SESSION.md' })
-    expect(text).toContain(DIR_NAME)
-    expect(text).toContain('/x/SESSION.md')
+    // 🔴 2026-11-02 §D1（owner Q3「全砍」）：身份锚定整句已删 ⇒ 反向钉住它**真的不在了**。
+    //    ⚠️ 反向钉必须有正控配对（D222）：下面三行正向断言若不成立，这个反向钉就只是"什么都没生成"。
+    expect(text).not.toContain(DIR_NAME)
+    expect(text).not.toContain('/x/SESSION.md')
+    // 正控配对：
     expect(text).toContain('做 A')
     expect(text).toContain('S142')
+    expect(text).toContain('[认知轨迹唤醒]')
+    // 当前时间必须留（v1.39.2 owner 令：冷载入目标上下文里没有任何近期时间锚）
+    expect(text).toContain('当前时间：')
   })
 })
 
@@ -417,11 +428,13 @@ describe('sendToCognitiveTrajectory（即时投递：与 wake 共用取用通路
     expect(res.ok).toBe(true)
     expect(res.detail).toContain('live(bound sess-live)')
     expect(sent).toHaveLength(1)
-    // 正文要点：来自谁 / 是**即时消息** / 原样带上 message / 身份锚定到目标
+    // 正文要点：来自谁 / 是**即时消息** / 原样带上 message
     expect(sent[0]).toContain('[即时消息]')
     expect(sent[0]).toContain('S142')
     expect(sent[0]).toContain('现在就做这件事')
-    expect(sent[0]).toContain(DIR_NAME)
+    // 🔴 2026-11-02 §D2（owner Q3「全砍」）：身份锚定整句已删 ⇒ 反向钉住目录名不再出现。
+    //    ⚠️ 配正控（D222）：上面三条正向断言成立 ⇒ 这个反向钉才有意义。
+    expect(sent[0]).not.toContain(DIR_NAME)
     // 🔴 关键区分：**不得**把它说成"到点唤醒"（那是错的事实）。
     // ⚠️ 判据形态订正（本轮实测踩到）：**不能用 `not.toContain('到点')`** —— 本正文里那句
     //    "（**不是**到点唤醒）"自身就含"到点" ⇒ 该断言是**假阳性**，会把我方措辞当违规。
@@ -912,6 +925,11 @@ describe('registerWakeScheduler（时钟武装门 + 进程态可观测）', () =
     writeFileSync(join(root, '.serenity'), '')
     const ctx = makeCtx()
     registerWakeScheduler(ctx as never) // 启动即 tick 一次（此时无 live ⇒ skip，ticks=1）
+    // 🔴 2026-11-02 §A3「跳拍而非排队」：必须**等启动那一拍真的跑完**再走下一拍。
+    //    修前这里是"两拍一起排队"——旧语义下第二拍会在链尾等着；新语义下它会因
+    //    "上一拍仍在飞"而被**丢弃**（那正是 §A3 要的）。⇒ 本用例的意图（"live 出现后
+    //    下一拍真执行并清 skip 原因"）不变，只是取拍方式要改成**逐拍串行**。
+    await new Promise((r) => setTimeout(r, 20))
     liveSessions = [{ id: 's1', header: { cwd: root } }]
     ;(timer as unknown as { fn: () => void }).fn()
     await new Promise((r) => setTimeout(r, 20))

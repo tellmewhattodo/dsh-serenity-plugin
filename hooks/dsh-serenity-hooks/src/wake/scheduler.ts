@@ -1,7 +1,7 @@
 /**
  * wake/scheduler.ts — 认知轨迹唤醒调度器（D58/D59/D60；S142 2026-09-13）
  *
- * 一个**中心调度器**（5min tick，复用 autopilot 的节律常量），处理 CCC 唤醒注册表里
+ * 一个**中心调度器**（60s tick，2026-11-02 owner 令「整体都是 60 秒」），处理 CCC 唤醒注册表里
  * 到期的条目：把「未来时刻 + 一条 message」投递给目标认知轨迹，**fire-and-forget**
  * （无阻塞、无等待、无回执——发起方不 await，调度器不替模型结果负责）。
  *
@@ -191,7 +191,7 @@ const clockOpts: ClockOptions<string[]> = {
   body: () => runWakeTick(clockOpts.ctx),
   // `countBeforeBody` 缺省 false：本钟 `ticks` = **真跑完**的 tick 数（既有语义，勿改）
   logFrom: { prefix: '[serenity-hooks] 认知轨迹唤醒 ', lines: (lines) => lines },
-  startLog: () => '[serenity-hooks] ✓ 认知轨迹唤醒调度器启动（5min tick）',
+  startLog: () => '[serenity-hooks] ✓ 认知轨迹唤醒调度器启动（60s tick）',
 }
 const clock = createClock(clockOpts)
 
@@ -282,18 +282,27 @@ async function acquireWakeAgent(
 
 /** 唤醒消息（唤起即投递正文：身份锚定 + 唤醒信息 + 任务） */
 export function buildWakeText(entry: WakeEntry, target: WakeTarget): string {
+  /**
+   * 🔴 2026-11-02 §D1（owner 令「精简注入提示词模板尺寸」＋ Q3「全砍」）：**356 → 89 码点**。
+   *
+   * 砍掉的四类（判据 = 「这条信息能不能帮**目标**决定下一步怎么做」，D150）：
+   * ① **审计信息**（`登记于`／`id`）—— 那是给人回溯注册表用的，目标拿到它无从行动；
+   * ② **身份锚定整句**（`继续 <目录名> 的认知轨迹（SESSION.md: <绝对路径>）`）——
+   *    目标**本来就知道**自己在哪条轨迹（它就是这个会话），重复一遍是纯噪声；
+   * ③ 一节空行＋`唤醒信息：`标签 —— 标签本身不含信息，正文紧接其上即可；
+   * ④ 末尾`任务：按上述唤醒信息继续…` —— 与正文同义反复。
+   *
+   * 🔴 **必须保留的三件**（每一件都有过代价）：
+   * · **`[认知轨迹唤醒]` 标记** —— 与另外两种来源区分，缺了目标会把注入当成人类发言；
+   * · **当前时间**（v1.39.2 owner 令）—— 冷载入的目标上下文里**没有任何近期时间锚**；
+   * · **发起者** —— 目标要能判断"这是谁叫我"，且测试反向钉住"不得冒充其他来源"。
+   *
+   * ⚠️ `entry.createdAt` / `entry.id` 不再进正文（仍完整保存在注册表里，回溯走那里）。
+   */
   return [
-    `[认知轨迹唤醒] 到点（登记于 ${entry.createdAt}，发起者 ${entry.createdBy || '未知'}，id ${entry.id}）。`,
-    // v1.39.2（S142 §0r，所有者令「注入时除了内容再带上当前时间」）：目标据此判断"现在几点"，
-    // 不必去翻系统提示或自己算——尤其是**冷载入**的目标，它的上下文里没有任何近期时间锚。
-    `当前时间：${localHuman()}（当地时区）。`,
+    `[认知轨迹唤醒] 到点（来自 ${entry.createdBy || '未知'}）。当前时间：${localHuman()}（当地时区）。`,
     '',
-    `身份锚定：继续 ${target.dirName} 的认知轨迹（SESSION.md: ${target.mdPath}）。`,
-    '',
-    '唤醒信息：',
     entry.message,
-    '',
-    '任务：按上述唤醒信息继续本轨迹的工作；完成后把进展写入 SESSION.md。',
   ].join('\n')
 }
 
@@ -330,16 +339,25 @@ export async function deliverWake(ctx: unknown, root: string, entry: WakeEntry):
  * @param sender 发起者轨迹标识（供目标与人类识别来源）
  */
 export function buildSendText(target: WakeTarget, message: string, sender: string): string {
+  /**
+   * 🔴 2026-11-02 §D2（owner Q3「全砍」）：**330 → 98 码点（−70%）**。
+   *
+   * 砍掉的两类：
+   * ① **身份锚定整句**（同 §D1 ①）—— 目标本就知道自己在哪条轨迹；
+   * ② `说明：这是**即时投递**…不排队…当场注入当前轮，空闲则立即起一轮`（约 150 码点）——
+   *    这是**纯实现说明**：它讲的时机语义**目标既无法验证也不需要验证**，
+   *    却能占掉整条消息一半篇幅。目标只需要知道「谁发的、什么内容」。
+   *
+   * 🔴 **必须保留**：`[即时消息]` 标记（与到点唤醒／CRO 唤起区分）＋ 发起者 ＋ 当前时间。
+   *
+   * ⚠️ `target` 参数**保留**（调用方按位置传参，删参是破坏性改动；且未来若要做
+   *    "多轨迹共用一条会话"的区分，它是唯一可用的锚）—— 但**不再进正文**。
+   */
+  void target
   return [
     `[即时消息] 来自 ${sender || '未知轨迹'}。当前时间：${localHuman()}（当地时区）。`,
     '',
-    `身份锚定：继续 ${target.dirName} 的认知轨迹（SESSION.md: ${target.mdPath}）。`,
-    '',
-    '消息：',
     message,
-    '',
-    '说明：这是**即时投递**（不是到点唤醒）——它**不排队**：目标正在跑轮次就**当场注入当前轮**，' +
-      '目标空闲则立即起一轮。处理完照常把进展写入 SESSION.md。',
   ].join('\n')
 }
 
@@ -828,19 +846,32 @@ async function collectWakeCccs(ctx: unknown): Promise<string[]> {
  * @returns 投递正文
  */
 export function buildCroWakeText(dirName: string, mdPath: string, prompt: string, reason: string | null): string {
+  /**
+   * 🔴 2026-11-02 §D3（owner Q3「全砍」）：**430 → 130 码点（−70%）**。
+   *
+   * 砍掉的三类：
+   * ① **程序文件名**（`continuous-re-occurrence.ts`）—— 目标不需要知道是哪个文件判的；
+   * ② **身份锚定整句**（同 §D1）；
+   * ③ 末尾`说明：这是由本轨迹自己的 CRO 程序…（不是定时唤醒，也不是别人发的消息）`——
+   *    该**区分**已由 `[CRO 唤起]` **标记承担**，再用一整句解释是同一事实的第二份表述。
+   *
+   * 🔴🔴 **`[CRO 唤起]` 标记与"区分三种来源"不可砍**：specs 仓已把这句标记写进契约
+   *    （`serenity-acc-specs` 的 CHANGELOG v3.0.0 段 ＋ 其 induction 章节），明文要求
+   *    **不得与另两种措辞混用**，否则就是注入一条**假陈述**。可砍的只是标记**之后**的解释。
+   *    ⚠️ 这里刻意**不写 `docs/xxx.md` 形态的路径**：本仓的 `docs-ref-gate` 会把 src 注释里
+   *    任何 `docs/*.md` 当成**本仓**的文档去核存在性，而那份契约在上游 specs 仓。
+   *
+   * ⚠️ `dirName` / `mdPath` 参数保留（调用方按位置传，且测试要能钉住"不冒充其他来源"），
+   *    但它们**不再进正文**。
+   */
+  void dirName
+  void mdPath
   return [
-    `[CRO 唤起] ${dirName} 自带的 continuous-re-occurrence.ts 判定：现在该唤起。`,
-    `当前时间：${localHuman()}（当地时区）。`,
-    '',
-    `身份锚定：继续 ${dirName} 的认知轨迹（SESSION.md: ${mdPath}）。`,
+    `[CRO 唤起] 本轨迹自带的 CRO 程序判定：现在该唤起。当前时间：${localHuman()}（当地时区）。`,
     '',
     `判定理由：${reason ?? '（程序未提供 reason —— 见 CRO 编写指南 §7 坑 3）'}`,
     '',
-    '唤起提示词：',
     prompt,
-    '',
-    '说明：这是由**本轨迹自己的 CRO 程序**按当时情况做的判定（**不是**定时唤醒，**也不是**别人发的消息）。' +
-      '处理完照常把进展写入 SESSION.md。',
   ].join('\n')
 }
 
@@ -944,6 +975,64 @@ async function deliverCroWake(
 }
 
 /**
+ * CRO 阶段**受控并发**上限（2026-11-02 owner 令「整体节律 60 秒」的准入条件）。
+ *
+ * 🔴 为什么必须并发：CRO 每条 **spawn 一个子进程**，单条硬超时 60s（`cro/core.ts:68`）。
+ *    修前 `for … await` 串行 ⇒ 最坏一拍 = N × 60s。实测 N ≥ 8（本机各 CCC 的并集，
+ *    枚举走全机 CCC 并集）⇒ **最坏 480s**。
+ *    节拍降到 60s 后，480s 一拍 = 积 8 拍，而拍子**排队不丢只积** ⇒ 调度器**静默永久追不上**。
+ *    并发化把墙上时间从 `Σ` 降到 `max`（≈60s）。
+ *
+ * 🔴 为什么**不设成 8（全并发）**：
+ *   · 每条是完整 `bun`/`node` 运行时（实测 `bun` 二进制 92 MB）⇒ 8 条同时起是几百 MB 尖峰；
+ *   · 更危险的是**行为挤兑**：网络一恢复，8 条可能**同时**判 `wake` ⇒ 同时唤醒 8 条轨迹
+ *     ⇒ 挤兑宿主模型配额。上限 4 把两者压住，仍足以把 480s 压到 2 轮 ≈120s。
+ *
+ * ⚠️ 调此值的判据：**保持 `ceil(N / 上限) × 单条超时 < 节拍`** 才叫"跑得完"。
+ *    60s 节拍、N=8、上限 4 ⇒ 2 × 60 = 120s **仍大于 60s** ⇒ ⛔ 别以为并发调大就不需要跳拍。
+ */
+const CRO_CONCURRENCY = 4
+
+/**
+ * 受控并发跑一组异步任务（极小实现，**不引入依赖**）。
+ *
+ * 语义对齐 `Promise.allSettled`：**永不抛**，单条失败不影响其余（CRO 旁路容忍铁律）。
+ * ⚠️ 结果按**原索引**回填 ⇒ 调用方按 `dirs` 顺序读时不会错配。
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const width = Math.max(1, Math.min(limit, items.length))
+  const runners = Array.from({ length: width }, async () => {
+    for (;;) {
+      const i = cursor
+      cursor += 1
+      if (i >= items.length) return
+      results[i] = await worker(items[i]!, i)
+    }
+  })
+  await Promise.all(runners)
+  return results
+}
+
+/**
+ * 单条轨迹在 CRO 阶段的结局标记（**并发体内只许返回标记，不许累加计数**）。
+ *
+ * · `host-skip` — 机器绑定未通过（**与"跳过"分开**：它不是异常，是本机不该跑它）
+ * · `wake`      — 判定唤起且已尝试投递（投递成败另记流水，见 `appendCroWakeLog`）
+ * · `quiet`     — 判定不唤起（`no-wake`）
+ * · `skip`      — `skipped` ／ `disabled` 竞态 ／ 内部异常
+ *
+ * 🔴 为什么是标记而不是计数：并发体的累加会因交错而丢／重（JS 单线程不保证回调之间不穿插），
+ *    事后统一 `filter` 统计才是可复算的。这是本阶段从串行改并发时唯一必须改的语义。
+ */
+type CroOneOutcome = 'host-skip' | 'wake' | 'quiet' | 'skip'
+
+/**
  * CRO 阶段：本 tick 对**每条启用了 CRO 的轨迹**跑一次它自带的程序，按判定投递。
  *
  * ## 为什么放在既有投递**之后**（R↓）
@@ -988,22 +1077,19 @@ async function runCroPhase(ctx: unknown, root: string, registry: WakeEntry[], lo
   //    取值**一次**（非每轨迹一次）—— 本进程的机器名在本次 tick 内不会变，且 `hostname()` 有系统调用成本。
   //    ⚠️ 判定本身在 `resolveCroHostBinding`；此处只负责取本机名与计数。
   const selfHost = safeHostname()
-  let hostSkips = 0
-  let wakes = 0
-  let quiet = 0
-  let skips = 0
-  for (const dirName of dirs) {
+  // 🔴 2026-11-02（owner 令「整体节律 60 秒」）：**串行 → 受控并发**。
+  //    计数器**不在并发体里累加**（那会因交错而丢/重）⇒ 每层返回一个标记，事后统一统计。
+  const outcomes = await mapWithConcurrency(dirs, CRO_CONCURRENCY, async (dirName): Promise<CroOneOutcome> => {
     try {
       // 🔴 绑定门**在一切读数之前**：不是本机的轨迹，连快照都不必装配
       //    （既省掉 O(N) 次 stat，也避免"读了一堆再用不上"的浪费）。
       const verdict = resolveCroHostBinding(root, dirName, selfHost)
       if (!verdict.allowed) {
-        hostSkips += 1
         // 🔴 逐条必须留痕，且**"没绑"与"绑给别人"文案必须分开** ——
         //    2026-10-15 的 `send-now` 事故就是"文案相同、原因不同"害排查指错方向
         //    （S142 §日志 续 129 / D134）。绑定这一层不许再造同一个坑。
         log.push(`· ${root}: ${dirName}: CRO 机器绑定未通过（${verdict.code}）：${verdict.detail}`)
-        continue
+        return 'host-skip'
       }
       // 🔴 2026-10-20（owner 裁决）：CRO 快照同样**必须**带探针 —— 否则已归档会话
       //    会作为候选载体进 `boundSessionIds`，CRO 的"有载体在跑"判断随之失真。
@@ -1025,7 +1111,6 @@ async function runCroPhase(ctx: unknown, root: string, registry: WakeEntry[], lo
       })
       const outcome = await evaluateCro(root, dirName, input)
       if (outcome.status === 'wake') {
-        wakes += 1
         const res = await deliverCroWake(ctx, root, dirName, outcome.prompt, outcome.decision.reason)
         log.push(`· ${root}: ${renderCroOutcome(dirName, outcome)} → ${res.ok ? '已投递' : `投递未成功：${res.detail}`}`)
         // 🔴 ACC 侧流水（所有者令 2026-09-20「ACC 有必要进行 CRO 唤醒的日志记录」「失败成功都记录」）：
@@ -1063,11 +1148,11 @@ async function runCroPhase(ctx: unknown, root: string, registry: WakeEntry[], lo
             log.push(`· ${root}: ${dirName}: CRO 流水写入失败（已忽略，不影响投递）: ${rec.error}`)
           }
         }
+        return 'wake'
       } else if (outcome.status === 'skipped') {
-        skips += 1
         log.push(`· ${root}: ${renderCroOutcome(dirName, outcome)}`)
+        return 'skip'
       } else if (outcome.status === 'no-wake') {
-        quiet += 1
         /**
          * 🔴 **2026-10-23（A102）：`no-wake` 也落盘。**
          *
@@ -1098,14 +1183,24 @@ async function runCroPhase(ctx: unknown, root: string, registry: WakeEntry[], lo
             log.push(`· ${root}: ${dirName}: CRO 流水写入失败（已忽略，不影响既有链路）: ${rec.error}`)
           }
         }
+        return 'quiet'
       }
       // `disabled`：本不该出现（`dirs` 已按"文件在"筛过）⇒ 只可能是扫描后被删的竞态 ⇒ 静默
+      return 'skip'
     } catch (err) {
-      skips += 1
       log.push(`· ${root}: ${dirName}: CRO 内部异常（已忽略，不影响既有链路）: ${String((err as Error)?.message ?? err)}`)
+      return 'skip'
     }
-  }
-  log.push(`· ${root}: CRO 评估 ${dirs.length} 条（唤起 ${wakes}，不唤起 ${quiet}，跳过 ${skips}${hostSkips > 0 ? `，非本机绑定 ${hostSkips}` : ''}）`)
+  })
+  // 🔴 统计在**并发结束之后**做（并发体内累加会因交错而丢/重，见上方注释）
+  const hostSkips = outcomes.filter((o) => o === 'host-skip').length
+  const wakes = outcomes.filter((o) => o === 'wake').length
+  const quiet = outcomes.filter((o) => o === 'quiet').length
+  const skips = outcomes.filter((o) => o === 'skip').length
+  log.push(
+    `· ${root}: CRO 评估 ${dirs.length} 条（唤起 ${wakes}，不唤起 ${quiet}，跳过 ${skips}` +
+      `${hostSkips > 0 ? `，非本机绑定 ${hostSkips}` : ''}；并发上限 ${CRO_CONCURRENCY}）`,
+  )
 }
 
 /**

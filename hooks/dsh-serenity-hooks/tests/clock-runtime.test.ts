@@ -125,10 +125,13 @@ describe('createClock（时钟运行时工厂，C6b/P2）', () => {
       expect(clock.snapshot().armedAt).toBe(armedAt)
     })
 
-    it('定时器用 TICK_MS（5min）注册，且 unref 过的句柄被持有', () => {
+    it('定时器用 TICK_MS（60s，2026-11-02 owner 令）注册，且 unref 过的句柄被持有', () => {
       const { clock } = makeClock()
       clock.start()
-      expect(timer!.ms).toBe(5 * 60 * 1000)
+      // 🔴 这个数**必须写死**（不是"D257 那类随被测对象变化的量"）：它钉的正是
+      //    owner 明令的那个数（「整体都是 60 秒」）。若某天有人把它调回 5min，
+      //    本断言必须红 —— 那是一次**需要 owner 知晓**的行为变更，不是调参。
+      expect(timer!.ms).toBe(60 * 1000)
     })
   })
 
@@ -548,6 +551,128 @@ describe('createClock（时钟运行时工厂，C6b/P2）', () => {
       gate = false
       timer!.fn()
       expect(clock.snapshot().lastSkipReason).toBe('闸关（测试）')
+    })
+  })
+
+  /**
+   * 🔴 2026-11-02 §A3「**跳拍而非排队**」——**节律 60s 的硬前提**（owner 令，见执行清单 §A）。
+   *
+   * 这三个用例合起来才构成判据：**M2 变异红（跳拍确实在跳）＋ A4 不记账（跳拍不污染时间基准）
+   * ＋ 正控（不弄坏时照常跑）**。只做前两个会漏掉"钟被自己的跳拍逻辑永久停掉"这种形态。
+   */
+  describe('§A3 跳拍而非排队（上一拍在飞 ⇒ 本拍直接丢，不入链）', () => {
+    /** 造一个"卡住直到手动放行"的 body，并暴露放行句柄 */
+    function makeBlockingClock(over: Partial<ClockOptions<string[]>> = {}) {
+      let release: (() => void) | null = null
+      let bodies = 0
+      const { clock } = makeClock({
+        body: () => {
+          bodies += 1
+          return new Promise<string[]>((res) => {
+            release = () => res([])
+          })
+        },
+        ...over,
+      })
+      return { clock, release: () => release?.(), bodies: () => bodies }
+    }
+
+    it('🔴 M2 判据：上拍在飞时走一拍 ⇒ 那一拍**被丢弃**（放行后 body 不会补跑）', async () => {
+      const { clock, release, bodies } = makeBlockingClock({ logFrom: { prefix: '', lines: () => [] } })
+      clock.start()
+      await settle()
+      expect(bodies()).toBe(1) // 启动即跑了一拍，正卡着
+
+      timer!.fn() // 节拍到点，但上一拍还没完
+      await settle()
+      // ⚠️ 此处**不可**断言 bodies()===1 —— 排队语义下那一拍也只是"还没轮到自己"，
+      //    两种语义在这一刻**读数相同**（这正是我第一版变异检验漏掉的那一格：
+      //    它两种语义下都绿 ⇒ 没有判别力，D222 同族的假正控）。
+      // ⇒ 判别点必须在**放行之后**：排队的那一拍此时才轮到它。
+      release()
+      await settle()
+      // 🔴 跳拍 ⇒ 被丢的那一拍**永远不补跑**（bodies 停在 1）；
+      //    排队 ⇒ 放行后立刻补跑（bodies = 2）。这一格才分得开两种语义。
+      expect(bodies()).toBe(1)
+    })
+
+    it('🔴 A4 判据：跳拍**不调用 countTick** ⇒ `ticks` 不涨（它是所有 CRO 判据的时间基准）', async () => {
+      const { clock, release } = makeBlockingClock({ logFrom: { prefix: '', lines: () => [] } })
+      clock.start()
+      await settle()
+      const ticksWhileRunning = clock.snapshot().ticks
+      expect(ticksWhileRunning).toBe(0) // 第一拍还没完，未记账
+
+      timer!.fn() // 跳掉
+      timer!.fn() // 再跳掉
+      await settle()
+      // 🔴 若跳拍走了 countTick，这里会虚高 ⇒ `guard` 的"刚启动窗口=第2~3拍"会被静默改语义
+      expect(clock.snapshot().ticks).toBe(ticksWhileRunning)
+
+      // 放行后紧接着的一拍**照常记账**（不是"永远不记"）
+      release()
+      await settle()
+      expect(clock.snapshot().ticks).toBe(1)
+    })
+
+    it('🔴 正控：**不弄坏则照常跑** —— 每拍都短时，连续三拍 body 各被调用一次、ticks=3', async () => {
+      const { clock } = makeClock({ body: () => [], logFrom: { prefix: '', lines: () => [] } })
+      clock.start()
+      await settle()
+      timer!.fn()
+      await settle()
+      timer!.fn()
+      await settle()
+      // 正控的意义：证明"跳拍"没有把正常路径也一起跳掉（过宽缺陷）
+      expect(clock.snapshot().ticks).toBe(3)
+    })
+
+    it('🔴 跳拍必须**出声**：写一行带读数（在飞时长 ＋ 累计跳过拍数），且清位后恢复', async () => {
+      const { clock, release, bodies } = makeBlockingClock()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      clock.start()
+      await settle()
+      timer!.fn()
+      await settle()
+      const line = warn.mock.calls.map((c) => String(c[0])).find((s) => s.includes('跳拍'))
+      expect(line).toBeDefined()
+      // 带读数：只说"跳了一拍"无法区分"钟在追"与"钟卡死了"
+      expect(line).toContain('累计跳过 1 拍')
+      expect(line).toContain('已跑')
+      release()
+      await settle()
+      // 🔴 清位生效的判据 = **body 又被调用了**（不是 ticks 涨 —— 本钟 body 每一次都阻塞，
+      //    ticks 只在 body resolve 后记，用 ticks 判"恢复了"会把两种事混成一件）。
+      expect(bodies()).toBe(1)
+      const before = warn.mock.calls.length
+      timer!.fn()
+      await settle()
+      expect(bodies()).toBe(2) // 不再是跳拍
+      expect(warn.mock.calls.length).toBe(before) // 也没有新增的跳拍行
+      release()
+      await settle()
+      expect(clock.snapshot().ticks).toBe(2) // 两拍都真跑完了
+    })
+
+    it('🔴 reset 清掉在飞标记 ⇒ 重置后不会**永久跳拍**（与"钟没起来"同读数的静默失效）', async () => {
+      const { clock, release, bodies } = makeBlockingClock()
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      clock.start()
+      await settle()
+      expect(bodies()).toBe(1) // 在飞
+      clock.reset() // 在飞时重置 ⇒ 若无清位，此后每拍都会被判"上一拍仍在飞"而永久跳掉
+      release() // 放行重置前那一拍，让本钟私有的链排空
+      await settle()
+      clock.start() // 复位后重新武装（reset 已清定时器）
+      await settle()
+      // 🔴 判据 = body 又被调用（= 没在跳拍）。若 tickPending 残留，这里是 1 且 ticks 恒 0
+      expect(bodies()).toBe(2)
+      const skipLines = warn.mock.calls.map((c) => String(c[0])).filter((s) => s.includes('跳拍'))
+      expect(skipLines).toHaveLength(0)
+      release()
+      await settle()
+      expect(clock.snapshot().ticks).toBeGreaterThan(0)
+      clock.dispose()
     })
   })
 })

@@ -57,16 +57,25 @@
  */
 
 /**
- * tick 周期（**5 分钟**）。
+ * tick 周期（**60 秒**）。
  *
- * 2026-09-15 S142「ACC 侧 autopilot 退场」：本值原从 `autopilot-core.ts` 导入（`TICK_MS`），
- * 但该模块随 autopilot 退场，而**本模块的唯一消费者是唤醒调度器**（`wake-scheduler`）——
- * 值本身与 autopilot 无关 ⇒ 随消费者归位到本模块（不再依赖 autopilot 判据层）。
+ * 🔴 2026-11-02 owner 令：「整体都是 60 秒…**能不做轮询就不做，如果做，就一定要少，
+ *    所以 ACC 全局提供一个轮询，60 秒一次**」⇒ 由 `5 * 60 * 1000` 改为 `60 * 1000`。
  *
- * ⚠️ 语义不得变：该值同时是**报告文案的来源**（"等下个 Nmin tick"），历史上曾因文案写死
- * 10min 与实现 5min 不符而误导排查（§12.7 文案纠错）。
+ * **为什么可以降到 60s（本批的硬前提，⛔ 不是顺手的调参）**：
+ *   降频到 60s 意味着 CRO 进程量涨约 5 倍，而 CRO **每条 spawn 一个子进程、单条硬超时 60s**。
+ *   若阶段仍串行，一拍就 > 60s ⇒ 拍子排队只积不丢 ⇒ **调度器静默永久追不上**。
+ *   ⇒ 必须先有 `wake/scheduler.ts` 的**受控并发**（上限 4）与 `tick()` 的**跳拍而非排队**。
+ *   这两件在 `续 373` 已落地并做了双变异检验（M1/M2 都能真红），故此处才允许改这个值。
+ *
+ * **owner 的架构原则一并记在这里**：**全局只允许一条轮询**。
+ *   实测 `createClock()` 全仓只有一处调用（`wake/scheduler.ts`），autopilot 钟已于
+ *   2026-09-15 整体删除 ⇒ 现状本来就只有一条。⇒ 本批**不新增任何定时器、不新增"每 N 拍"开关**。
+ *
+ * ⚠️ 语义不得变：该值同时是**报告文案的来源**（"等下个 Nmin tick"）—— 文案已随 60s 改为分钟/秒自适应，
+ * 历史上曾因文案写死 10min 与实现 5min 不符而误导排查（§12.7 文案纠错）。
  */
-const TICK_MS = 5 * 60 * 1000
+const TICK_MS = 60 * 1000
 
 /**
  * 时钟**进程态**（诊断用，模块级 = 进程级，正是诊断对象）。
@@ -218,6 +227,16 @@ interface InstanceState<T> {
   runtime: ClockRuntime
   /** 事件是否已挂（只挂一次——`start()` 会被反复调用） */
   wired: boolean
+  /**
+   * 是否有一拍 tick **已排队或正在执行**（2026-11-02 §A3「跳拍而非排队」的判据位）。
+   *
+   * 语义 = "本钟这条串行链上最多只允许**一拍** tick 待跑"。缺它就是旧的**排队**语义：
+   * 节拍 60s 而一拍要跑 120s 时，积压**只增不减**，且积压本身**零信号**（看上去一切正常，
+   * 只是投递越来越晚）—— 那正是本批要消灭的静默失效形态。
+   */
+  tickPending: boolean
+  /** 在飞那一拍的开始时刻（ms；null = 无在飞）。跳拍日志要报"它已经跑了多久"才有诊断价值 */
+  tickStartedAt: number | null
   opts: ClockOptions<T>
 }
 
@@ -258,7 +277,7 @@ function attachClockEvents(
 export function createClock<T>(opts: ClockOptions<T>): Clock {
   const runtime: ClockRuntime = { armed: false, armedAt: null, lastTickAt: null, ticks: 0, lastSkipReason: null }
   if (opts.logFrom) runtime.lastTickLog = []
-  const st: InstanceState<T> = { timer: null, chain: Promise.resolve(), runtime, wired: false, opts }
+  const st: InstanceState<T> = { timer: null, chain: Promise.resolve(), runtime, wired: false, tickPending: false, tickStartedAt: null, opts }
 
   /** 记一次 tick（工厂内部与 body 共用同一实现——只有一处会计逻辑） */
   const countTick = (): void => {
@@ -266,13 +285,64 @@ export function createClock<T>(opts: ClockOptions<T>): Clock {
     runtime.ticks += 1
   }
 
+  /**
+   * 本钟累计跳过几拍（§A3）。
+   *
+   * ⚠️ **刻意不进 `ClockRuntime`**：`ClockRuntime` 的字段是**对外契约**
+   * （`acc-diag` / `containerClocks()` / 面板在读，见文件头"对外可观测面零变化"），
+   * 加字段等于改契约。跳过次数目前只出现在**日志行**里 —— 那已经够判"这个钟在追赶还是空转"。
+   * 若日后要进诊断面，须按改契约走（同批改消费方），⛔ 不许顺手塞。
+   */
+  let skipCount = 0
+
   /** 逐行打印（`logFrom` 缺省 ⇒ 本钟无 tick 日志，整段为死代码路径） */
   const emit = (lines: string[]): void => {
     if (!opts.logFrom) return
     for (const line of lines) console.log(`${opts.logFrom.prefix}${line}`)
   }
 
-  const tick = (): void => {
+  /**
+   * 跳拍判定（2026-11-02 §A3）：上一拍**还没跑完** ⇒ 本拍**直接丢弃**，不入链。
+   *
+   * 🔴 为什么必须跳、不能排队（owner 令「整体节律 60 秒」的硬前提）：
+   *   · 排队语义下，一拍耗时 > 节拍 ⇒ 积压**只增不减**，且呈现为"投递越来越晚"而非任何报错；
+   *   · CRO 每拍要 spawn N 条子进程（单条硬超时 60s），N ≥ 8 时最坏 480s ⇒ 60s 节拍下
+   *     必然积压 ⇒ **调度器静默永久追不上**；
+   *   · 而"跳掉一拍"的代价是**迟一拍拍到**，与"排队后跑到 8 拍之前的内容"相比，
+   *     后者的输出在语义上已经过期（唤醒"看着情况叫"，看的是**当时**的情况）。
+   *   ⇒ 跳拍是**正确性**要求，不是性能优化。
+   *
+   * 🔴 跳拍**不记账**（不调 `countTick`）：`ticks` 是**所有 CRO 判据的时间基准**
+   *   （`cro/core.ts` 快照里就是 `scheduler.ticks`，`guard` 的"刚启动窗口 = 第 2~3 拍"直接依赖它）
+   *   ⇒ 跳掉的那一拍**不是一拍已完成的钟**，给它 +1 会**静默改变所有下游的时间语义**。
+   *
+   * 🔴 跳拍**必须出声**（D186/D209：可以拒绝，但不许不出声）：写一行带读数的 warn ——
+   *   "跳了几拍、在飞的那拍已经跑了多久"。否则"钟在跑但什么都没发生"与"钟根本没跑"
+   *   在读数上不可分（A106 同族）。
+   */
+  const skipOrRun = (): void => {
+    if (st.tickPending) {
+      const runningFor = st.tickStartedAt === null ? 0 : Date.now() - st.tickStartedAt
+      skipCount += 1
+      const msg =
+        `⏭ 跳拍（上一拍仍在飞，已跑 ${Math.round(runningFor / 1000)}s；` +
+        `本钟累计跳过 ${skipCount} 拍，节拍 ${Math.round(TICK_MS / 1000)}s）`
+      runtime.lastSkipReason = msg
+      if (opts.logFrom) runtime.lastTickLog = [msg]
+      console.warn(`[serenity-hooks] ${msg}（${opts.label}）`)
+      return
+    }
+    runTick()
+  }
+
+  /**
+   * 跑一拍（进入本钟私有串行链）。
+   *
+   * ⚠️ `tickPending` 在**入链之前**置位、在 body 完成（或异常）后的 `finally` 里清位 ——
+   *    置位必须同步、早于 `st.chain = st.chain.then(...)` 真正执行回调，
+   *    否则同一 tick 周期内的两次调用会都判"无在飞"而双双入队。
+   */
+  const runTick = (): void => {
     if (opts.gate !== undefined && !opts.gate()) {
       runtime.lastSkipReason = opts.gateOffReason ?? null
       return
@@ -288,6 +358,8 @@ export function createClock<T>(opts: ClockOptions<T>): Clock {
         return
       }
     }
+    st.tickPending = true
+    st.tickStartedAt = Date.now()
     // 🔴 接到**本钟私有**的串行链尾（硬约束一）
     st.chain = st.chain.then(async () => {
       try {
@@ -304,6 +376,11 @@ export function createClock<T>(opts: ClockOptions<T>): Clock {
         // 异常路径**留痕且不抛出**：一个坏 tick 不得杀掉时钟所在进程（既有两条钟的语义）
         if (opts.logFrom) runtime.lastTickLog = [msg]
         console.warn(`[serenity-hooks] ${msg}（${opts.label}）`)
+      } finally {
+        // 🔴 必须清位：否则"跳过一拍"会退化成"从此永久跳拍"（一次慢拍把钟**永久停掉**——
+        //    那是比积压更坏的静默失效，且它与"钟没武装"读数相同）。
+        st.tickPending = false
+        st.tickStartedAt = null
       }
     })
   }
@@ -328,14 +405,14 @@ export function createClock<T>(opts: ClockOptions<T>): Clock {
       attachClockEvents(opts.ctx, api, opts.events)
     }
     if (opts.gate !== undefined && !opts.gate()) return
-    st.timer = setInterval(tick, TICK_MS)
+    st.timer = setInterval(skipOrRun, TICK_MS)
     // unref：进程存活时定时器照常触发；进程退出（插件卸载 / 服务器停止）不阻塞退出
     st.timer.unref()
     runtime.armed = true
     runtime.armedAt = Date.now()
     console.log(opts.startLog())
     // 启动时立即跑一次（插件重启后恢复节律，无需等首个 5min）
-    if (opts.immediate !== false) tick()
+    if (opts.immediate !== false) skipOrRun()
   }
 
   const dispose = (): void => {
@@ -389,6 +466,11 @@ export function createClock<T>(opts: ClockOptions<T>): Clock {
       // `wired` 一并复位：重置 = 回到"未武装且未接线"的初始态。否则进程内第二次
       // `register*`（测试；或理论上 HMR 重装配）会因旧实例已置位而**不再挂事件** ⇒ 热启动失联。
       st.wired = false
+      // 🔴 §A3 的两个新字段同样必须复位：`tickPending` 若残留 true，重置后的钟会**永远跳拍**
+      //    （看上去"已武装"、`ticks` 却再也不涨 —— 与"钟没起来"读数相同，零信号）。
+      st.tickPending = false
+      st.tickStartedAt = null
+      skipCount = 0
       opts.onReset?.()
     },
   }
