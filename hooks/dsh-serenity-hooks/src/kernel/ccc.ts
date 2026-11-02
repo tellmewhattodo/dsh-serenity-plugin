@@ -227,6 +227,21 @@ interface SerenityConfig {
    * 本节是「**别人**干完活了，告诉我一声」（互观察）。两者都走唤醒链路，但**主语相反**。
    */
   trajectorySubscriptions?: TrajectorySubscription[];
+  /**
+   * **用户语录台账**（v1.113.0，owner 2026-11-02 需求）。
+   *
+   * owner 原话：「我需要一个可开启关闭的功能，就是记录用户直接对谁说过什么……
+   * 这个功能如果开启，则默认写到一个指定目录内，按天进行记录。」
+   *
+   * **开关放 CCC 面（owner Q2 的答）**：改它不发版（D23）——机制在 ACC，声明在 CCC。
+   *
+   * **缺省 = 关**。这不只是保守：台账是**把用户原话原文长期留存**，
+   * 未经明示开启就去写它，等于替 owner 做了一个他没有同意的持久化决定。
+   * ⇒ `enabled` 必须**显式为 true** 才开；缺键/写错/写成字符串都算关。
+   *
+   * 采集点、判别面与落盘形态的判据 ⇒ `trajectory/user-quotes.ts` 头注释（单一真相源）。
+   */
+  userQuotes?: { enabled?: boolean };
 }
 
 /**
@@ -555,6 +570,23 @@ export function readTrajectorySubscriptions(
     })
   })
   return { subs: subs.filter((s) => s.enabled !== false), problems }
+}
+
+/**
+ * 用户语录台账是否开启（`userQuotes.enabled`，v1.113.0）。
+ *
+ * 🔴 **判据是 `=== true`，不是"键存在"**：写成 `"true"` / `1` / 缺 `enabled`
+ * 一律当**关**。理由见 `SerenityConfig.userQuotes` —— 这是"长期留存用户原话"，
+ * 含糊的配置必须落到**不写**那一侧（fail-closed，与订阅表的 fail-open 方向相反，
+ * 因为这里的危险方向是**多写**，那里是**少通知**）。
+ *
+ * ⚠️ 配置损坏 ⇒ `loadSerenityConfig` 已响亮告警并返回 `{}` ⇒ 这里得到 `false`（关）。
+ * 即"配置坏了就不记"，而不是"配置坏了就记到默认位置"。
+ */
+export function readUserQuotesEnabled(root: string, paths: string[] = DEFAULT_SERENITY_CONFIG_PATHS): boolean {
+  const raw = loadSerenityConfig(root, paths).userQuotes
+  if (typeof raw !== 'object' || raw === null) return false
+  return (raw as { enabled?: unknown }).enabled === true
 }
 
 /**

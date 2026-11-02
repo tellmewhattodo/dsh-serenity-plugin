@@ -401,6 +401,32 @@ CCC 级微信个人号接入（iLink 协议）：dsh 一进程多 CCC，每 CCC 
   ▸ 旧配置里残留 exclusiveTools ⇒ **静默忽略**（schemastery 非 strict），不影响加载。
   ▸ ⚠️ 连带后果（owner 已知并确认）：dashboard 是常驻工具 ⇒ diag 段对**所有轨迹**可见，
     而它的 live 会话清单是**全部 CCC** 的（跨容器）。这是「方案 C」的既定代价，不是缺陷。
+
+── 9. userQuotes.enabled（用户语录台账，v1.113.0）──
+**把用户直接说的话按天、按轨迹存下来**，供之后反向分析用户。owner 原话：
+「我需要一个可开启关闭的功能，就是记录用户直接对谁说过什么，对谁是指对具体的某个轨迹……
+这个功能如果开启，则默认写到一个指定目录内，按天进行记录。这个功能是用于具体的宁静号CCC反向来分析用户的」。
+
+  Config:
+    { "userQuotes": { "enabled": true } }
+
+  默认：**关**。🔴 判据是 \`enabled === true\`，⛔ 不是"键存在"——
+  写成 "true" / 1 / 只写 userQuotes: {} 一律当**关**。理由：这是把用户原话原文**长期留存**，
+  含糊的配置必须落到"不写"那一侧（fail-closed；与订阅表的 fail-open 方向相反，
+  因为这里的危险方向是**多写**）。
+
+  落点：\`AGENT_SESSIONS/_user-quotes/<YYYY-MM-DD>.jsonl\`（按天，一行一条）：
+    {"ts":"…+08:00","trajectory":"<轨迹目录名 或 null>","sessionId":"…","messageId":"…","text":"（原话，一字不改）","chars":88}
+
+  ▸ **采集点** = \`agent/pre-step\` 的 \`payload.messages\`（本 step 从 inbox 取出、即将进本步的消息）。
+  ▸ **判别面 = \`source.kind === 'user'\`**（结构性，⛔ 不靠措辞黑名单）。
+  ▸ **"对谁" = 按轨迹**（Q1），取绑定真相源（\`current.dsh_session_bind\`）；未绑定 ⇒ \`null\` 但**照常记**。
+  ▸ **全文**（Q3）：一字不改，不做摘要；\`chars\` 是**码点数**不是 UTF-16 单元数。
+  ▸ 两个**冒充 \`kind:'user'\`** 的生产者（载体开场白／rebuild 锚点）按各自标记排除。
+  ▸ IM 入站（微信/飞书）**不会混进来**：它走 \`deliverToTrajectory\`，kind 是
+    \`plugin:dsh-serenity-hooks\`（已取证，非推演）。⇒ 台账 = **界面直话**。
+  ▸ 采集失败只 warn、**不阻断 step**（台账是旁路观测，不是被观测对象的组成部分）。
+  判据全文（含取证与变异检验设计）⇒ \`src/trajectory/user-quotes.ts\` 头注释。
 `
 
 

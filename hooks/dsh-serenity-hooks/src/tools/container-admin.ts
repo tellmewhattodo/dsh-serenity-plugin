@@ -158,7 +158,7 @@ const DOCS_CHAPTERS: readonly DocsChapter[] = [
   },
   {
     id: 'config',
-    summary: 'CCC 配置全表——9 段各是什么、怎么填、填错会怎样（.opencode/serenity.json）',
+    summary: 'CCC 配置全表——10 段各是什么、怎么填、填错会怎样（.opencode/serenity.json）',
     render: () => CCC_CONFIG_REFERENCE,
   },
   {

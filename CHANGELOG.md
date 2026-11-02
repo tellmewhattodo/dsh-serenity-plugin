@@ -1,3 +1,82 @@
+## v1.113.0 — 2026-11-02（用户语录台账：按天 ／ 按轨迹 ／ 全文记录用户直话）
+
+**来源**：owner 需求（逐字见下）＋ 三答确认。**这一版加了一条只读旁路**：把用户
+**直接说的话**按天落盘，供之后反向分析用户。它不改任何既有行为（默认关、失败不阻断）。
+
+**owner 原话（逐字，来源 = 2026-11-02 会话内用户输入）**：
+「我需要一个可开启关闭的功能，就是记录用户直接对谁说过什么，对谁是指对具体的某个轨迹，
+本质上这是个用户语录功能，这个功能如果开启，则默认写到一个指定目录内，按天进行记录。
+这个功能是用于具体的宁静号CCC反向来分析用户的」
+
+**owner 三答**：**Q1** 按轨迹（不是按会话）｜**Q2** 开关放 CCC 配置面（改它不发版）｜**Q3** 全文（一字不改，不做摘要）。
+
+---
+
+### 一、采集点与判别面（两条都实测过，不是推演）
+
+| 项 | 结论 | 依据 |
+|---|---|---|
+| **采集点** | `agent/pre-step` 的 `payload.messages` | 宿主 `dsh-agent/lib/types/runtime-types.d.ts` 逐字：`messages: UserMessage[]` = **本 step 从 inbox 取出、即将进本步的消息**，每条自带 `source`。这是"用户直接说的话"最接近源头的位置 |
+| **判别面** | `source.kind === 'user'` | 宿主 `dsh-llm` 明文 *"user messages carry **any** producer's kind"*；实测真发言 = `{kind:'user',rpcId,clientTimeZone}`，ACC 注入 = `{kind:'plugin:dsh-serenity-hooks'}` |
+
+🔴 **为什么不用现成的两处**：`weixin-message-hook` **只覆盖 IM**（界面直话完全没记）；
+`dsh-session corpus` 是**事后扫描**，且判据是 20+ 条**措辞黑名单**（它自己的 `heads` 子命令就是"量漏网家族"的取证工具）
+⇒ **判据天生不完备**。本版改用**结构性判据**，并在实时、按轨迹、结构化三点上补齐。
+
+### 二、🔴 IM 渠道那一格：**已取证结案，不会混**
+
+立项时留的开放项是「IM 消息是否也走 `agent/pre-step`、是否同为 `kind:'user'`」。**答案是它根本不同 kind**：
+
+- **代码面**：IM 入站走 `deliverToTrajectory`（`trajectory/session.ts`），构造消息用
+  `createUserMessage({ …, source: PLUGIN_SOURCE })` ⇒ `kind:'plugin:dsh-serenity-hooks'`。
+- **日志面**（同一会话两条并存，`dsh-session corpus raw` 真读）：
+  微信那条 = `{"kind":"plugin:dsh-serenity-hooks"}`（正文含 `[serenity:weixin-manual-output]`）；
+  界面那条 = `{"kind":"user","rpcId":…,"clientTimeZone":…}`。
+
+⇒ **按 `kind === 'user'` 过滤，天然只收界面直话，IM 一条都进不来。**
+⚠️ 如实标注边界：这是**当前实现的属性**，不是协议保证 —— 若哪天 IM 改回 `kind:'user'`，本台账**会开始**收录它，
+那时 `channel` 判别需要 owner 重新裁决（那是 Q1 的范围问题，不该由代码自己猜）。
+
+### 三、两个**冒充** `kind:'user'` 的生产者（本方案唯一的不完美点）
+
+| 生产者 | 位置 | 标记 | 为什么冒充 |
+|---|---|---|---|
+| 载体开场白 | `trajectory/user-carrier.ts` | `CARRIER_OPENING_MARK` | 让宿主自动命名生效 |
+| rebuild 锚点 | `trajectory/rebuild.ts` | 正文以 `[COGNITIVE-TRAJECTORY-ASSISTANT` 开头 | 宿主校验强制要 `kind:'user'` |
+
+🔴 **判据不是"看起来像注入"**（那正是 corpus 那条不完备的路），而是**这两个生产者自己声明的标记** ——
+它们本来就是为了"让将来翻日志的人一眼看出这不是真主说的"而存在的。
+判据形态 = `text.startsWith(marker)`（**开头**才算冒充者的形态；正文中间提到这些词是真人在讨论它们）。
+
+### 四、落盘形态与失败语义
+
+落点 `AGENT_SESSIONS/_user-quotes/<YYYY-MM-DD>.jsonl`，一行一条：
+`{"ts","trajectory","sessionId","messageId","text","chars"}`（`chars` 是**码点数**，不是 UTF-16 单元数）。
+
+- **未绑定的会话** ⇒ `trajectory: null` 但**照常入账**：丢掉它们会让台账有**系统性空洞**，且空洞不可见。
+- **去重只按 `messageId`**，⛔ 不按文本 —— 用户真的重复说同一句是**合法事实**，按文本去重会把它吞掉。
+- 🔴 **失败只 warn、不阻断 step**：台账是**旁路观测**，不是被观测对象的组成部分。
+  这与会打回的 `output-guard` 性质不同（那个守的是"别把敏感词说出去"）。但**不许静默** ——
+  否则"没记上"和"没人说过话"在读数上长得一样。
+
+### 五、开关（Q2：CCC 配置面，改它不发版）
+
+```json
+{ "userQuotes": { "enabled": true } }
+```
+🔴 **默认关，判据是 `enabled === true`**（⛔ 不是"键存在"）：写成 `"true"` / `1` / 只写 `{}` 一律当**关**。
+理由：这是把用户原话原文**长期留存**，含糊配置必须落到**不写**那一侧（fail-closed；
+与订阅表的 fail-open 方向相反 —— 那里的危险方向是**少通知**，这里是**多写**）。
+
+### 六、验收
+
+- ✅ 六门禁：typecheck ／ test **3237**（+23）／ coverage 95.22% ／ build ／ pack-check ／ 隐私门。
+- 🔴🔴 **两条变异检验（都实跑了，不是推演）**：
+  - **M1**：把主判据写成 `kind === 'user'`（弄反）⇒ **14 条精确变红**（含两条主判据用例）。
+  - **M2**：把冒充判据从 `startsWith` 改成 `includes` ⇒ **恰好 1 条变红**，且正是那条**正控**。
+  ⇒ 两条都证明判据有判别力；改回后 23/23 全绿。
+- ✅ 文档面：`container_admin config docs config` 新增第 9 段（构建产物中逐字渲染，反引号已转义）。
+
 ## v1.112.0 — 2026-11-02（四条令一批落地：砍 `wait` ／ 节律 60s ／ 轮询性能地基 ／ 注入外壳精简）
 
 **来源**：owner 四条令（逐字见下）＋ 三答确认。**这一版是"少说话、快一拍"的一版**：

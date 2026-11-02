@@ -17,7 +17,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve, basename, dirname } from 'node:path'
-import { loadSerenityConfig, DEFAULT_SERENITY_CONFIG_PATHS } from '../kernel/ccc.js'
+import { loadSerenityConfig, readUserQuotesEnabled, DEFAULT_SERENITY_CONFIG_PATHS } from '../kernel/ccc.js'
 import { cccRootForCwd } from '../kernel/ccc-roots.js'
 import { ACC_VERSION } from '../kernel/constants.js'
 import { truncateContent } from '../skills/discovery.js'
@@ -29,6 +29,7 @@ import { isTrajectoryConstrained, replacesDefaultIdentity } from '../trajectory/
 import { trajectoryConstraintFor } from '../trajectory/session.js'
 import { syncTrajectoryModel } from '../trajectory/model-runtime.js'
 import { PLUGIN_SOURCE } from '../kernel/message-source.js'
+import { recordUserQuotes } from '../trajectory/user-quotes.js'
 
 /** 最小 agent 形状（本文件只需 session.id 与 ctx） */
 type AgentLike = { session?: { id?: string }; ctx?: unknown }
@@ -390,6 +391,31 @@ export function registerContext(ctx: Context, opts: ContextRegistration = {}): v
       const cwd = (agent.session as { header?: { cwd?: string } } | undefined)?.header?.cwd ?? process.cwd()
       const root = cccRootForCwd(cwd)
       const key = agentKey(agent)
+      /**
+       * 🔴 用户语录台账采集（v1.113.0，owner 2026-11-02 需求）。
+       *
+       * 放在 `next()` **之前**：`payload.messages` 是"本 step 从 inbox 取出、即将进入本步的消息"
+       * （宿主 `runtime-types.d.ts` 逐字）。先记再放行 ⇒ **这一步真的会看见的话，就一定先记下了**；
+       * 若下游 reject 掉这一步，台账上会多一条"它没看见"的记录 —— 那是**已知且可接受**的方向
+       * （宁多记不漏记：owner 要的是"用户说过什么"，不是"模型最终读到了什么"）。
+       *
+       * ⚠️ **只旁路、不阻断**：`recordUserQuotes` 自己 catch 全部失败并 warn，
+       *    这里再包一层 `try/catch` 是第二道保险 —— 台账坏了**绝不能让 step 跑不动**。
+       * ⚠️ **必须排在 `next()` 之前且不改变 `messages`**：本函数是 waterfall，
+       *    但我们**不修改** `payload.messages`（那是下游的输入，动它就是行为变更）。
+       */
+      if (root) {
+        try {
+          if (readUserQuotesEnabled(root, configPaths)) {
+            const sessionId = (agent.session as { id?: string } | undefined)?.id
+            if (typeof sessionId === 'string' && sessionId !== '') {
+              recordUserQuotes(root, sessionId, messages)
+            }
+          }
+        } catch (e) {
+          console.warn(`[serenity-hooks] user-quotes 采集失败（不影响本步）：${String((e as Error)?.message ?? e)}`)
+        }
+      }
       const downstream = await next()
       // 🔴 2026-10-22 方案 C（owner 裁）：**六源汇一，每 step 只发一次 restrict**。
       //
