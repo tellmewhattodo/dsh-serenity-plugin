@@ -87,6 +87,17 @@ export interface Injection {
   readonly summary?: string
   /** 正文（由各注入物自己的构造器产出，含各自契约标记）。 */
   readonly text: string
+  /**
+   * 当一条消息**本来就是多个内容块**时，逐块给出它们的顺序。
+   *
+   * 🔴 为什么必须有这一格（M2 #2 实测教训）：`keeper` 的提醒是 CHECKPOINT / REBUILD /
+   * SESSION 体积**各一个块**合成一条消息。若为了迁进本模型而把它们 `join('\n')` 成一块，
+   * 消息的**内容块数量就变了** —— 模型看到的是"一个含换行的大块"而不是"三个块"。
+   * 那是**形态变更**，违反 M2「该注入物形态一字不变」的铁律。
+   * ⇒ 有这一格，`text` 仍是规范文本（供 `summary` 与断言用，且**必须等于**这些块的拼接）。
+   * ⛔ **不是**两套真相源：`assertInjection` 机械核对 `text === blocks.join('\n')`。
+   */
+  readonly blocks?: readonly string[]
   /** C+D 投递意图：唤醒语义**显式**，不再隐含在通道里。 */
   readonly delivery: InjectionDelivery
   /** E 归属：算不算语料。（由 {@link corpusOf} 从 `origin` 推导） */
@@ -179,6 +190,20 @@ export function assertInjection(inj: Injection): void {
   if (inj.userQuote !== userQuoteOf(inj.origin)) {
     throw new Error(`Injection 违反 I2：userQuote=${inj.userQuote} 与 origin='${inj.origin}' 的推导值不符`)
   }
+  // blocks 与 text 不许是两套真相源：块拼接必须逐字等于 text
+  if (inj.blocks !== undefined) {
+    if (inj.blocks.length === 0) {
+      throw new Error('Injection: blocks 为空数组时不该设它（用单块 text 即可）')
+    }
+    if (inj.blocks.some((b) => typeof b !== 'string')) {
+      throw new Error('Injection: blocks 的每一项都必须是字符串')
+    }
+    if (inj.blocks.join('\n') !== inj.text) {
+      throw new Error(
+        'Injection: blocks.join("\\n") 必须逐字等于 text（否则同一事实存两份，必然漂移）',
+      )
+    }
+  }
 }
 
 /** 构造一条 `Injection`，**归属字段自动推导**（调用点只需给 origin/text/delivery/form）。 */
@@ -216,9 +241,18 @@ export interface DeliverTarget {
 export function toMessage(inj: Injection): UserMessage {
   assertInjection(inj)
   return createUserMessage({
-    content: [{ type: 'text', text: inj.text }],
+    content: contentOf(inj),
     source: sourceOf(inj),
   })
+}
+
+/**
+ * 内容块：有 `blocks` 就逐块给（**保住原始块数**），否则单块。
+ * 🔴 这是「多块注入物迁进本模型后形态不变」的唯一实现点。
+ */
+function contentOf(inj: Injection): { type: 'text'; text: string }[] {
+  const parts = inj.blocks ?? [inj.text]
+  return parts.map((t) => ({ type: 'text', text: t }))
 }
 
 /**
@@ -257,7 +291,7 @@ export function deliver(inj: Injection, target: DeliverTarget): 'steer' | 'follo
 /** 内部：已经 assert 过的路径复用，避免 `deliver` 里二次校验（保持一次来源）。 */
 function toMessageUnchecked(inj: Injection): UserMessage {
   return createUserMessage({
-    content: [{ type: 'text', text: inj.text }],
+    content: contentOf(inj),
     source: sourceOf(inj),
   })
 }

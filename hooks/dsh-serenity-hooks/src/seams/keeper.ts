@@ -12,13 +12,13 @@
 
 import type { Context } from 'cordis'
 import type { PostToolDecision, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { existsSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { hostService } from '../host/access.js'
 import { loadSerenityConfig } from '../kernel/ccc.js'
 import { agentCwdFor, cccRootForCwd } from '../kernel/ccc-roots.js'
+import { makeInjection, toMessage } from '../kernel/injection.js'
 import { readSimpleSettings } from '../surface/settings.js'
 import { trajectoryConstraintParticipates } from '../trajectory/session.js'
 import { getActiveSessionInfo } from '../trajectory/core.js'
@@ -578,7 +578,26 @@ export function registerKeeper(ctx: Context, opts: KeeperRegistration = {}): voi
     }
 
     if (blocks.length === 0) return downstream
-    const reminderAll = createUserMessage({ content: blocks, source: PLUGIN_SOURCE })
+    // 🔴 **DII M2 · 注入点 #2**（2026-11-04）：改走声明层。
+    //    ⚠️⚠️ **本处是最危险的一处**（失败面清单 #5）：它**必须仍然不唤醒**。
+    //    判据不靠自觉：`delivery:'this-step'` 这一档在 `deliver()` 里**显式抛错**
+    //    （它走 `additionalContexts` 返回，不是调 agent 方法）⇒ 谁想改成 `'wake-now'`
+    //    都接不上，必须同时动别处，**无法静默发生**。
+    //    🔴 `blocks` 是**多条提醒各自的块**（CHECKPOINT / REBUILD / SESSION 体积各一），
+    //      刻意**保持块数与顺序不变** —— 若 join 成一块，模型看到的是"一个含换行的大块"，
+    //      那是**形态变更**。故走 `blocks` 字段而非拼接正文。
+    const blockTexts = blocks.map((b) => (b as { text?: string }).text ?? '')
+    const reminderAll = toMessage(
+      makeInjection({
+        origin: 'acc',
+        form: 'notice',
+        // summary 是宿主 notice 形态的**构成要件**；只报"几条"，不重复正文。
+        summary: `keeper 提醒 ${blocks.length} 条`,
+        text: blockTexts.join('\n'),
+        blocks: blockTexts,
+        delivery: 'this-step',
+      }),
+    )
 
     if (downstream.kind === 'block') {
       return {
