@@ -74,7 +74,7 @@ import { listRunningSessionIds } from '../cro/turns.js'
 import { sessionsRootDir } from '../trajectory/cleanup.js'
 import { hostAgents } from '../host/access.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { PLUGIN_SOURCE } from '../kernel/message-source.js'
+import { toMessage, makeInjection } from '../kernel/injection.js'
 import {
   DEFAULT_LOOKBACK_MS,
   projectDirNameForCwd,
@@ -936,7 +936,19 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
         const resumeOne = createResumeOne({
           agents,
           sessionController: sc,
-          makeMessage: (text) => createUserMessage({ content: [{ type: 'text', text }], source: PLUGIN_SOURCE }),
+          // 🔴 **DII M2 · 注入点 #15**（2026-11-04）：工厂里改走声明层。
+          //    ⚠️ **通道不在这里选** —— 选 steer/followup 的是 `createResumeOne`（含退回逻辑）。
+          //    本工厂只负责"造消息"，这正是 I3：意图定死、通道由上下文落。
+          makeMessage: (text) =>
+            toMessage(
+              makeInjection({
+                origin: 'acc',
+                form: 'notice',
+                summary: '中断兜底继续（工具面）',
+                text,
+                delivery: 'wake-now',
+              }),
+            ),
         })
 
         const outcomes: ResumeOutcome[] = []

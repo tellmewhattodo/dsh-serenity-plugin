@@ -24,7 +24,7 @@
  * 补跑窗口 2h（超窗置 missed 留痕）｜同 tick 串行｜唤起后维持 live（人类可介入）。
  */
 
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { basename, join } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
@@ -53,7 +53,7 @@ import {
   WAKE_CATCH_UP_MS,
   type WakeEntry,
 } from './registry.js'
-import { PLUGIN_SOURCE } from '../kernel/message-source.js'
+import { toMessage, makeInjection, deliver } from '../kernel/injection.js'
 
 /**
  * ── 🔴 2026-09-25 I2 收敛（约束文档 §2.7 违反清单，L1 违反之一）────────────────
@@ -319,7 +319,18 @@ export async function deliverWake(ctx: unknown, root: string, entry: WakeEntry):
   const acquired = await acquireWakeAgent(ctx, root, target.dirName)
   if ('error' in acquired) return { ok: false, detail: acquired.error, notReady: acquired.notReady === true }
   try {
-    acquired.agent.followup(createUserMessage({ content: [{ type: 'text', text: buildWakeText(entry, target) }], source: PLUGIN_SOURCE }))
+    // 🔴 **DII M2 · 注入点 #3**（2026-11-04）：改走 `deliver()`。
+    //    `delivery:'next-turn'` ⇒ 通道由 deliver 选（followup），行为零变更。
+    deliver(
+      makeInjection({
+        origin: 'acc',
+        form: 'notice',
+        summary: `到点唤醒（来自 ${entry.target}）`,
+        text: buildWakeText(entry, target),
+        delivery: 'next-turn',
+      }),
+      acquired.agent,
+    )
   } catch (err) {
     return { ok: false, detail: `投递失败（${acquired.how}）: ${String((err as Error)?.message ?? err)}` }
   }
@@ -459,8 +470,22 @@ export async function sendToCognitiveTrajectory(
     }
   }
   const agent = acquired.agent
-  const make = (): ReturnType<typeof createUserMessage> =>
-    createUserMessage({ content: [{ type: 'text', text: buildSendText(t, message, sender) }], source: PLUGIN_SOURCE })
+  // 🔴 **DII M2 · 注入点 #4**（2026-11-04）：改走声明层。
+  //    ⚠️⚠️ **本处是 I3 最真实的形态**：同一个 `delivery:'wake-now'` 意图，
+  //    在**不同上下文**落不同通道（idle ⇒ followup，在跑 ⇒ steer，steer 失败退回 followup）。
+  //    这正是「delivery 是意图、通道是实现」的教科书实例 —— 通道选择在下面逐分支进行，
+  //    而**声明（六条轴）只有一份**。
+  //    ⛔ 不要把它改成一个 `deliver()` 调用：`deliver` 只认单一通道，而本处**必须**逐分支试。
+  const make = (): UserMessage =>
+    toMessage(
+      makeInjection({
+        origin: 'acc',
+        form: 'notice',
+        summary: `即时消息（来自 ${sender ?? '未知'}）`,
+        text: buildSendText(t, message, sender),
+        delivery: 'wake-now',
+      }),
+    )
   // 🔴 v1.39.2（S142 §0r，所有者令「不排队、直接即时注入」）：见函数头部的语义变更说明。
   // 判据 = 宿主 agent 的 `status`（`trajectory/carrier.ts` 同款读法：`followup`/`steer` 会**同步**置 running）。
   //
@@ -962,11 +987,17 @@ async function deliverCroWake(
 
   if ('error' in acquired) return { ok: false, detail: acquired.error, notReady: acquired.notReady === true }
   try {
-    acquired.agent.followup(
-      createUserMessage({
-        content: [{ type: 'text', text: buildCroWakeText(dirName, mdPath, prompt, reason) }],
-        source: PLUGIN_SOURCE,
+    // 🔴 **DII M2 · 注入点 #5**（2026-11-04）：改走 `deliver()`。
+    //    `delivery:'next-turn'` ⇒ 通道由 deliver 选（followup），行为零变更。
+    deliver(
+      makeInjection({
+        origin: 'acc',
+        form: 'notice',
+        summary: `CRO 唤起（${dirName}）`,
+        text: buildCroWakeText(dirName, mdPath, prompt, reason),
+        delivery: 'next-turn',
       }),
+      acquired.agent,
     )
   } catch (err) {
     return { ok: false, detail: `CRO 投递失败（${acquired.how}）: ${String((err as Error)?.message ?? err)}` }
@@ -1365,7 +1396,20 @@ async function runInterruptedSafetyNet(ctx: unknown, root: string, log: string[]
     const resumeOne = createResumeOne({
       agents,
       sessionController: sc,
-      makeMessage: (text) => createUserMessage({ content: [{ type: 'text', text }], source: PLUGIN_SOURCE }),
+      // 🔴 **DII M2 · 注入点 #14**（2026-11-04）：工厂里改走 `toMessage(makeInjection(...))`。
+      //    ⚠️ **通道不在这里选** —— 本工厂只负责"造消息"，真正选 steer/followup 的是
+      //    `createResumeOne` 内部（它有"steer 优先、失败退回 followup"的逻辑）。
+      //    ⇒ 这正是 I3 的实例：同一个 `delivery` 意图在不同分支落不同通道。
+      makeMessage: (text) =>
+        toMessage(
+          makeInjection({
+            origin: 'acc',
+            form: 'notice',
+            summary: '中断兜底继续',
+            text,
+            delivery: 'wake-now',
+          }),
+        ),
     })
 
     log.push(

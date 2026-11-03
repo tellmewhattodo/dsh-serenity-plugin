@@ -56,7 +56,7 @@ import { hasTrajectoryPrompt } from './prompt.js'
 import { hostAgents, hostAgentDefaultModel } from '../host/access.js'
 import { waitAgentIdle } from './carrier.js'
 import { registerCognitiveTrajectorySkillSection } from '../seams/system-prompt.js'
-import { PLUGIN_SOURCE } from '../kernel/message-source.js'
+import { toMessage, makeInjection, deliver } from '../kernel/injection.js'
 
 export type { TrajectoryConstraint }
 
@@ -658,7 +658,18 @@ export function deliverToTrajectory(agent: Agent, text: string): { how: string }
     followup?: (m: unknown) => void
     status?: string
   }
-  const msg = createUserMessage({ content: [{ type: 'text', text }], source: PLUGIN_SOURCE })
+  // 🔴 **DII M2 · 注入点 #12**（2026-11-04）：改走声明层。
+  //    ⚠️ **通道逐分支选**（在跑 ⇒ steer，否则 followup）—— I3 的又一实例：
+  //    声明只有一份（origin/form/delivery），通道由目标 status 决定，⛔ 不写成一次 deliver()。
+  const msg = toMessage(
+    makeInjection({
+      origin: 'acc',
+      form: 'notice',
+      summary: 'IM 入站消息',
+      text,
+      delivery: 'wake-now',
+    }),
+  )
   // 🔴 分支顺序即判据：在跑优先当场注入
   if (a.status === 'running' && typeof a.steer === 'function') {
     a.steer(msg)
@@ -695,7 +706,18 @@ export async function askTrajectory(
   options?: { timeoutMs?: number },
 ): Promise<TrajectoryAskResult> {
   const beforeSnapshot = snapshotSession(agent.session)
-  agent.followup(createUserMessage({ content: [{ type: 'text', text: question }], source: PLUGIN_SOURCE }))
+  // 🔴 **DII M2 · 注入点 #13**（2026-11-04）：改走 `deliver()`。
+  //    `delivery:'next-turn'` ⇒ 通道由 deliver 选（followup），行为零变更。
+  deliver(
+    makeInjection({
+      origin: 'acc',
+      form: 'notice',
+      summary: '轨迹提问（等本轮答案）',
+      text: question,
+      delivery: 'next-turn',
+    }),
+    agent,
+  )
   const produced = await waitForTurnAssistant(ctx, agent, beforeSnapshot, { timeoutMs: options?.timeoutMs })
   // 🔴 本轮没产出 ⇒ **空答案**（绝不退回上一轮的旧文本：那正是复读的形态）
   const answer = produced ? lastAssistantText(agent) : ''
