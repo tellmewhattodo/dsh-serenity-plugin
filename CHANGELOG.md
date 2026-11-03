@@ -1,3 +1,44 @@
+## v1.113.2 — 2026-11-03（修：subagent 任务书被记进用户语录）
+
+**owner 原话**：「subagent任务书记录到用户语录是不对的，这个需要修掉」。
+
+### 一、这是**判据缺陷**，不是规格取舍
+
+subagent 的父 agent 用 `createUserMessage(...)` 下发任务书，而宿主 `agent.followup/steer`
+**只接受 user 消息** ⇒ 任务书的 `source.kind` **确实是 `'user'`**。
+⇒ v1.113.0/1 的主判据「`kind === 'user'`」**分不开「真人说的话」与「另一个 agent 说的话」**。
+
+**实测污染**（上线当天真机数据）：`_user-quotes/2026-11-03.jsonl` 42 条里 **2 条**是 subagent 任务书，
+正文形如"你在宁静号 CCC 做一次只读的历史调研…"，且 `trajectory: null`（subagent 不绑轨迹 —— 这其实是当时的线索，我没抓住）。
+
+### 二、修法：判据落到**单一真相源** `isSubagentSession`
+
+| 字段 | 出处 | 已有同款判据 |
+|---|---|---|
+| `header.origin === 'subagent'` | DSH 路由语义（`agent-lookup.ts`） | `seams/context.ts` 的 `shouldAutoRestore` |
+| `header.delegationDepth > 0` | 宿主委派深度 | `seams/bootstrap.ts` 的目录窄化 |
+
+🔴 **两条都判**：实测两者通常同时在场，但**任一条单独在场时也必须排除**；
+被 resume 的旧持久化 subagent 会话不一定带全两个字段 —— 这正是双判的理由。
+
+### 三、一处我自己的假绿（记下来，因为它比缺陷本身更值得记）
+
+测试**初版写了个 `shouldRecord()` 把判据抄一份再测它** ⇒ **假绿**：
+`seams/context.ts` 改错了它照样绿（D275 同族：「定义了却没接上」）。
+⇒ 改成 import 真实导出，并由 `context.ts` 也调它 —— **判据只有一份，改了必红**。
+
+### 四、验收
+
+- ✅ test **3246**（+9）／ typecheck 绿。
+- 🔴 **变异检验（实跑）**：把 `isSubagentSession` 的 `return true` 改成 `return false`
+  ⇒ **恰好 3 条变红**，其中一条正是「施加排除后任务书一条都不写」。
+  ⇒ 证明这条排除**真的在起作用**，不是恒真断言。
+- ✅ 正控：主会话真发言**照常落盘**（排除没有误伤）。
+- ⚠️ **真机判据（未做，下一手）**：下一个 subagent 跑完后，`_user-quotes/<当天>.jsonl` 里
+  **不应**再出现任务书类正文。⛔ 单测绿 ≠ 真机绿（D141）。
+
+---
+
 ## v1.113.1 — 2026-11-02（收窄 v1.113.0 关于 IM 渠道的一处表述）
 
 **只改文档措辞，不改任何行为**（代码路径、判据、配置面一字未动）。起因是管家回问一句：

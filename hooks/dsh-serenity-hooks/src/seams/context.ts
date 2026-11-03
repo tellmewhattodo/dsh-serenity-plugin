@@ -29,7 +29,7 @@ import { isTrajectoryConstrained, replacesDefaultIdentity } from '../trajectory/
 import { trajectoryConstraintFor } from '../trajectory/session.js'
 import { syncTrajectoryModel } from '../trajectory/model-runtime.js'
 import { PLUGIN_SOURCE } from '../kernel/message-source.js'
-import { recordUserQuotes } from '../trajectory/user-quotes.js'
+import { recordUserQuotes, isSubagentSession } from '../trajectory/user-quotes.js'
 
 /** 最小 agent 形状（本文件只需 session.id 与 ctx） */
 type AgentLike = { session?: { id?: string }; ctx?: unknown }
@@ -406,7 +406,16 @@ export function registerContext(ctx: Context, opts: ContextRegistration = {}): v
        */
       if (root) {
         try {
-          if (readUserQuotesEnabled(root, configPaths)) {
+          /**
+           * 🔴🔴 **subagent 子会话不采集**（v1.113.2，owner 2026-11-03 裁：
+           * 「subagent 任务书记录到用户语录是不对的，这个需要修掉」）。
+           *
+           * 判据**单一真相源 = `isSubagentSession`**（`trajectory/user-quotes.ts`），
+           * ⛔ 这里不重写 `origin === 'subagent' || depth > 0` —— 两份判据会漂（D230）。
+           * 完整理由（为什么 kind==='user' 分不开、为什么两条都要判）⇒ 那个函数的头注释。
+           */
+          const isSubagent = isSubagentSession(agent.session)
+          if (!isSubagent && readUserQuotesEnabled(root, configPaths)) {
             const sessionId = (agent.session as { id?: string } | undefined)?.id
             if (typeof sessionId === 'string' && sessionId !== '') {
               recordUserQuotes(root, sessionId, messages)

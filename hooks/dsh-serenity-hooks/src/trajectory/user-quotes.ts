@@ -192,6 +192,46 @@ export function __resetUserQuoteDedupeForTest(): void {
 }
 
 /**
+ * 🔴🔴 **该会话是不是 subagent 子会话**（v1.113.2，owner 2026-11-03 裁：
+ * 「subagent 任务书记录到用户语录是不对的，这个需要修掉」）。
+ *
+ * ## 为什么必须排除（判据缺陷，不是规格取舍）
+ *
+ * subagent 的父 agent 用 `createUserMessage(...)` 下发任务书，而宿主 `agent.followup/steer`
+ * **只接受 user 消息** ⇒ 任务书的 `source.kind` **确实是 `'user'`**。
+ * ⇒ 「`kind === 'user'`」这个判据**分不开「真人说的话」与「另一个 agent 说的话」**。
+ *
+ * 实测污染（v1.113.0/1 上线当天，42 条真实记录里 **2 条**）：
+ * 正文是"你在宁静号 CCC 做一次只读的历史调研…"、`trajectory: null`。
+ *
+ * ## 判据为什么是两条（⛔ 只判一条会漏）
+ *
+ * | 字段 | 出处 | 谁在用同款判据 |
+ * |---|---|---|
+ * | `header.origin === 'subagent'` | DSH 路由语义（`agent-lookup.ts`） | `seams/context.ts` 的 `shouldAutoRestore` |
+ * | `header.delegationDepth > 0` | 宿主委派深度 | `seams/bootstrap.ts` 的目录窄化 |
+ *
+ * ⇒ **两条都判**：实测两者通常同时在场，但**任一条单独在场时也必须排除**；
+ * 被 resume 的旧持久化 subagent 会话不一定带全两个字段 —— 这正是要双判的理由。
+ *
+ * 🔴 **本函数是判据的单一真相源**：`seams/context.ts` 调它，测试也测它。
+ * ⛔ 不要在两处各写一份 `origin === 'subagent' || depth > 0` —— 那是两份会漂的判据（D230）。
+ *
+ * ⚠️ **边界**：这是"结构性排除整个子会话"。若将来要让 subagent 也进台账，
+ * 那要**换判据**（例如按 `parentSession` 溯源到真主），⛔ 不是在这里放宽 —— 那是另一个裁决。
+ *
+ * @param session 宿主 session（只需 `header`）
+ * @returns 是 subagent ⇒ `true`（调用方应当**不采集**）
+ */
+export function isSubagentSession(session: unknown): boolean {
+  const header = (session as { header?: { origin?: unknown; delegationDepth?: unknown } } | null | undefined)?.header
+  if (header === null || typeof header !== 'object') return false
+  if (header.origin === 'subagent') return true
+  const depth = header.delegationDepth
+  return typeof depth === 'number' && depth > 0
+}
+
+/**
  * 一条消息的正文文本（只取 `text` 块，按出现顺序以 `\n` 相连）。
  *
  * 判据与 `session.ts:496` / `guard/seam.ts:70` 同款 —— 不另造一套取文法（否则同一条消息
