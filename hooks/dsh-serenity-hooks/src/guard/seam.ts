@@ -21,13 +21,12 @@
 
 import type { Context } from 'cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { cccRootForCwd } from '../kernel/ccc-roots.js'
+import { deliver, makeInjection } from '../kernel/injection.js'
 import { isTrajectoryConstrained } from '../trajectory/policy/profile.js'
 import { stripThink } from '../surface/text.js'
 import { buildSensitiveTable, detectSensitive, buildRebuke, rebukeStates, REBUKE_MAX_ROUNDS } from './filter.js'
 import { sessionEvents } from '../trajectory/core.js'
-import { PLUGIN_SOURCE } from '../kernel/message-source.js'
 
 /**
  * 外部面会话判定（v1.26.3 用户拍板：仅外部面检测，本地维护会话豁免）。
@@ -120,11 +119,20 @@ export function registerOutputGuardHook(ctx: Context): void {
       `[serenity-hooks] output-guard: rebuke ${st.consecutive}/${REBUKE_MAX_ROUNDS} (agent=${id}, turn=${payload.turn ?? '?'}, hits=${hits.length})`,
     )
     // 打回：steer 纠正消息 → turn 不关闭 → 模型同轮重生成（DSH 官方机制）
+    // 🔴 **DII M2 · 注入点 #7**（2026-11-04）：改走 `deliver()`。
+    //    `delivery:'wake-now'` ⇒ 通道由 deliver 选（steer），⛔ 调用点不再自己挑。
+    //    行为零变更：仍是 steer、仍是同轮重生成。
     try {
-      agent.steer(createUserMessage({
-        content: [{ type: 'text', text: buildRebuke(hits) }],
-        source: PLUGIN_SOURCE,
-      }))
+      deliver(
+        makeInjection({
+          origin: 'acc',
+          form: 'notice',
+          summary: `输出守卫打回（${hits.length} 处敏感词）`,
+          text: buildRebuke(hits),
+          delivery: 'wake-now',
+        }),
+        agent,
+      )
     } catch (error) {
       console.warn(`[serenity-hooks] output-guard steer failed: ${String((error as Error)?.message ?? error)}`)
     }

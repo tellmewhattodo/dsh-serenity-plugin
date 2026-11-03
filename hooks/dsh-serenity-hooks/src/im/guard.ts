@@ -36,8 +36,7 @@
 
 import type { Context } from 'cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { PLUGIN_SOURCE } from '../kernel/message-source.js'
+import { deliver, makeInjection } from '../kernel/injection.js'
 // 🔴 D234 修法（2026-10-24）：打回前先判「这条轨迹有没有 im-bridge 发送权」。
 // 两个都是**判据函数**（不是 UI 逻辑）：可见性判据与打回判据必须**同源**。
 import { isImWiredTrajectory } from './channels.js'
@@ -323,11 +322,19 @@ export function registerWeixinOutputGuard(ctx: Context): void {
         return
       }
       rebukeCounts.set(sessionId, count)
+      // 🔴 **DII M2 · 注入点 #8**（2026-11-04）：改走 `deliver()`。
+      //    `delivery:'wake-now'` ⇒ 通道由 deliver 选（steer），行为零变更。
       try {
-        agent.steer(createUserMessage({
-          content: [{ type: 'text', text: buildManualOutputRebuke(session) }],
-          source: PLUGIN_SOURCE,
-        }))
+        deliver(
+          makeInjection({
+            origin: 'acc',
+            form: 'notice',
+            summary: `IM 输出闸门打回（第 ${count} 次）`,
+            text: buildManualOutputRebuke(session),
+            delivery: 'wake-now',
+          }),
+          agent,
+        )
         console.log(
           `[serenity-hooks] weixin 输出闸门：打回 ${count}/${WEIXIN_OUTPUT_REBUKE_MAX}（session=${sessionId}, turn=${payload.turn ?? '?'}）`,
         )
