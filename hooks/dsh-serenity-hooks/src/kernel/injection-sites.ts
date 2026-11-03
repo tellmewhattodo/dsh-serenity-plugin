@@ -68,7 +68,14 @@ export interface InjectionSite {
 }
 
 /**
- * 14 处注入点（与提案 §2.1 逐条对应）。
+ * 注入点（与提案 §2.1 逐条对应；**M2 施工时从 14 订正到 16**，见下注）。
+ *
+ * 🔴 **2026-11-04 M2 施工订正（诚实记录）**：原盘点写「14 处」**少了两处** ——
+ *   `tools/cognitive-trajectory.ts:939` 的 `makeMessage`（工具的 askTrajectory 走的工厂）
+ *   与 `trajectory/interrupted.ts:723` 的 `deps.makeMessage`（依赖注入的工厂）。
+ *   漏它们的原因很具体：**它们不直接调 `createUserMessage`，而是提供一个工厂函数**
+ *   ⇒ `grep createUserMessage` 看不见它们。这正是"判据的扫描域必须自己说出来"（D259）。
+ *   ⚠️ 若按 14 处施工，`grep` 判据**永远不会绿**，而且**没人会知道为什么**。
  *
  * 🔴 **读法**：`form: undefined` 的行 = 现状**没有声明形态**，这是 DII 要补的第一件事；
  * `channel` 与 `delivery` 不一致的行，就是 M2 里最需要盯的（D 轴与 C 轴耦合的地方）。
@@ -262,6 +269,33 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     kind: 'plugin:dsh-serenity-hooks',
     migrated: false,
   },
+  {
+    id: 15,
+    name: '工具侧 askTrajectory 的消息工厂（continue-all-interrupted 用）',
+    at: 'tools/cognitive-trajectory.ts:939 makeMessage',
+    textFrom: null,
+    origin: 'acc',
+    form: 'notice',
+    delivery: 'next-turn',
+    channel: 'followup',
+    wakes: true,
+    kind: 'plugin:dsh-serenity-hooks',
+    migrated: false,
+  },
+  {
+    id: 16,
+    name: '中断恢复的消息工厂（依赖注入形态）',
+    at: 'trajectory/interrupted.ts:723 deps.makeMessage',
+    textFrom: null,
+    origin: 'acc',
+    form: 'notice',
+    // ⚠️ 意图随目标 status 变（`steer` 优先、失败退回 `followup`）—— I3 的又一实例。
+    delivery: 'wake-now',
+    channel: 'steer',
+    wakes: true,
+    kind: 'plugin:dsh-serenity-hooks',
+    migrated: false,
+  },
 ] as const
 
 /**
@@ -283,4 +317,6 @@ export const MIGRATION_ORDER: readonly number[] = [
   9, 10,
   // ⑥ 载体开场白：有 owner 裁决约束的 kind，**单独做、单独真机看屏**
   11,
+  // ⑦ M2 施工时补登的两处（工厂形态，grep 看不见）—— 与 #13/#14 同类，风险相同
+  15, 16,
 ]

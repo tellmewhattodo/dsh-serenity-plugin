@@ -13,13 +13,12 @@
 import type { Context } from 'cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve, basename, dirname } from 'node:path'
 import { loadSerenityConfig, readUserQuotesEnabled, DEFAULT_SERENITY_CONFIG_PATHS } from '../kernel/ccc.js'
 import { cccRootForCwd } from '../kernel/ccc-roots.js'
 import { ACC_VERSION } from '../kernel/constants.js'
+import { makeInjection, toMessage } from '../kernel/injection.js'
 import { truncateContent } from '../skills/discovery.js'
 import { registerEntrySkillSection, registerCognitiveTrajectorySkillSection } from './system-prompt.js'
 import { syncToolVisibility } from './guards.js'
@@ -136,11 +135,27 @@ export function accIdentityText(
  * 完整身份（ACC 5 块 + CCE + Constraints + EAP + SKILL 全文 + Session 块）由**系统提示词层**
  * （systemPrompt.section，每轮 prompt 装配自动注入，含 subagent）承担——对话消息流/压缩重注入
  * 不再重复注入同一内容（token 双倍浪费，见 S134 注入方案梳理）。
+ *
+ * 🔴 **DII M2 · 注入点 #1**（2026-11-04）：改成走 `Injection` 声明层。
+ * 六个轴里**新增的是 `form:'instructions'` 与 `origin:'acc'`** —— 这两格以前只活在注释里。
+ * ⚠️ **行为零变更**：`sourceOf()` 对 `origin:'acc'` ＋ `form:'instructions'` 产出的
+ * `kind` 仍是 `plugin:dsh-serenity-hooks`；只多带一个 `form` 字段（宿主 `ContextFormed` 支持它）。
+ *
+ * ⚠️ 本函数有**两个调用点**，通道不同（I3 的实例）：
+ *   · `:480` 走 waterfall 返回 —— 无唤醒
+ *   · `:354` 走 `agent.inject()`   —— 排队给下一个 pre-step，**也不唤醒**
+ * 两者意图同为 `this-step`，故本函数的 `delivery` 声明成 `this-step`；由调用方各自接通道。
  */
 export function accMessage(root: string, configPaths: string[], entrySkillMaxChars: number): UserMessage {
   const header = accIdentityText(root, configPaths, entrySkillMaxChars)
-  const content: ContentBlock[] = [{ type: 'text', text: header }]
-  return createUserMessage({ content, source: PLUGIN_SOURCE })
+  return toMessage(
+    makeInjection({
+      origin: 'acc',
+      form: 'instructions',
+      text: header,
+      delivery: 'this-step',
+    }),
+  )
 }
 
 /**

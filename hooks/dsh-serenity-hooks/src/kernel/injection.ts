@@ -202,44 +202,62 @@ export interface DeliverTarget {
 }
 
 /**
- * 把一条 `Injection` 投给目标 agent。
+ * 把一条 `Injection` 变成**宿主消息对象**，但不投递。
  *
- * 🔴 **这是全仓将来唯一允许 `createUserMessage` 的地方**（迁移完成后 `grep` 应只剩这里一处）。
- * ⚠️ **M1 阶段还没有调用点用它** —— 零接线。
- *
- * `delivery` → 通道的映射（⛔ 调用点不许自己挑）：
- * | delivery | 通道 |
- * |---|---|
- * | `wake-now` | `steer` |
- * | `next-turn` | `followup` |
- * | `this-step` | ⛔ 本函数不处理（那是 waterfall 的 `additionalContexts`，M2 再落） |
- * | `face-replace` | ⛔ 本函数不处理（那是直写 session event，M2 再落） |
- *
- * @returns 实际走的通道名；无法投递时抛错（⛔ 不静默吞掉 —— 「调用没报错」不得冒充「投递成功」）
+ * 🔴 为什么必须单独有它（而不是让 `deliver` 包办全部 5 种通道）：
+ * 有三种通道**根本不能由「调一个方法」完成** ——
+ *   · `waterfall`：要**返回** `{kind:'enter', messages:[…]}` 给宿主；
+ *   · `additionalContexts`：要**返回**一个数组给下游；
+ *   · 直写 session event：要 append 一条事件。
+ * 这三处的调用方**必须拿到消息对象**。若 `deliver` 把它们也吃掉，就只能靠"回调"骗禁用名，
+ * 反而比现在更难读。⇒ **`toMessage` 管"造"，`deliver` 管"投"**，两者都过同一个
+ * `assertInjection` + `sourceOf`，所以六条轴的取值仍然只有一处定义。
  */
-export function deliver(inj: Injection, target: DeliverTarget): 'steer' | 'followup' {
+export function toMessage(inj: Injection): UserMessage {
   assertInjection(inj)
-  const msg = createUserMessage({
+  return createUserMessage({
     content: [{ type: 'text', text: inj.text }],
     source: sourceOf(inj),
   })
+}
+
+/**
+ * 把一条 `Injection` 投给目标 agent。
+ *
+ * ⚠️ 只处理**能由「调一个方法」完成**的两种通道（`wake-now`→`steer`、`next-turn`→`followup`）。
+ * 另外三种（`this-step` / `face-replace` / waterfall）用 {@link toMessage} 由调用方自己接 ——
+ * 它们要么要返回值、要么要 append 事件，硬塞进本函数只会得到更难读的回调。
+ * 传进来这两种会**显式抛错**，⛔ 不静默降级成别的通道（失败面清单 #2）。
+ *
+ * @returns 实际走的通道名
+ */
+export function deliver(inj: Injection, target: DeliverTarget): 'steer' | 'followup' {
+  assertInjection(inj)
   if (inj.delivery === 'wake-now') {
     if (typeof target.steer !== 'function') {
       throw new Error(`deliver: delivery='wake-now' 需要 steer，但目标没有该方法`)
     }
-    target.steer(msg)
+    target.steer(toMessageUnchecked(inj))
     return 'steer'
   }
   if (inj.delivery === 'next-turn') {
     if (typeof target.followup !== 'function') {
       throw new Error(`deliver: delivery='next-turn' 需要 followup，但目标没有该方法`)
     }
-    target.followup(msg)
+    target.followup(toMessageUnchecked(inj))
     return 'followup'
   }
   throw new Error(
     `deliver: delivery='${inj.delivery}' 不走本函数 —— ` +
       `'this-step' 是 waterfall 的 additionalContexts、'face-replace' 是直写 session event，` +
-      `两者 M2 阶段各自接线（M1 零接线）。`,
+      `两者用 toMessage() 由调用方接（它们需要返回值或 append 事件，不是调方法）。`,
   )
+}
+
+/** 内部：已经 assert 过的路径复用，避免 `deliver` 里二次校验（保持一次来源）。 */
+function toMessageUnchecked(inj: Injection): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text: inj.text }],
+    source: sourceOf(inj),
+  })
 }

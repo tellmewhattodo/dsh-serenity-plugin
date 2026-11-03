@@ -171,18 +171,14 @@ describe('I3 · delivery 是意图，通道是实现', () => {
   })
 })
 
-describe('声明表 · 14 处注入点（M1 的施工清单）', () => {
-  it('恰好 14 行，编号 1..14 无缺无重', () => {
-    expect(INJECTION_SITES).toHaveLength(14)
+describe('声明表 · 注入点清单（M2 的施工清单）', () => {
+  it('恰好 16 行，编号 1..16 无缺无重', () => {
+    expect(INJECTION_SITES).toHaveLength(16)
     const ids = INJECTION_SITES.map((s) => s.id).sort((a, b) => a - b)
-    expect(ids).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+    expect(ids).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
   })
 
-  it('M1 阶段全部未迁移（零接线）', () => {
-    expect(INJECTION_SITES.every((s) => s.migrated === false)).toBe(true)
-  })
-
-  it('MIGRATION_ORDER 覆盖全部 14 个且无重复（否则 M2 会漏迁）', () => {
+  it('MIGRATION_ORDER 覆盖全部 16 个且无重复（否则 M2 会漏迁）', () => {
     expect([...MIGRATION_ORDER].sort((a, b) => a - b)).toEqual(
       INJECTION_SITES.map((s) => s.id).sort((a, b) => a - b),
     )
