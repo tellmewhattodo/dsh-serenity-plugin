@@ -1,3 +1,84 @@
+## v1.114.0 — 2026-11-04（重构：DII 动态提示词注入架构 —— 六条轴从注释变成字段）
+
+**owner 原话**：「我想统一我们 dsp 的动态提示词注入架构，未来我想做更多更复杂的动态提示词注入」
+＋「按原计划执行，完成重构后发一版（这个重构不增加 msm 异步调用能力，这个等重构完成且确认可靠了再设计）」。
+
+### 一、重构的问题陈述（为什么值得做）
+
+全仓有 **16 处**把消息注入进模型的调用点。它们共享同一个动作
+`createUserMessage({ source: PLUGIN_SOURCE })`，却在 **6 条互不相干的属性轴上各自取值**，
+而这些取值**只存在于各处的注释与代码里** —— 没有任何数据结构能回答「这条消息是什么」。
+
+两个已发生的真实故障，是这条缺失的直接后果：
+- **subagent 任务书被当成用户发言**（v1.113.2 修）—— 判据只有 `kind === 'user'`；
+- **两个生产者刻意冒充 `kind:'user'`**（载体开场白／rebuild 锚点）—— 没有「声明我是谁」的正规通道。
+
+### 二、`Injection`：六条轴变成一等字段
+
+`origin`（谁产生）／`form`（宿主 `ContextForm` 六选一）／`summary`／`text`／
+`delivery`（投递意图）／`corpus` ＋ `userQuote`（归属，由 `origin` 推导）。
+
+三条不变量（`assertInjection` 机械检查）：
+- **I1** `origin` 与宿主 `kind` 是**映射不是同义词**；
+- **I2** `corpus`/`userQuote` 由 `origin` 推导，⛔ 不许调用点各自决定；
+- **I3** `delivery` 是**意图**，通道是实现（同一意图在不同上下文落不同通道）。
+
+### 三、🔴 两条落地约束（宿主类型的硬事实，探针实测）
+
+1. **`kind:'user'` 装不下 `form`** —— `MessageSourceMap` 的 `user` 支逐字 `{kind:'user'}`，
+   `{kind:'user', form:'relay'}` 被 tsc 拒（`TS2353`）。⇒ `Injection.form` 不是无条件必填。
+2. **宿主对「另一个 agent 的消息」用专用 kind**（`agent-message` ＋ `form:'relay'`），不蹭 `kind:'user'`。
+   ⇒ 我们让 `origin:'agent'` 落自有 kind ＋ `relay`，**刻意不新造 kind**（新 kind 会让 subagent 消息
+   在界面从用户气泡变成注入行，行为可见变化而收益为零）。
+
+**一个必须记住的类型洞**：同一句 `{kind:'user', form:'relay'}` 作 `MessageSource` **注解**时红、
+作 `createUserMessage` 的**内联实参**时绿（泛型参数位不触发 excess property check）。
+⇒ 16 处调用点**全都走后者** ⇒「类型系统替我守住 form」在修前**是假的**。
+`toMessage()`/`deliver()` 因此接收/返回注解类型。
+
+### 四、M3：冒充者改由 `source.origin` **结构排除**
+
+`origin` 被投影进 `source`（宿主校验只要求 `source.kind` 非空字符串，不排斥额外字段 ——
+经 `structuredClone` 存活／冻结后可读／JSON 往返后仍在，三点实测）。
+
+`classifyUserMessage` 判据升级：`origin==='acc'|'agent'` ⇒ 不收；
+`kind:'user'` 且**无 origin 字段** ⇒ 收（缺席 = 真人）。
+⇒ 载体开场白与 rebuild 锚点**出生即分格**，不再靠 `CARRIER_OPENING_MARK` 事后辨认
+（那是 corpus 那条 20+ 条措辞黑名单的同一个病）。
+⚠️ 旧形态日志（升级前落盘、无 `origin`）仍走标记兜底，并计入 `excludedFake` ——
+那个计数现在是**迁移进度读数**（>0 ⇒ 还有旧形态在场）。
+
+### 五、一处我自己的假绿（比改动本身更值得记）
+
+`user-quotes-origin.test.ts` 初版的 ① 用 `kind: ACC_MESSAGE_KIND` 构造消息，
+结果**把 `origin` 判据整条删掉，测试照样全绿** —— 因为第二道守卫（`kind !== 'user'`）兜住了。
+⇒ 它测的是第二道守卫，不是 `origin`。改成 `kind:'user'`（只有 `origin` 能排除它）后，
+变异检验**精确红 3 条**。同族：D275「定义了却没接上」、D222「变异检验防假绿」。
+
+### 六、盘点阶段自己的两个错误（如实登记）
+
+- **注入点是 16 处不是 14 处**：`tools/cognitive-trajectory.ts:939` 与
+  `trajectory/interrupted.ts:723` **提供工厂函数**、不直接调 `createUserMessage`
+  ⇒ `grep` 看不见它们。若按 14 处施工，最终判据永远不会绿且**没人知道为什么**。
+- **投递通道是 6 种不是 5 种**：漏了 `agent.inject()`（宿主逐字：
+  *"Queue model-facing context for the next pre-step **without waking** the driver"*）。
+  它一直在 `accMessage` 的播种路径上。
+
+### 七、验收
+
+- **六大校验**：typecheck ／ typecheck-host `0.2.1-rc.2` ／ test **3285** ／ coverage **95.3%** ／ build ／ pack-check
+- **变异检验全部实跑**（⛔ 非推演）：I1 守卫红 2 ／ I2 推导红 4 ／ I3 通道错配红 2 ／
+  blocks 块数守恒红 2 ／ origin 判据红 3
+- **代码面完成判据**：`grep -rn "createUserMessage({" src/` 实得 3 处，全部可解释
+  （`injection.ts` 两处同一实现 ＋ `user-carrier.ts` 一处 owner 裁决强制 `kind:'user'`）
+
+### 八、⛔ 本次**不**包含
+
+**不增加异步 MSM 调用能力**（owner 明令：等重构完成且确认可靠后再单独设计）。
+本版纯重构 —— 所有注入物的**对外形态一字未变**。
+
+---
+
 ## v1.113.2 — 2026-11-03（修：subagent 任务书被记进用户语录）
 
 **owner 原话**：「subagent任务书记录到用户语录是不对的，这个需要修掉」。
