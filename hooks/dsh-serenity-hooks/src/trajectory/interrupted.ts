@@ -128,7 +128,19 @@ const TAIL_WINDOW_BYTES = 8 << 20 // 8 MiB
 interface SessionEvent {
   type?: string
   time?: number
-  data?: { turn?: number; step?: number; reason?: { kind?: string } }
+  data?: {
+    turn?: number
+    step?: number
+    reason?: { kind?: string }
+    /** `tool/call` 的字段（callId 与 name 都在 data 这一层） */
+    callId?: string
+    name?: string
+    /**
+     * 🔴🔴 `tool/result` 的字段 —— **callId 藏在这里，不在 `data.callId`**。
+     * 真机逐字形状见 {@link findPendingTools} 的头注（那是本文件最贵的一条取证）。
+     */
+    message?: { toolCallId?: string; source?: { callId?: string } }
+  }
 }
 
 /** 一个"以 interrupted 结尾"的会话 */
@@ -504,6 +516,40 @@ export function detectUnclosedTurn(events: SessionEvent[]): { turn: number | nul
  *
  * ⚠️ **尽力而为**，非权威：尾部窗口可能截断更早的调用。上层应把它当
  * "**可能**未完成的副作用"清单，而不是"确定未完成"。
+ *
+ * ## 🔴🔴 2026-11-04：两个事件的 callId 在**不同的位置**（这是本文件的头号取证）
+ *
+ * owner 报障：`[中断续跑]` 的「有调用无结果的工具」约 **150 项、大量重复**，
+ * 还混着更早轮次的 `get_goal` / `create_goal`。
+ *
+ * **真机逐字形状**（`dsh-session corpus raw` 从本容器活日志读出，⛔ 不是推断）：
+ *
+ * ```jsonc
+ * // tool/call —— callId 在 data 这一层
+ * {"type":"tool/call","data":{"turn":3,"step":1,
+ *   "callId":"call_00_ET_…","name":"cognitive_trajectory","arguments":"…"}}
+ *
+ * // tool/result —— ⛔ callId 这一层**不存在**，它在 data.message 里
+ * {"type":"tool/result","data":{"turn":3,"step":1,
+ *   "message":{"role":"tool","source":{"kind":"tool","callId":"call_00_ET_…"},
+ *              "toolCallId":"call_00_ET_…","content":[…]}}}
+ * ```
+ *
+ * ⇒ 修前读 `data.callId` 恒 `undefined` ⇒ `resolved` **永远是空集**
+ *   ⇒ 该轮**每一条** `tool/call` 都被判成"无结果"⇒ 清单退化成「这一轮的全部调用」。
+ *
+ * ## 🔴 它为什么能活这么久（这条比 bug 本身值得记）
+ * **测试与实现用了同一个错误假设** —— 夹具也按虚构的 `data.callId` 构造 `tool/result`，
+ * 于是两边一起错、一起绿（D275 同族：「定义了却没接上」）。
+ * ⇒ 立判据：**测试的输入形状必须来自真机日志，⛔ 不是来自我的假设。**
+ *
+ * ## 两个位置都读（为什么不是二选一）
+ * 真机两处**同时在场且相等**（`toolCallId` ≡ `source.callId`），但那是**当前实现的属性**，
+ * 不是协议保证。⇒ 取 `toolCallId ?? source.callId`：任一处缺失仍能配对上；
+ * 两处都没有 ⇒ 该结果**不参与排除**（宁可多报一个"可能未完成"，也不假报"全都完成了"）。
+ *
+ * @param events 尾部事件
+ * @param turn 目标轮次；`null` ⇒ 不判（返回空清单）
  */
 function findPendingTools(events: SessionEvent[], turn: number | null): string[] {
   if (turn === null) return []
@@ -511,15 +557,48 @@ function findPendingTools(events: SessionEvent[], turn: number | null): string[]
   const resolved = new Set<string>()
 
   for (const e of events) {
-    const data = e.data as { turn?: number; callId?: string; name?: string } | undefined
+    const data = e.data
     if (!data || data.turn !== turn) continue
     if (e.type === 'tool/call' && typeof data.callId === 'string' && typeof data.name === 'string') {
       called.set(data.callId, data.name)
-    } else if (e.type === 'tool/result' && typeof data.callId === 'string') {
-      resolved.add(data.callId)
+    } else if (e.type === 'tool/result') {
+      // 🔴 callId 在 data.message 里（见头注）—— ⛔ 别再退回 data.callId
+      const m = data.message
+      const cid = m?.toolCallId ?? m?.source?.callId
+      if (typeof cid === 'string') resolved.add(cid)
     }
   }
   return [...called].filter(([callId]) => !resolved.has(callId)).map(([, name]) => name)
+}
+
+/**
+ * 待核工具清单的**显示上限**：超过这么多条就折叠成计数。
+ *
+ * ## 为什么必须有上限（owner 报障的另一半）
+ * 这个清单会**原样注入进提示词**（`buildContinueText`）与界面。
+ * 实测一次误判就能产出**约 150 项、大量重复**的名字 ⇒ 那是**每一轮的 token 成本**，
+ * 而它对读者的信息量在 8 项之后已经趋零（人的核对动作是"抽查"，不是"逐条读"）。
+ *
+ * ⚠️ **折叠 ≠ 丢弃**：计数里保留**总数**，读者仍知道"还有多少没看"（D276：难看 ≠ 可以丢信息）。
+ * ⇒ 前 {@link PENDING_TOOLS_DISPLAY_MAX} 项给出名字，其余折成「等共 N 项」。
+ */
+const PENDING_TOOLS_DISPLAY_MAX = 8
+
+/**
+ * 把待核工具清单渲染成**有上限**的一行。
+ *
+ * 🔴 **唯一实现点**：`buildContinueText`（进提示词）、`renderInterruptedScan` 与
+ * `renderContinueResult`（进界面）三处都调它 —— ⛔ 别在别处再写一份 `join(', ')`，
+ * 三份会漂（本轨迹已因"同一事实存多份"付过多次代价）。
+ *
+ * @param tools 工具名清单（**可能含重复**：同一工具在一轮里被调用多次且都无结果时，
+ *              每一条 `tool/call` 各占一项 —— 那是真实信息，不在这里去重）
+ * @returns 空清单 ⇒ 空串（调用方据此判"要不要印这一行"）
+ */
+export function formatPendingTools(tools: string[]): string {
+  if (tools.length <= PENDING_TOOLS_DISPLAY_MAX) return tools.join(', ')
+  const head = tools.slice(0, PENDING_TOOLS_DISPLAY_MAX).join(', ')
+  return `${head} … 等共 ${tools.length} 项`
 }
 
 /**
@@ -689,6 +768,9 @@ export interface ResumeOutcome {
  * 🔴 **为什么要写"先核对副作用"**：中断时可能有「有 call 无 result」的工具调用，
  * 它们的副作用**未知**（可能已写文件 / 已发消息）。若模型把那一轮整段重放，
  * 会**重复执行**。这句话是给模型的护栏，不是客套。
+ *
+ * 🔴 **本正文会被注入进提示词** ⇒ `pendingTools` 一律经 {@link formatPendingTools} 折叠，
+ * ⛔ 不许裸 `join(', ')`（那样一个乱轮就能塞进上百个名字）。
  */
 export function buildContinueText(sessionId: string, turn: number | null, pendingTools: string[]): string {
   const lines: string[] = []
@@ -697,7 +779,9 @@ export function buildContinueText(sessionId: string, turn: number | null, pendin
   lines.push(`会话: ${sessionId}${turn === null ? '' : ` ／ 被中断的轮次: turn ${turn}`}`)
   if (pendingTools.length > 0) {
     lines.push('')
-    lines.push(`⚠️ 中断时这些工具「有调用、无结果」（副作用未知，**可能已经执行**）: ${pendingTools.join(', ')}`)
+    lines.push(
+      `⚠️ 中断时这些工具「有调用、无结果」（副作用未知，**可能已经执行**）: ${formatPendingTools(pendingTools)}`,
+    )
     lines.push('   ⇒ 先核对它们是否已生效（文件是否已写、消息是否已发），再决定要不要重做。')
     lines.push('   ⛔ 不要把被中断的那一轮整段重放。')
   }

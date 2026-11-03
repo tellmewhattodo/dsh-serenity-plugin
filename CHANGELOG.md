@@ -1,3 +1,65 @@
+## v1.114.1 — 2026-11-04（修复：`[中断续跑]` 的「有调用无结果的工具」失真成整轮调用清单）
+
+**owner 原话（逐字）**：「看下这个问题」—— 附截图，内容是 `[中断续跑]` 的
+「有调用无结果的工具」清单**约 150 项、大量重复**，且开头混着更早轮次的
+`get_goal` / `create_goal`。
+
+### 一、根因（真机日志实测，⛔ 非推断）
+
+`trajectory/interrupted.ts` 的 `findPendingTools()` 从 **`e.data.callId`** 取结果的 callId，
+而两种事件的 callId **不在同一个位置**：
+
+```jsonc
+// tool/call —— callId 在 data 这一层
+{"type":"tool/call","data":{"turn":3,"step":1,"callId":"call_00_ET_…","name":"cognitive_trajectory"}}
+
+// tool/result —— ⛔ data.callId 根本不存在，它在 data.message 里
+{"type":"tool/result","data":{"turn":3,"step":1,
+  "message":{"role":"tool","source":{"kind":"tool","callId":"call_00_ET_…"},
+             "toolCallId":"call_00_ET_…","content":[…]}}}
+```
+
+⇒ 修前 `resolved` **恒为空集** ⇒ 该轮**每一条** `tool/call` 都被判成"无结果"
+⇒ 清单退化成「这一轮的全部调用」。这是 owner 看到 150 项的直接成因。
+
+### 二、🔴🔴 它为什么能活这么久（比 bug 本身值得记）
+
+**测试与实现用了同一个错误假设** —— 夹具也按虚构的 `data.callId` 构造 `tool/result`，
+于是两边一起错、一起绿（D275 同族：「定义了却没接上」）。
+⇒ **新判据：测试的输入形状必须逐字取自真机日志，⛔ 不是来自我的假设。**
+
+### 三、改了什么
+
+| 项 | 修前 | v1.114.1 |
+|---|---|---|
+| **callId 取值** | `e.data.callId`（恒 undefined） | `data.message.toolCallId ?? data.message.source.callId` |
+| **类型面** | 局部 `as` 断言，形状在类型里看不见 | `SessionEvent` 补 `callId`/`name`/`message` 三字段 |
+| **清单显示** | 三处各自 `pendingTools.join(', ')` ⇒ 无上限 | 新增 `formatPendingTools`（**唯一实现点**）：≤8 项全列，超则 `前8项 … 等共 N 项` |
+
+🔴 **为什么两处都读（不是二选一）**：`toolCallId` 与 `source.callId` 真机上**同时在场且相等**，
+但那是**当前实现的属性，不是协议保证**（与 v1.113.1 同族教训）。两处都缺 ⇒ 该 result
+**不参与排除** ⇒ **宁可多报一个"可能未完成"，也不假报"全都完成了"**
+（假报"都完成"会让模型跳过副作用核对 ⇒ 重复执行，比多列一项贵得多）。
+
+🔴 **折叠 ≠ 丢弃**：计数里保留**总数**，读者仍知道"还有多少没看"（D276：难看 ≠ 可以丢信息）。
+上限管的是**注入进提示词的体积**（那是每一轮的 token 成本），不是界面上"好不好看"。
+
+### 四、验收（三层，缺哪层都不算验过）
+
+1. **单测 ＋ 变异检验（实跑）**：M1 删掉 `resolved.add` 整行 ⇒ **精确红 2 条**；
+   M2 退回旧的错误位置 ⇒ **同样精确红那 2 条**（= 原 bug 本身被复现）；M3 取消折叠 ⇒ **精确红 2 条**。
+2. **🔴 真机差分验收（同一批活日志，只换 callId 取值位置）**：
+
+   | 会话（真机） | 修前（旧位置） | 修后 |
+   |---|---|---|
+   | `session-afc28ede…` turn 102 | **85 项**（`msm` 重复 24 次） | **1 项** |
+   | `session-700ac829…` turn 242 | **54 项**（`msm` 重复 43 次） | **0 项** |
+
+   ⇒ 这是 owner 那张截图在**真数据上的复现与消失**，⛔ 不是构造器层的自证。
+3. **门禁**：typecheck ／ typecheck-host `0.2.1-rc.2` ／ test ／ coverage ／ build ／ pack-check。
+
+---
+
 ## v1.114.0 — 2026-11-04（重构：DII 动态提示词注入架构 —— 六条轴从注释变成字段）
 
 **owner 原话**：「我想统一我们 dsp 的动态提示词注入架构，未来我想做更多更复杂的动态提示词注入」

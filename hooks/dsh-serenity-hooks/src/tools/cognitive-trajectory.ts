@@ -80,6 +80,7 @@ import {
   projectDirNameForCwd,
   scanInterruptedSessions,
   createResumeOne,
+  formatPendingTools,
   type ScanResult,
   type ResumeOutcome,
 } from '../trajectory/interrupted.js'
@@ -207,7 +208,7 @@ function renderInterruptedScan(input: {
         ` · 窗口内最后 turn/start=${s.lastTurnStartTurn ?? 'null'}`,
     )
     if (s.pendingTools.length > 0) {
-      lines.push(`      ⚠️ 有调用无结果的工具（副作用未知）: ${s.pendingTools.join(', ')}`)
+      lines.push(`      ⚠️ 有调用无结果的工具（副作用未知）: ${formatPendingTools(s.pendingTools)}`)
     }
   }
 
@@ -289,7 +290,7 @@ function renderContinueResult(input: {
     for (const s of scan.sessions) {
       const at = s.lastEventAt !== null ? new Date(s.lastEventAt).toISOString() : '(时间未知)'
       lines.push(`  · ${s.sessionId}  turn=${s.turn ?? '?'}  末事件 ${at}`)
-      if (s.pendingTools.length > 0) lines.push(`      副作用未知: ${s.pendingTools.join(', ')}`)
+      if (s.pendingTools.length > 0) lines.push(`      副作用未知: ${formatPendingTools(s.pendingTools)}`)
     }
     lines.push('')
     lines.push('要真的执行，去掉 dryRun 再调用一次。')

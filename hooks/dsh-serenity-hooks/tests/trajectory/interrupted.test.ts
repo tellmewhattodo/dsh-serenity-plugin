@@ -10,6 +10,12 @@
  * 🔴 ③ 是本文件的核心：宿主按帧追加写，单会话实测 2.4 万帧。若实现只解第一帧，
  * 所有用例都会"通过"（因为夹具小），但真机上永远读不到末事件 —— 正是那种
  * "跑绿也照样炸"的形态。故夹具**必须多帧**。
+ *
+ * 🔴🔴 **2026-11-04 新增第 ⑤ 条（它改变了本文件的写法）**：
+ * **夹具的事件形状必须逐字取自真机日志**，⛔ 不许按"我以为的形状"构造。
+ * 代价实证：`tool/result` 的 callId 在 `data.message` 里，而实现与夹具**一起**按
+ * 虚构的 `data.callId` 写 ⇒ 两边同时错、同时绿 ⇒ owner 看到约 150 项乱清单才暴露。
+ * ⇒ 真机形状一律用 `msm dsh-session corpus raw --session <id> --match <事件类型>` 取。
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
@@ -24,6 +30,7 @@ import {
   createResumeOne,
   detectInterruptedEnd,
   detectUnclosedTurn,
+  formatPendingTools,
   projectDirNameForCwd,
   scanInterruptedSessions,
 } from '../../src/trajectory/interrupted.js'
@@ -250,16 +257,84 @@ describe('detectInterruptedEnd（纯判定）', () => {
     expect(detectInterruptedEnd([])).toBeNull()
   })
 
-  it('报出"有 call 无 result"的工具名（副作用未知清单）', () => {
+  /**
+   * 🔴🔴 **2026-11-04 owner 报障的正解：`tool/result` 的 callId 在 `data.message` 里。**
+   *
+   * owner 贴屏：`[中断续跑]` 的「有调用无结果的工具」约 **150 项、大量重复**。
+   * 真因见 `findPendingTools` 头注：修前读 `data.callId`（不存在）⇒ `resolved` 恒空集
+   * ⇒ 清单退化成「这一轮的全部调用」。
+   *
+   * 🔴🔴 **本用例的构造形状逐字取自真机日志**（`dsh-session corpus raw` 读出，
+   * ⛔ 不是按我的假设写的）—— 这正是它能抓出该 bug 的**唯一**原因：
+   * 旧夹具也按虚构的 `data.callId` 构造 ⇒ 与实现一起错、一起绿（D275 同族）。
+   *
+   * ```jsonc
+   * {"type":"tool/result","data":{"turn":3,"step":1,
+   *   "message":{"role":"tool","source":{"kind":"tool","callId":"…"},"toolCallId":"…"}}}
+   * ```
+   *
+   * 断言两件事，缺一不可（D254：变异正控 ＋ 反向钉）：
+   * ① 有 result 的调用**不得**出现在清单里（这是 bug 的那一半）；
+   * ② 真·无结果的调用**必须仍在**清单里（别把判据修成"永远空"）。
+   */
+  it('🔴🔴 tool/result 的 callId 在 data.message ⇒ 已完成的调用不得进清单（真机形状）', () => {
     const events = [
       { type: 'turn/start', time: 1, data: { turn: 3 } },
-      { type: 'tool/call', data: { turn: 3, callId: 'c1', name: 'edit' } },
-      { type: 'tool/result', data: { turn: 3, callId: 'c1' } },
-      { type: 'tool/call', data: { turn: 3, callId: 'c2', name: 'im-bridge' } },
+      // 真机形状：callId 在 data 层
+      { type: 'tool/call', data: { turn: 3, step: 1, callId: 'call_done', name: 'edit' } },
+      // 真机形状：callId 在 data.message.toolCallId（＋ source.callId）
+      {
+        type: 'tool/result',
+        data: {
+          turn: 3,
+          step: 1,
+          message: {
+            role: 'tool',
+            source: { kind: 'tool', callId: 'call_done' },
+            toolCallId: 'call_done',
+            content: [{ type: 'text', text: 'ok' }],
+          },
+        },
+      },
+      { type: 'tool/call', data: { turn: 3, step: 2, callId: 'call_pending', name: 'im-bridge' } },
       { type: 'turn/end', time: 2, data: { turn: 3, reason: { kind: 'interrupted' } } },
       { type: 'session/end-seed', data: {} },
     ]
+    // ① 已完成的 edit 不得出现；② 真·无结果的 im-bridge 必须仍在
     expect(detectInterruptedEnd(events)?.pendingTools).toEqual(['im-bridge'])
+  })
+
+  /**
+   * 反向钉（D254）：**只读 `data.message.source.callId` 也必须能配上**。
+   * 真机两处同时在场且相等，但那是**当前实现的属性**，不是协议保证 ⇒
+   * 任一处在场都要能排除。本用例把 `toolCallId` **拿掉**，只留 `source.callId`。
+   */
+  it('🔴 callId 只在 data.message.source.callId 里（无 toolCallId）⇒ 同样能排除', () => {
+    const events = [
+      { type: 'turn/start', time: 1, data: { turn: 4 } },
+      { type: 'tool/call', data: { turn: 4, callId: 'c_a', name: 'read' } },
+      {
+        type: 'tool/result',
+        data: { turn: 4, message: { role: 'tool', source: { kind: 'tool', callId: 'c_a' } } },
+      },
+      { type: 'turn/end', time: 2, data: { turn: 4, reason: { kind: 'aborted' } } },
+    ]
+    expect(detectInterruptedEnd(events)?.pendingTools).toEqual([])
+  })
+
+  /**
+   * 🔴 **归零反面的守卫**：两处都没 callId 的 `tool/result` → **不参与排除**。
+   * 判据取向 = 宁可多报一个"可能未完成"，也**不假报"全都完成了"**
+   * （假报"都完成"会让模型跳过副作用核对 ⇒ 重复执行 ⇒ 比多列一项贵得多）。
+   */
+  it('🔴 结果事件两处都没有 callId ⇒ 不参与排除（宁多报不假清）', () => {
+    const events = [
+      { type: 'turn/start', time: 1, data: { turn: 5 } },
+      { type: 'tool/call', data: { turn: 5, callId: 'c_x', name: 'write' } },
+      { type: 'tool/result', data: { turn: 5, message: { role: 'tool' } } },
+      { type: 'turn/end', time: 2, data: { turn: 5, reason: { kind: 'interrupted' } } },
+    ]
+    expect(detectInterruptedEnd(events)?.pendingTools).toEqual(['write'])
   })
 })
 
@@ -367,7 +442,11 @@ describe('scanInterruptedSessions（真日志 + 多帧）', () => {
         type: 'tool/result',
         seq: 2 + i,
         time: 1001 + i,
-        data: { turn: 7, callId: `c${i}`, content: randomBytes(600_000).toString('base64') },
+        // 形状同真机（callId 在 data.message 里）；本用例只靠体积，形状只为一致
+        data: {
+          turn: 7,
+          message: { role: 'tool', toolCallId: `c${i}`, content: [{ type: 'text', text: randomBytes(600_000).toString('base64') }] },
+        },
       })
     }
     events.push({ type: 'turn/end', seq: 9999, time: 9000, data: { turn: 7, reason: { kind: 'completed' } } })
@@ -524,6 +603,41 @@ describe('projectDirNameForCwd（宿主目录名规则）', () => {
   })
 })
 
+/**
+ * 🔴 `formatPendingTools` 的**契约单测**（折叠的唯一实现点）。
+ *
+ * 三个渲染面（进提示词的 `buildContinueText` ＋ 两个界面渲染函数）都调它 ——
+ * 所以它的边界必须在**它自己这一层**钉死，而不是靠三个调用方各自断言（D274：钉本意）。
+ */
+describe('formatPendingTools（清单折叠）', () => {
+  it('空清单 ⇒ 空串（调用方据此决定要不要印这一行）', () => {
+    expect(formatPendingTools([])).toBe('')
+  })
+
+  it('未超上限 ⇒ 逐项全列，无计数尾巴', () => {
+    expect(formatPendingTools(['a', 'b', 'c'])).toBe('a, b, c')
+  })
+
+  it('恰好等于上限 ⇒ 不折叠（边界是 ≤，⛔ 不是 <）', () => {
+    const eight = ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7']
+    expect(formatPendingTools(eight)).toBe(eight.join(', '))
+    expect(formatPendingTools(eight)).not.toContain('等共')
+  })
+
+  it('超上限 1 项 ⇒ 就折叠，且总数（不是剩余数）可见', () => {
+    const nine = Array.from({ length: 9 }, (_, i) => `t${i}`)
+    const out = formatPendingTools(nine)
+    expect(out).toContain('等共 9 项')
+    expect(out).toContain('t7')
+    expect(out).not.toContain('t8')
+  })
+
+  it('🔴 重复项**不在这里去重** —— 同一工具被调用多次且都无结果，那是真实信息', () => {
+    const dup = ['edit', 'edit', 'edit']
+    expect(formatPendingTools(dup)).toBe('edit, edit, edit')
+  })
+})
+
 describe('buildContinueText（续跑正文）', () => {
   it('无未完成调用 ⇒ 不提副作用核对（不制造无谓警告）', () => {
     const t = buildContinueText('session-x', 7, [])
@@ -543,6 +657,42 @@ describe('buildContinueText（续跑正文）', () => {
   it('🔴 正文不含版本号（D159：唤醒文本不得写死版本）', () => {
     const t = buildContinueText('session-z', 1, [])
     expect(t).not.toMatch(/v?\d+\.\d+\.\d+/)
+  })
+
+  /**
+   * 🔴🔴 **折叠判据（owner 报障的另一半）：注入正文不许被上百个名字撑爆。**
+   *
+   * 真机代价：一次误判 ⇒ 约 150 项名字进正文 ⇒ **每一轮的 token 成本**
+   * （正文是注入进提示词的，不是界面日志）。
+   *
+   * 断言三件事：
+   * ① 总数字必须仍然可见（D276：难看 ≠ 可以丢信息）；
+   * ② 名字个数不得超过显示上限（否则折叠没生效）；
+   * ③ **未折叠时不得出现计数**（反向钉：别让小清单也挂个尾巴）。
+   */
+  it('🔴 清单超上限 ⇒ 折叠成计数，但总数仍可见', () => {
+    const many = Array.from({ length: 150 }, (_, i) => `tool_${i}`)
+    const t = buildContinueText('session-big', 9, many)
+    expect(t, '总数必须仍可见（折叠≠丢信息）').toContain('等共 150 项')
+    // 折叠后实际列出的名字个数 = 显示上限（前 8 项）
+    expect(t).toContain('tool_0')
+    expect(t).toContain('tool_7')
+    expect(t, '第 9 项起应被折叠掉').not.toContain('tool_8')
+    // 有效载荷不许随清单线性膨胀
+    expect(t.length).toBeLessThan(1000)
+  })
+
+  it('🔴 折叠反向钉：未超上限 ⇒ 原样全列，不得出现计数尾巴', () => {
+    const t = buildContinueText('session-s', 2, ['read', 'edit', 'write'])
+    expect(t).toContain('read, edit, write')
+    expect(t).not.toContain('等共')
+  })
+
+  it('🔴 折叠边界：恰好等于上限 ⇒ 不折叠（≤ 而非 <）', () => {
+    const exact = Array.from({ length: 8 }, (_, i) => `t${i}`)
+    const t = buildContinueText('session-e', 1, exact)
+    expect(t).toContain('t7')
+    expect(t).not.toContain('等共')
   })
 })
 
