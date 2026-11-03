@@ -184,6 +184,13 @@ describe('声明表 · 注入点清单（M2 的施工清单）', () => {
     )
   })
 
+  it('全部 16 处代码已迁移（migrated=true），但真机尚未核（realMachineVerified=false）', () => {
+    expect(INJECTION_SITES.every((s) => s.migrated === true)).toBe(true)
+    // 🔴 这条**刻意断言 false**：真机验证要等部署。若哪天有人把它改成 true 却没跑真机，
+    //   这条会红——它守的是"两个进度不许混"（见 InjectionSite.realMachineVerified 注释）。
+    expect(INJECTION_SITES.every((s) => s.realMachineVerified === false)).toBe(true)
+  })
+
   it("origin:'user' 的行不得声明 form（与纠正①一致）", () => {
     for (const s of INJECTION_SITES) {
       if (s.origin === 'user') expect(s.form).toBeUndefined()

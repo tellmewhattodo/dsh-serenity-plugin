@@ -43,10 +43,9 @@ import type { SessionId, Session } from '@deepseek-ai/dsh-session'
 import { deriveEventMessage } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { Message, MessageSource } from '@deepseek-ai/dsh-llm'
 import { hostService } from '../host/access.js'
-import { PLUGIN_SOURCE } from '../kernel/message-source.js'
+import { deliver, makeInjection } from '../kernel/injection.js'
 import { basename, dirname, join, resolve } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { agentCwdFor, cccRootForCwd } from '../kernel/ccc-roots.js'
@@ -411,18 +410,28 @@ export function performRebuild(
      * 但宿主在**下一次打开该会话**时整份日志校验失败抛 `SessionPersistenceCorruptionError`
      * → **会话永久打不开**（用户报的"会话老是损坏"）。实证见 S142 §26.2（真实日志 seq 5066）。
      * 正确形状与 `seams/bootstrap.ts:306-311` 的锚定消息一致。
+     *
+     * 🔴 **DII M2 · 注入点 #10**（2026-11-04）：**这一处是 I1 最需要被看见的一格**。
+     * 它是 ACC 产的消息（`origin:'acc'`），但宿主校验**强制**要求 `kind:'user'`
+     * （缺了它会话打不开，见上）。⇒ 旧的 `source: { kind: 'user' }` 是**没办法的办法**：
+     * 它丢掉了"谁产生的"这一信息。现在 `Injection` 记着 `origin:'acc'`，语料/语录
+     * 那一侧（M3）就能按 `origin` 正确排除它 —— **不必再靠正文标记猜**。
+     * ⚠️ **宿主 kind 仍是 `'user'`，一字不改**：这一格只把"我是谁"补回来，不改落点。
      */
     id: `rebuild-anchor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     role: 'user',
     content: [{ type: 'text', text: pending.anchor }],
     // source 必填（UserMessage 契约）——缺失会使 session.list sessionListMetadata 抛 TypeError
-    source: { kind: 'user' },
+    // 🔴 `origin:'acc'` 但宿主强制 kind:'user' ⇒ 走 REBUILD_ANCHOR_SOURCE（见下）。
+    source: REBUILD_ANCHOR_SOURCE,
   } as never, {
     surfaceOp: { op: 'replace', startSeq: targets[0]!, endSeq: targets[targets.length - 1]! },
     sourceEventSeqs: targets,
   } as never)
   return true
 }
+
+const REBUILD_ANCHOR_SOURCE: MessageSource = { kind: 'user' }
 
 /**
  * 重建后重命名 dsh 会话标题（需求② S142 用户拍板：rebuild 后标题带新阶段概括）。
@@ -489,10 +498,18 @@ export function registerRebuildTurnHook(ctx: Context): void {
         renameAfterRebuild(ctx, agent, pending)
         // v1.22.5 自动继续：steer 到 next-step 队列 → turn 循环 nextStep 非空不 break →
         // 模型在同轮内自动消费该指令，读取 SESSION.md 从上次进度继续（无需用户手工输入）
-        agent.steer(createUserMessage({
-          content: [{ type: 'text', text: `${eventToken('rebuild')} The conversation has been cleared and rebuilt. Follow the anchor instructions above now: read the persistent cognitive trajectory (SESSION.md) and continue the work automatically from the last checkpoint.` }],
-          source: PLUGIN_SOURCE,
-        }))
+        // 🔴 **DII M2 · 注入点 #9**（2026-11-04）：改走 `deliver()`。
+        //    `delivery:'wake-now'` ⇒ 通道由 deliver 选（steer），行为零变更。
+        deliver(
+          makeInjection({
+            origin: 'acc',
+            form: 'instructions',
+            summary: 'rebuild 后自动继续',
+            text: `${eventToken('rebuild')} The conversation has been cleared and rebuilt. Follow the anchor instructions above now: read the persistent cognitive trajectory (SESSION.md) and continue the work automatically from the last checkpoint.`,
+            delivery: 'wake-now',
+          }),
+          agent,
+        )
         writeRebuildDiag(resolveSerenityRootFor(agent), { sessionId: id, event: 'rebuilt' })
         console.log(`[serenity-hooks] cognitive_trajectory rebuild executed with auto-continue (turn ${payload.turn ?? '?'} ended): ${id}`)
       } else {

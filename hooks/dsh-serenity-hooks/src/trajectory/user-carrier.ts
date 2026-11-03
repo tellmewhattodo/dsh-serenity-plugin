@@ -49,6 +49,19 @@
  */
 
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { MessageSource } from '@deepseek-ai/dsh-llm'
+import { assertInjection, makeInjection } from '../kernel/injection.js'
+
+/**
+ * 载体开场白的宿主 `source` —— **`kind:'user'` 是硬要求**（宿主 `dsh-session-title` 的
+ * `sessionTitleUserMessageOf()` 第一行就把非 `'user'` 的 source 排除，见文件头注）。
+ *
+ * 🔴 与 `Injection` 的关系（DII M2 #11）：它是**声明 `origin:'acc'` 但落点强制 `'user'`**
+ * 的唯一一处 —— `origin` 与宿主 `kind` 在此**刻意不相等**（I1：「映射，不是同义词」）。
+ * ⛔ 不要为了"统一"而把它改成 `sourceOf()` 的产出：那会让宿主不再自动命名，
+ * 而"让宿主自动命名"正是本文件存在的全部理由（owner 裁决 B）。
+ */
+const CARRIER_OPENING_SOURCE: MessageSource = { kind: 'user' }
 
 /**
  * 模拟开场白的**自证标记**（逐字）。
@@ -109,12 +122,30 @@ export function deliverCarrierOpening(
 ): boolean {
   if (typeof agent.followup !== 'function') return false
   try {
+    // 🔴 **DII M2 · 注入点 #11**（2026-11-04）：这一处**刻意不写成一次 deliver()**。
+    //
+    //    原因：本处的 `kind:'user'` 是 **owner 裁决（方案 B）** 直接要求的（让宿主自动命名生效，
+    //    见本文件头注）。而 `Injection` 的 `origin:'user'` 会**强制不带 form**（宿主 user 支装不下
+    //    ContextFormed，见 kernel/injection.ts 头注 ①）。⇒ 若把本处声明成 `origin:'user'`，
+    //    就等于**承认它是真人说的**——那正是 subagent 污染那类缺陷的同一根。
+    //
+    //    ⇒ 正确写法：**`origin:'acc'`（它确实是 ACC 产的）＋ 手动落 `{kind:'user'}`**
+    //      （宿主强制要求的那个落点）。`origin` 与宿主 `kind` 因此不相等——
+    //      这不是 bug，正是 I1 要表达的东西：「origin 与 kind 是映射，不是同义词」。
+    //      语料/语录一侧（M3）就能按 `origin:'acc'` 排除它，**不必再靠 CARRIER_OPENING_MARK 猜**。
+    //
+    //    ⚠️ **校验一次再投**：这里仍走 `assertInjection`（六条轴自洽），但不用 `deliver()`
+    //      —— 因为 deliver 会用 `sourceOf()` 产出 `kind:'plugin:dsh-serenity-hooks'`，
+    //      而那会让宿主**不再自动命名**（本文件的全部存在意义就是让它命名）。
+    assertInjection(
+      makeInjection({ origin: 'acc', text, delivery: 'next-turn' }),
+    )
     agent.followup(
       createUserMessage({
         content: [{ type: 'text', text }],
         // 🔴 与全仓其它注入**相反**：这里刻意声明成 `user`。
         //    理由见本文件头注「owner 的裁决 = B」。改这一行等于改判决，不要在别处改。
-        source: { kind: 'user' },
+        source: CARRIER_OPENING_SOURCE,
       }),
     )
     return true

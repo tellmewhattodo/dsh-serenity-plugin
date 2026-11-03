@@ -17,9 +17,10 @@
  *
  * ## 判据（M2 完成后必须成立，可机械验）
  *
- * - `grep -rn "createUserMessage" src/` 应**只剩 `kernel/injection.ts` 里那一处**
- *   （本文件与 `trajectory/user-carrier.ts` 的 `kind:'user'` 特例见下注）。
- * - 本表 14 行的 `migrated` 全为 `true`。
+ * - `grep -rn "createUserMessage({"" src/` 应**只剩两处**，且都能解释：
+ *   · `kernel/injection.ts` 里的两处（同一个实现，`toMessage` 与它的 unchecked 版本）
+ *   · `trajectory/user-carrier.ts` 一处 —— **owner 裁决 B 强制 `kind:'user'`**（见下注 1）
+ * - 本表所有行的 `migrated` 全为 `true`（⚠️ 只在**真机核过形态**之后才置 true）。
  *
  * ## ⚠️ 三处**不受本表管辖**的例外（如实标注，⛔ 不是漏登记）
  *
@@ -63,8 +64,21 @@ export interface InjectionSite {
   readonly wakes: boolean
   /** 现状的宿主 `kind`。 */
   readonly kind: string
-  /** M2 是否已迁移。⛔ 只在**真机验过**之后才置 true。 */
+  /**
+   * 代码是否已改走声明层（`makeInjection` / `deliver` / `toMessage`）。
+   * 🔴 **它只代表"代码改了 ＋ 单测绿"，⛔ 不代表"真机形态已核"** —— 后者是下一格。
+   */
   readonly migrated: boolean
+  /**
+   * **真机**形态是否已核（部署后看实际投递）。
+   *
+   * 🔴 为什么必须与 `migrated` 分成两格（2026-11-04 M2 自纠）：
+   * 本表最初的判据写「`migrated` 只在真机验过之后才置 true」。但 M2 施工时发现，
+   * 那时**没有任何一行能置 true**（真机验证要等发布部署），于是这一格退化成**永远 false** ——
+   * 一个恒 false 的字段**什么都没记着**。⇒ 拆成两格：代码进度（立即可知）与真机进度（要等部署）。
+   * ⚠️ 判据：**`migrated && !realMachineVerified` 的行，正是"已改、待真机核"的待办清单**。
+   */
+  readonly realMachineVerified: boolean
 }
 
 /**
@@ -92,7 +106,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'waterfall',
     wakes: false,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 2,
@@ -106,7 +122,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     // 🔴 这一行是 M2 最危险的一处：它**必须**仍然不唤醒（失败面清单 #5）。
     wakes: false,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 3,
@@ -119,7 +137,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'followup',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 4,
@@ -133,7 +153,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'steer',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 5,
@@ -146,7 +168,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'followup',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 6,
@@ -159,7 +183,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'followup',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 7,
@@ -172,7 +198,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'steer',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 8,
@@ -185,7 +213,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'steer',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 9,
@@ -198,7 +228,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'steer',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 10,
@@ -212,7 +244,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'session-event',
     wakes: false,
     kind: 'user',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 11,
@@ -228,7 +262,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'followup',
     wakes: true,
     kind: 'user',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 12,
@@ -241,7 +277,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'followup',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 13,
@@ -254,7 +292,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'followup',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 14,
@@ -267,7 +307,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'steer',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 15,
@@ -280,7 +322,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'followup',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
   {
     id: 16,
@@ -294,7 +338,9 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
     channel: 'steer',
     wakes: true,
     kind: 'plugin:dsh-serenity-hooks',
-    migrated: false,
+    migrated: true,
+    // ⚠️ 真机验证要等本批部署后做（见 SESSION.md 当前状态的待办）
+    realMachineVerified: false,
   },
 ] as const
 
