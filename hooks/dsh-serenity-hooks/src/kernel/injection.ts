@@ -151,20 +151,23 @@ export function sourceOf(inj: Injection): MessageSource {
           `收到 form='${inj.form}'。`,
       )
     }
+    // ⚠️ 真人直说的消息**刻意不带 origin 字段**（它本来就是 user，多一个字段是噪音）。
+    //    ⇒ 消费方的判据是「origin 字段缺席 ⇒ 真人」，见 trajectory/user-quotes.ts。
     return { kind: 'user' } satisfies MessageSource
-  }  // acc / agent 都落在我们自有的 kind 上 —— 它**带了** & ContextFormed，装得下 form。
+  }
+  // acc / agent 都落在我们自有的 kind 上 —— 它带 & ContextFormed & AccOriginField，装得下 form 与 origin。
   if (inj.origin === 'agent') {
-    const relayed: MessageSource = { kind: ACC_MESSAGE_KIND, form: 'relay' }
+    const relayed: MessageSource = { kind: ACC_MESSAGE_KIND, form: 'relay', origin: 'agent' }
     return relayed
   }
   const notice: MessageSource =
     inj.form === undefined
-      ? PLUGIN_SOURCE
+      ? { kind: ACC_MESSAGE_KIND, origin: 'acc' }
       : inj.form === 'notice'
-        ? { kind: ACC_MESSAGE_KIND, form: 'notice', summary: inj.summary ?? '' }
+        ? { kind: ACC_MESSAGE_KIND, form: 'notice', summary: inj.summary ?? '', origin: 'acc' }
         : inj.form === 'snapshot'
-          ? { kind: ACC_MESSAGE_KIND, form: 'snapshot', sections: [{ name: 'acc', text: inj.text }] }
-          : { kind: ACC_MESSAGE_KIND, form: inj.form }
+          ? { kind: ACC_MESSAGE_KIND, form: 'snapshot', sections: [{ name: 'acc', text: inj.text }], origin: 'acc' }
+          : { kind: ACC_MESSAGE_KIND, form: inj.form, origin: 'acc' }
   return notice
 }
 

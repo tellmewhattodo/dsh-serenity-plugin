@@ -17,9 +17,36 @@
 
 import type { ContextFormed, MessageSource } from '@deepseek-ai/dsh-llm'
 
+/**
+ * ACC 注入消息在 `source` 上额外携带的字段 —— **DII M3 的落点**（2026-11-04）。
+ *
+ * ## 为什么必须把 `origin` 投影进 `source`（而不是只留在内存的 Injection 里）
+ *
+ * `Injection` 是**投递那一刻**的声明对象；而所有消费方（语料、用户语录、面板读数）
+ * 读的是**落盘后的会话日志**，那里只有 `source`。⇒ 声明若不落到 `source` 上，
+ * 消费方就永远看不见它，M3 也就无从"改读字段、删黑名单"。
+ *
+ * ## 宿主允许吗（**实测，非推断**）
+ *
+ * ① `createMessage` 走 `structuredClone(input)` ⇒ 自定义字段被原样保留；
+ * ② 落盘校验 `assertMessageEventShape`（`dsh-session/lib/types/index.js:266-271`）
+ *    只要求 `source.kind` 是**非空字符串**，**不排斥额外字段**。
+ * ⇒ 已用临时探针实测三点：`createUserMessage` 后存活 ／ 冻结后仍可读 ／ JSON 往返后仍在。
+ *
+ * ## 与 `kind` 的关系（I1）
+ *
+ * `kind` 回答"落点是谁"，`origin` 回答"真正的生产者是谁"——**两者刻意可以不等**：
+ * 载体开场白与 rebuild 锚点被宿主强制 `kind:'user'`，但它们的 `origin` 是 `'acc'`。
+ * 那正是这两个生产者长期"冒充真人"的根源；有了 `origin`，消费方终于能分辨。
+ */
+export interface AccOriginField {
+  /** 真正的生产者：真人 ／ ACC ／ 另一个 agent。 */
+  readonly origin?: 'user' | 'acc' | 'agent'
+}
+
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    'plugin:dsh-serenity-hooks': { kind: 'plugin:dsh-serenity-hooks' } & ContextFormed
+    'plugin:dsh-serenity-hooks': { kind: 'plugin:dsh-serenity-hooks' } & ContextFormed & AccOriginField
   }
 }
 

@@ -158,6 +158,12 @@ export interface UserQuoteWriteResult {
   written: number
   /** 因冒充标记被排除几条 */
   excludedFake: number
+  /**
+   * ⚠️ **DII M3 后它只在"旧形态日志"上非零**（2026-11-04）：
+   * 新代码产的消息都带 `source.origin`，冒充者由结构判据排除（并入 `not-user`）；
+   * 只有**升级前落盘的旧消息**（没有 origin 字段）才会走到标记兜底并计入这里。
+   * 🔴 **所以它是个迁移进度读数**：>0 ⇒ 还有旧形态在场；=0 ⇒ 新判据已全覆盖。
+   */
   /** 因重复 id 被跳过几条 */
   skippedDuplicate: number
   /** 台账日期文件绝对路径（written > 0 时才有意义） */
@@ -248,14 +254,37 @@ export function messageText(content: readonly ContentBlock[] | undefined): strin
 }
 
 /**
- * 这条消息**是不是用户直接说的话**（结构性判据 + 冒充标记排除）。
+ * 一条消息**是不是用户直接说的话**（结构性判据 + 冒充标记排除）。
  *
- * @returns `'quote'` 收录 ／ `'not-user'` 不是用户发言（ACC 注入等）／ `'fake-user'` 冒充 user 的生产者
+ * ## 🔴 DII M3（2026-11-04）：判据升级为**读 `source.origin`**
+ *
+ * 修前：`kind === 'user'` ＋ **正文标记黑名单**（`CARRIER_OPENING_MARK` / `ASSISTANT_PREFIX`）。
+ * 那是"事后辨认"——它不完备：`corpus` 那条链的 20+ 条措辞黑名单就是同一个病（`heads` 子命令
+ * 因此成了"量漏网家族"的工具）。
+ *
+ * 修后：**先读 `source.origin`**（DII 把它投影进 source，见 `kernel/message-source.ts`）：
+ * | `origin` | 含义 | 结论 |
+ * |---|---|---|
+ * | 缺席 ＋ `kind==='user'` | **真人直说**（ACC 的 `sourceOf` 对 origin:'user' **刻意不写该字段**） | `quote` |
+ * | `'acc'` | ACC 产的（唤醒/提醒/开场白/rebuild 锚点…） | `not-user` |
+ * | `'agent'` | 另一个 agent 产的（subagent 任务书等） | `not-user` |
+ *
+ * ⇒ **两个长期"冒充真人"的生产者（载体开场白／rebuild 锚点）现在出生即分格**，
+ * 不再需要正文标记参与判定。见下方 `USER_QUOTE_FAKE_MARKERS` 的处置说明。
+ *
+ * @returns `'quote'` 收录 ／ `'not-user'` 不是用户发言（ACC 注入等）／
+ *          `'fake-user'` **未带 origin 的旧日志里**靠正文标记认出是冒充者（过渡期兜底）
  */
 export function classifyUserMessage(source: unknown, text: string): 'quote' | 'not-user' | 'fake-user' {
-  const kind = (source as { kind?: unknown } | null | undefined)?.kind
+  const src = source as { kind?: unknown; origin?: unknown } | null | undefined
+  const kind = src?.kind
+  // ① 主判据：ACC/agent 产的 ⇒ 一律不是真人（**结构性，不靠措辞**）
+  if (src?.origin === 'acc' || src?.origin === 'agent') return 'not-user'
+  // ② 真人直说：kind==='user' 且**没有** origin 字段（宿主 user 支装不下它，故缺席=真人）
   if (kind !== 'user') return 'not-user'
-  // 到这里：`kind === 'user'`。剩下要排的是**冒充者**（它们也声明 user，靠各自标记区分）。
+  // ③ 兼容未迁移的旧日志：那时 ACC 的 kind:'user' 冒充者还没有 origin 字段，
+  //    只能靠正文标记排除。⚠️ **过渡期兜底，且被单独计数**（`excludedFake`）——
+  //    计数不是装饰：它 >0 说明**还有旧形态的冒充者在场**，是可观测的迁移进度读数。
   for (const marker of USER_QUOTE_FAKE_MARKERS) {
     if (text.startsWith(marker)) return 'fake-user'
   }
