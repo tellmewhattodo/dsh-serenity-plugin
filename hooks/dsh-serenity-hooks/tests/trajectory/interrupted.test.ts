@@ -31,6 +31,8 @@ import {
   detectInterruptedEnd,
   detectUnclosedTurn,
   formatPendingTools,
+  innerAbortCauseOf,
+  isUserIntentStop,
   projectDirNameForCwd,
   scanInterruptedSessions,
 } from '../../src/trajectory/interrupted.js'
@@ -109,14 +111,64 @@ describe('detectInterruptedEnd（纯判定）', () => {
     expect(detectInterruptedEnd(events)).toEqual({ turn: 12, pendingTools: [] })
   })
 
-  it('🔴 内层 reason 是 user／parent／hook 的 aborted 都算（判据只看外层，不看谁取消的）', () => {
-    for (const inner of ['user', 'parent', 'disposed', 'hook']) {
+  /**
+   * 🔴🔴 **2026-11-04（owner 令）：「用户手工停止」必须排除 —— 本条取代了旧的正控。**
+   *
+   * 旧用例原话是「内层 user／parent／hook 的 aborted 都算（判据只看外层，不看谁取消的）」，
+   * 那条**当时是对的**，但它成立于一个后来被事实推翻的前提：**没有人会手工停止**。
+   * 实测它不成立 —— 外部用户报了「我没配任何监控，它自己跑起来了，我手工点的停止」。
+   * ⇒ 兜底把人主动终止的轮次当成"该被接走" ⇒ **人越喊停它越来**。
+   *
+   * 现判据（**只加一格例外**，见 `isUserIntentStop`）：
+   * · 内层 `user` ⇒ **不命中**（人的意图优先）
+   * · 内层 `parent`／`disposed`／`hook`／**缺失** ⇒ **仍命中**（不是人对本会话做的决定）
+   *
+   * 🔴 **为什么 `disposed` 必须留下**：2026-10-23 那个 13 分钟盲窗正是重启打断造成的
+   * （`runInterruptedSafetyNet` 头注有实测读数）。把它一起排除 = 修掉一个打扰，
+   * 却复活一个已知事故 —— owner 2026-11-04 明令「重启后应当自动续跑」。
+   */
+  it('🔴 内层 parent／disposed／hook 的 aborted 仍算命中（重启保护不得丢）', () => {
+    for (const inner of ['parent', 'disposed', 'hook']) {
       const events = [
         { type: 'turn/start', data: { turn: 3 } },
         { type: 'turn/end', data: { turn: 3, reason: { kind: 'aborted', reason: { kind: inner } } } },
       ]
-      expect(detectInterruptedEnd(events), `内层=${inner} 也该命中`).toEqual({ turn: 3, pendingTools: [] })
+      expect(detectInterruptedEnd(events), `内层=${inner} 应仍命中`).toEqual({ turn: 3, pendingTools: [] })
     }
+  })
+
+  it('🔴🔴 内层 user（用户手工停止）⇒ **不命中**（否则人越喊停它越来）', () => {
+    const events = [
+      { type: 'turn/start', data: { turn: 3 } },
+      // ⚠️ 真实形状：reason 里套着 reason。取错层不会报错，只会静默判错
+      { type: 'turn/end', data: { turn: 3, reason: { kind: 'aborted', reason: { kind: 'user' } } } },
+    ]
+    expect(detectInterruptedEnd(events)).toBeNull()
+    // 同时把两个导出的读数钉住（它们本身也是别的调用方的判据面）
+    expect(isUserIntentStop(events)).toBe(true)
+    expect(innerAbortCauseOf(events)).toBe('user')
+  })
+
+  it('🔴 内层缺失的 aborted ⇒ 仍命中（缺省方向 = 救，不是弃）', () => {
+    const events = [
+      { type: 'turn/start', data: { turn: 5 } },
+      { type: 'turn/end', data: { turn: 5, reason: { kind: 'aborted' } } },
+    ]
+    expect(detectInterruptedEnd(events)).toEqual({ turn: 5, pendingTools: [] })
+    expect(isUserIntentStop(events)).toBe(false)
+  })
+
+  it('🔴 真日志样本逐字回归（2026-11-04 本机 turn 67 实录）', () => {
+    // 这一条刻意用**原始事件形状**，⛔ 不是手写"我以为的样子"：
+    // 夹具与真物形状不一致时，再多用例也拦不住（判据纪律 #59）
+    const real = {
+      type: 'turn/end',
+      seq: 14538,
+      time: 1793533743937,
+      data: { turn: 67, reason: { kind: 'aborted', reason: { kind: 'user' } } },
+    }
+    const events = [{ type: 'turn/start', seq: 14530, time: 1793533700000, data: { turn: 67 } }, real]
+    expect(detectInterruptedEnd(events), '用户手工停止的真实轮次不该被自动续跑').toBeNull()
   })
 
   /**
@@ -639,6 +691,29 @@ describe('formatPendingTools（清单折叠）', () => {
 })
 
 describe('buildContinueText（续跑正文）', () => {
+  /**
+   * 🔴🔴 **2026-11-04（owner 报障）：正文必须自报身份 —— 这不是人安排的。**
+   *
+   * 实测代价：外部用户收到续跑消息后问「这个续跑的消息你知道来源哪里吗」，
+   * 并且**用了一整轮**去查 live 会话／唤醒表／CRO 才确认是系统自己发的。
+   * 根因：修前正文只有一句祈使句「请接着完成该轮未完成的工作」，
+   * **完全看不出是谁在说话** ⇒ 人默认以为有人在派活。
+   *
+   * ⚠️ 本条是**补的**：改文案时原有用例全绿（它们只钉了"含 session id / turn / 副作用警告"），
+   * 说明**没有任何用例钉住"首行说了什么"** —— 那正是最容易退化的一格。
+   */
+  it('🔴🔴 首行必须自报「这是 ACC 自动发的」（否则人以为是有人派活）', () => {
+    const t = buildContinueText('session-a', 1, [])
+    const firstLine = t.split('\n')[0]
+    expect(firstLine, '首行必须标明自动身份').toContain('ACC 自动')
+    expect(firstLine, '首行必须说明不是人安排的').toMatch(/不是你安排的/)
+  })
+
+  it('🔴 必须说明「手工停止的轮次不会被续跑」（给读者一个可行动的事实）', () => {
+    const t = buildContinueText('session-b', 1, [])
+    expect(t).toMatch(/手工点过.*停止.*不会/)
+  })
+
   it('无未完成调用 ⇒ 不提副作用核对（不制造无谓警告）', () => {
     const t = buildContinueText('session-x', 7, [])
     expect(t).toContain('session-x')

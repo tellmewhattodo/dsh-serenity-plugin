@@ -131,7 +131,17 @@ interface SessionEvent {
   data?: {
     turn?: number
     step?: number
-    reason?: { kind?: string }
+    /**
+     * `turn/end` 的收尾原因。
+     *
+     * 🔴 **2026-11-04：补上内层 `reason`** —— 真机形状是 **`reason` 里套着 `reason`**：
+     * `{"turn":67,"reason":{"kind":"aborted","reason":{"kind":"user"}}}`
+     * （本机 session-afc28ede turn 67 逐字实录）。
+     * 外层回答"收完了吗"，内层回答"谁让它停的" —— 后者用于排除**用户手工停止**，
+     * 见 `isUserIntentStop`。⚠️ `tsc` 会抓这个字段：缺了它 TypeScript 报 TS2339
+     * （而**单测照样绿** —— 单测不走类型检查。所以「测试绿」不能代替 `typecheck`/`build`）。
+     */
+    reason?: { kind?: string; reason?: { kind?: string } }
     /** `tool/call` 的字段（callId 与 name 都在 data 这一层） */
     callId?: string
     name?: string
@@ -364,6 +374,33 @@ function readTailEvents(logPath: string): TailRead {
  * ⇒ 本判据**只看外层 `kind`**，理由：外层已经回答了"这一轮收完了吗"，
  *   内层回答的是"谁让它停的"，**那是另一个问题**，混进来会让判据随"谁取消的"漂移。
  *
+ * ## 🔴🔴 2026-11-04 修正（owner 令）：**用户手工停止必须排除** —— 上述「只看外层」被推翻
+ *
+ * ### 原前提被谁取代
+ * 上面那句「内层混进来会让判据漂移」成立于一个**当时没成立的前提**：
+ * **没有人会手工停止**。实测它不成立 —— 外部用户报了「我根本没配任何监控，
+ * 它自己跑起来了，我是手工点的停止」。⇒ 兜底把人**主动终止**的轮次当成"该被接走"，
+ * 于是**人越喊停，它越来**。这不是判据漂移，是**判据答错了问题**。
+ *
+ * ### 新判据（**只加一格例外，不动其余**）
+ * `aborted` **且** `reason.reason.kind === 'user'` ⇒ **不算"没跑完"**（用户已明确表达意图）。
+ *
+ * | 内层 kind | 谁让它停的 | 是否续跑 | 理由 |
+ * |---|---|---|---|
+ * | **`user`** | **人手工点的停止** | ⛔ **不** | 人的意图优先；反复拉起等于与用户对抗 |
+ * | `disposed` | 宿主重启／销毁 | ✅ **是** | owner 2026-11-04 明令「重启后应当自动续跑」 |
+ * | `parent` | 父轮终止 | ✅ 是 | 不是人对着本会话做的决定 |
+ * | `hook` | 宿主 hook 取消 | ✅ 是 | 同属"没跑完" |
+ * | 缺失/未知 | — | ✅ 是 | **缺省续跑**：这是兜底机制，保守方向是"救"而不是"弃" |
+ *
+ * 🔴 **为什么 `disposed` 必须留着**：2026-10-23 那个 **13 分钟盲窗**正是重启打断造成的
+ * （实测读数见 `runInterruptedSafetyNet` 头注）。把 `disposed` 一起排除，等于
+ * 用"修一个打扰"换来"复活一个已知事故"——**owner 已明确不换**。
+ *
+ * ⚠️ **形状陷阱（写代码与写夹具时都必须注意）**：真实事件是
+ * `reason: { kind: 'aborted', reason: { kind: 'user' } }` —— **`reason` 里套着 `reason`**。
+ * 取错层不会报错，只会**静默判错**。⇒ 夹具必须用**真日志样本**，⛔ 不许手写"我以为的样子"。
+ *
  * ### ⛔ 刻意**不**纳入的形态（保守边界，写明理由）
  * - `error`：本轮**收完了**（宿主记了错误收尾），它不是"停在这里等人续"；
  * - 完全没有 `turn/end` 的开轮（例如日志末尾是 `turn/start` 后再无事件）：
@@ -382,6 +419,53 @@ function readTailEvents(logPath: string): TailRead {
  * ⚠️ **这是判据的唯一取值点** —— 别在别处再写一份字面量（两份会漂）。
  */
 const UNFINISHED_KINDS: ReadonlySet<string> = new Set(['interrupted', 'aborted'])
+
+/**
+ * 🔴 **2026-11-04（owner 令）：`aborted` 的内层成因里，哪一种是「人明确说了别跑」。**
+ *
+ * 只有 `user` —— 人手工点的停止。其余（`disposed` 重启／`parent`／`hook`／缺失）
+ * 都不是"人对本会话表达过意图"，仍按"没跑完"处理。
+ *
+ * ⚠️ **为什么只列 user 而不列"要续跑的名单"**：形态会变（将来可能多出新 kind）。
+ * 列"不续跑"的白名单 ⇒ 新形态缺省表现为**续跑**（保守方向 = 救而不是弃）；
+ * 列"要续跑"的白名单 ⇒ 新形态缺省表现为**不救**，会静默丢保护。
+ */
+const USER_INTENT_STOP_KINDS: ReadonlySet<string> = new Set(['user'])
+
+/**
+ * 读 `turn/end` 的内层成因（`reason.reason.kind`）。
+ *
+ * 🔴 **形状陷阱**：真实事件是 `reason: { kind: 'aborted', reason: { kind: 'user' } }`
+ * —— **`reason` 里套着 `reason`**。取错层不报错，只会静默判错。
+ * 实测样本（2026-11-04，本机 session-afc28ede turn 67 逐字）：
+ * `{"type":"turn/end","data":{"turn":67,"reason":{"kind":"aborted","reason":{"kind":"user"}}}}`
+ *
+ * @returns 内层 kind；缺失或非串 ⇒ `null`（**缺省续跑**，见 USER_INTENT_STOP_KINDS 的注释）
+ */
+export function innerAbortCauseOf(events: SessionEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]?.type !== 'turn/end') continue
+    const inner = events[i]?.data?.reason?.reason?.kind
+    return typeof inner === 'string' ? inner : null
+  }
+  return null
+}
+
+/**
+ * 「用户手工停止过」——**兜底机制的排除判据**。
+ *
+ * 判据 = 末条 `turn/end` 外层是 `aborted` **且** 内层成因命中 {@link USER_INTENT_STOP_KINDS}。
+ * 只有这两个同时成立才排除；`interrupted`（崩溃）永不被它命中。
+ */
+export function isUserIntentStop(events: SessionEvent[]): boolean {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]?.type !== 'turn/end') continue
+    const outer = events[i]?.data?.reason?.kind
+    const inner = events[i]?.data?.reason?.reason?.kind
+    return outer === 'aborted' && typeof inner === 'string' && USER_INTENT_STOP_KINDS.has(inner)
+  }
+  return false
+}
 
 /**
  * 尾部窗口里**最后一条 `turn/start` 的轮号**（D244 输出面，给调用方做 A108 的现场判断）。
@@ -442,6 +526,14 @@ export function detectInterruptedEnd(events: SessionEvent[]): { turn: number | n
   const turnEnd = events[idx]
   const kind = turnEnd?.data?.reason?.kind
   if (typeof kind !== 'string' || !UNFINISHED_KINDS.has(kind)) return null
+  /**
+   * 🔴 **2026-11-04（owner 令）：用户手工停止的轮次**不续跑**。
+   *
+   * 判据放在"命中没跑完"之后、"确认其后无新轮"之前 —— 语义上它属于
+   * 「这一轮确实没收完，但**不该被接走**」，与"收完了"是两件事，⛔ 不要合并成一个 return。
+   * 理由与取舍见文件头 §2026-11-04 修正（含 disposed 为何必须留着）。
+   */
+  if (isUserIntentStop(events)) return null
   // 之后若又开了新轮 ⇒ 旧轮已封口、且新一轮由 `detectUnclosedTurn` 负责判
   for (let i = idx + 1; i < events.length; i++) {
     if (events[i]?.type === 'turn/start') return null
@@ -774,7 +866,20 @@ export interface ResumeOutcome {
  */
 export function buildContinueText(sessionId: string, turn: number | null, pendingTools: string[]): string {
   const lines: string[] = []
-  lines.push('[中断续跑] 上一条进程在本轮完成前退出，该轮已被中止。现在继续。')
+  /**
+   * 🔴🔴 **2026-11-04（owner 报障）：首行必须自报身份 —— 这是 ACC 自动发的，不是人安排的。**
+   *
+   * 修前首行是「上一条进程在本轮完成前退出，该轮已被中止。现在继续。」——
+   * **完全看不出是谁在说话**。实测代价：外部用户收到它后问「这个续跑的消息你知道来源哪里吗」,
+   * 并且**用了一整轮去反查**（查 live 会话、查唤醒表、查 CRO 才确认是 harness 自己发的）。
+   *
+   * ⇒ 判据：**自动行为必须能被一眼认出是自动的**。人在看到一个祈使句（"请接着完成…"）时
+   *   默认会以为**有人**在安排工作；不写清来源，就是在制造"我以为有人在派活"。
+   *   这是 D262 的同族：报错／通知要能指回"谁触发的、怎么关"。
+   */
+  lines.push('[ACC 自动 · 中断续跑] 下面这件事不是你安排的，是系统在自动恢复。')
+  lines.push('')
+  lines.push('上一条进程在本轮完成前退出，该轮已被中止。现在继续。')
   lines.push('')
   lines.push(`会话: ${sessionId}${turn === null ? '' : ` ／ 被中断的轮次: turn ${turn}`}`)
   if (pendingTools.length > 0) {
@@ -787,6 +892,9 @@ export function buildContinueText(sessionId: string, turn: number | null, pendin
   }
   lines.push('')
   lines.push('请接着完成该轮未完成的工作；完成后把进展写入本轨迹的 SESSION.md。')
+  lines.push('')
+  lines.push('（说明：这是 ACC 的「中断兜底」，每 5 分钟检查一次被中断的会话并继续。')
+  lines.push('  你手工点过"停止"的轮次**不会**被它续跑。）')
   return lines.join('\n')
 }
 
