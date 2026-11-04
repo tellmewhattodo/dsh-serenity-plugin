@@ -30,12 +30,11 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { Context } from 'cordis'
 import type { JsonValue } from '../kernel/json.js'
 import { cccRootForExec, NO_CCC_FROM_AGENT_CWD } from '../kernel/ccc-roots.js'
-import { runMsm, MSM_ACTIONS, CCC_CONFIG_REFERENCE, ACC_CATALOG } from './msm/service.js'
+import { runMsm, MSM_ACTIONS } from './msm/service.js'
 import { trajectoryConstraintMsmGate } from '../trajectory/session.js'
-import { validateTrajectoryConstraint, applyTrajectoryConstraint, listTrajectoryConstraintSummary, TRAJECTORY_CONSTRAINT_GUIDE } from './trajectory-constraint-admin.js'
-import { TRAJECTORY_SELF_GUIDE } from './trajectory-self-docs.js'
-import { IM_BRIDGE_GUIDE } from './im-docs.js'
-import { renderDocsIndex, findDocsChapter, docsPointer, type DocsChapter } from './config-docs.js'
+import { validateTrajectoryConstraint, applyTrajectoryConstraint, listTrajectoryConstraintSummary } from './trajectory-constraint-admin.js'
+import { docsPointer } from './config-docs.js'
+import { MANUALS, findManual, renderManual, renderManualsIndex } from './manuals.js'
 import { loadSerenityConfig } from '../kernel/ccc.js'
 
 function agentSessionId(exec: { agent?: { session?: { id?: string } } }): string {
@@ -129,57 +128,21 @@ const ADMIN_ACTIONS: Record<AdminDomain, readonly string[]> = {
 const DOMAIN_NAMES = Object.keys(ADMIN_ACTIONS) as AdminDomain[]
 
 /**
- * 说明目录的章节（**说明类内容的唯一注册处**）。
+ * 🔴🔴 **2026-11-04（owner 令）：章节表已迁出本文件 ⇒ `tools/manuals.ts`**
  *
- * 🔴 两条纪律：
- * ① **加一章 = 在这里加一项**（`render` 惰性求值）——说明类内容增长时**不新增工具/子命令**。
- * ② **正文不复制**：每章的真相源就在它自己的函数里（`CCC_CONFIG_REFERENCE` /
- *    `TRAJECTORY_CONSTRAINT_GUIDE` / `ACC_CATALOG`）——本表只做**切分与路由**。
+ * 这里原本是 `DOCS_CHAPTERS` 手写表。它有三个结构性缺陷（实测，⛔ 不是印象）：
+ * ① **只覆盖 5 章**，而容器里实际有 8 份手册 —— `MSM_GUIDE` ／ `CRO_GUIDE` ／
+ *    `SKILL_CREATOR_GUIDE` 各自住在自己工具的 action 后面，从总索引完全看不见；
+ * ② **加一章要改四处**（写 const → 加 import → 改这张表 → 改测试里的精确断言），
+ *    **没有一处会提醒你漏了哪一处** ⇒ 手册与代码分叉不是"忘了"，是架构让它容易忘；
+ * ③ 目录只给"这章讲什么"，**没给"写给谁 / 何时该读"** ⇒ 读者得先通读才知道跟自己有没有关系。
  *
- * ## 🔴 2026-10-19 v1.75.0：说明面统一（owner 裁 Q3 = 指针）
- *
- * 统一前有 **5 个并列入口**，其中两组返回**同一份正文**：
- * `docs config` ≡ `msm ccc-config`｜`docs trajectory-constraint` ≡ `config guide`｜
- * `msm catalog`（域挂错了：它描述整个 ACC，却挂在 MSM 注册表下）。
- *
- * ⇒ 统一后的分工（**一个内容一个正文入口**）：
- * - **`config docs <chapter>`** = 唯一正文入口
- * - `msm ccc-config` / `config guide` = **指针**（指向对应 chapter，不再返回正文）
- * - `msm catalog` = **指针**（指向 `catalog` 章）
- *
- * 判据依据：`praxis` 已经做对了这件事 —— `praxis eap` 返回正文、`praxis` 无参返回目录，
- * **没有第二个入口读同一份 EAP**。本表把同一形态搬到 config 域。
+ * ⇒ 现在唯一登记处 = `manuals.ts` 的 `MANUALS`。**加一份手册 = 在那里加一项**。
+ * ⚠️ v1.75.0 的判据「一个内容一个正文入口」**仍然成立且被强化**：`manuals.ts` 用
+ *    `carrier.kind` 把「正文在 ACC 里」(local) 与「正文在别的工具入口后」(native) 分开表达，
+ *    native 那三份**只返回指针、⛔ 不复制正文**。
  */
-const DOCS_CHAPTERS: readonly DocsChapter[] = [
-  {
-    id: 'catalog',
-    summary: 'ACC 能力总目录——7 个能力分区，每区一句话 ＋ 去哪个子命令看详情',
-    render: () => ACC_CATALOG,
-  },
-  {
-    id: 'config',
-    summary: 'CCC 配置全表——10 段各是什么、怎么填、填错会怎样（.opencode/serenity.json）',
-    render: () => CCC_CONFIG_REFERENCE,
-  },
-  {
-    id: 'trajectory-self',
-    summary: '一条轨迹怎么描述自己——章程 PROMPT.md ／ 常驻声明（resident.serves）／ 三个载体的分工 ＋ 写完怎么验',
-    render: () => TRAJECTORY_SELF_GUIDE,
-  },
-  {
-    id: 'trajectory-constraint',
-    summary: '轨迹约束（只讲限制面）：trajectory.json 的双白名单 ／ 模型 ／ 纪律参与项 ／ IM 路由',
-    render: () => TRAJECTORY_CONSTRAINT_GUIDE,
-  },
-  {
-    id: 'im-bridge',
-    // 🔴 2026-10-22（owner：「ACC 没提供 IM 桥使用说明和账户查询方法，导致 CCC 没办法自己配路由」）：
-    //    这一章补的就是那个缺口。读者是 **CCC 的 agent**，所以指针必须也从 `im-bridge`
-    //    工具描述发出（D178：指针要从"使用者实际打开的那个工具"发出）——两处都已加。
-    summary: 'IM 桥怎么用、怎么配路由、怎么查对方 id —— send/send-file/users/status/contacts 五个动作 ＋ 路由三步法（contacts → 写 → status 自检）',
-    render: () => IM_BRIDGE_GUIDE,
-  },
-]
+const DOCS_CHAPTERS = MANUALS
 
 /**
  * 指针与章目的关系（v1.75.0）：
@@ -266,16 +229,16 @@ export function createContainerAdminTool(ctx: Context) {
           case 'docs': {
             const chapter = (args.chapter as string | undefined)?.trim() ?? ''
             // 第一层：目录（**不触发任何正文**）
-            if (chapter === '') return { docs: renderDocsIndex(DOCS_CHAPTERS), chapters: DOCS_CHAPTERS.map((c) => c.id) }
-            // 第二层：按章详情
-            const found = findDocsChapter(DOCS_CHAPTERS, chapter)
+            if (chapter === '') return { docs: renderManualsIndex(DOCS_CHAPTERS), chapters: DOCS_CHAPTERS.map((c) => c.id) }
+            // 第二层：按章详情（native 形态返回指针，⛔ 不复制正文）
+            const found = findManual(chapter)
             if (found === null) {
               throw new Error(
                 `container_admin config docs: unknown chapter "${chapter}". ` +
                   `Available: ${DOCS_CHAPTERS.map((c) => c.id).join(' | ')} (omit the chapter for the index)`,
               )
             }
-            return { chapter: found.id, docs: found.render() }
+            return { chapter: found.id, docs: renderManual(found) }
           }
           // ── 现值（原 config 域的唯一动作） ──
           //

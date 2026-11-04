@@ -44,6 +44,7 @@ vi.mock('../src/tools/msm/service.js', async () => {
 
 import { createContainerAdminTool } from '../src/tools/container-admin.js'
 import { runMsm } from '../src/tools/msm/service.js'
+import { MANUALS } from '../src/tools/manuals.js'
 
 const mockRunMsm = vi.mocked(runMsm)
 
@@ -196,8 +197,17 @@ describe('config docs：两层说明菜单（P3）', () => {
     // 2026-10-22：新增 `im-bridge`（owner：「ACC 没提供 IM 桥使用说明…导致 CCC 没办法自己配路由」）
     //   ⇒ 同一条判据的第二次应用：读者是 **CCC 的 agent、手边工具是 im-bridge**，
     //     而不是"写自我声明的轨迹"。⛔ 不是把断言放宽 —— 集合相等仍然精确，只是成员变了。
-    expect(res.chapters).toEqual(['catalog', 'config', 'trajectory-self', 'trajectory-constraint', 'im-bridge'])
-    expect(res.docs).toContain('CCC 配置说明 · 目录')
+    //
+    // 🔴🔴 2026-11-04（owner：「手册架构也不好，导致你老是忘更新」）—— **本断言改了判据形态**：
+    //   旧写法把 5 个 id **逐字写死**，于是「加一章」必然要改这里（这就是"加一章改四处"的第三处）。
+    //   ⇒ 现在改成**与登记表对读**：索引必须列出 `MANUALS` 里的**全部** id，且**不多一个不少一个**。
+    //   ⚠️ 这不是放宽（D274）：旧的精确列表是为了防"索引漏章"，**本意原样保留且更强** ——
+    //      旧断言只能钉住"当时那 5 个"，新断言能钉住"任意时刻的全部"，且不必人工同步。
+    //      真正被禁掉的行为（索引少一个／多一个）仍然精确红。
+    expect(res.chapters).toEqual(MANUALS.map((m) => m.id))
+    // 反向：三份 2026-11-04 才收进索引的游离手册**必须在场**（防回退到"只管自己域"）
+    for (const id of ['msm', 'cro', 'skill-authoring']) expect(res.chapters).toContain(id)
+    expect(res.docs).toContain('CCC 手册目录')
     // 目录里每一章都有一句话
     expect(res.docs).toContain('config')
     expect(res.docs).toContain('trajectory-self')
@@ -297,13 +307,16 @@ describe('config docs：两层说明菜单（P3）', () => {
   })
 
   it('🔴 未知章节 → 拒绝且**带候选清单**（"不知道这章"≠"这章是空的"）', async () => {
+    // 2026-11-04：候选清单里必须含**新收进索引的章**（否则错误提示会指向一份过时的章目）
     await expect(exec({ domain: 'config', action: 'docs', chapter: 'nope' })).rejects.toThrow(
       /unknown chapter "nope"[\s\S]*Available: catalog \| config \| trajectory-self \| trajectory-constraint/,
     )
+    await expect(exec({ domain: 'config', action: 'docs', chapter: 'nope' })).rejects.toThrow(/skill-authoring/)
   })
 
   it('🔴 白空格章节 ⇒ 按"没给"处理（返回目录，不是报错）', async () => {
     const res = (await exec({ domain: 'config', action: 'docs', chapter: '   ' })) as { chapters: string[] }
-    expect(res.chapters).toEqual(['catalog', 'config', 'trajectory-self', 'trajectory-constraint', 'im-bridge'])
+    // 2026-11-04：改与登记表对读（同第一条用例的判据变更，此处不再重复注释）
+    expect(res.chapters).toEqual(MANUALS.map((m) => m.id))
   })
 })
