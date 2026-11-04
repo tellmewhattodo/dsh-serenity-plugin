@@ -518,19 +518,51 @@ describe('msm-ops · runMsmAsync', () => {
     expect(existsSync(join(dir, 'spawned.marker'))).toBe(false)
   })
 
-  it.skipIf(!HAS_BUN)('exec 真跑（bun）：成功 ⇒ exit 0 ＋ stdout 透传 ＋ 无 TIP', async () => {
-    writeScript('ok.ts', 'console.log("MSM-OK")\n')
+  /**
+   * 🔴🔴 **2026-11-04 owner 令：成功路径返回裸 stdout（不套信封）。**
+   *
+   * owner 原话（看着 `msm(carrier-log, [status, --trajectory …])` 的调用卡）：
+   * 「输出不要套结构 直接 stdout 的内容给出来」，并补答失败策略：
+   * **「失败还是完整结构，成功简化，成功是大概率事件」**。
+   *
+   * 为什么不是审美偏好：修前成功也要返回 `{name, exit, stdout, stderr}`，
+   * 一整块多行正文被塞进 JSON 字符串 ⇒ **每个换行变成字面量 `\n`**，读者要先反转义。
+   * 而 `name`（调用方自己传的）与 `exit:0`／`stderr:""`（成功下的常量）**零信息**。
+   *
+   * 断言三件事（缺一不可）：
+   * ① 返回值就是 **stdout 原文**（含换行，未转义）；
+   * ② **不是对象** —— 反向钉：若这里仍是 `{stdout:…}`，说明信封没拆掉；
+   * ③ 失败路径仍必须是结构（下一条用例管），⛔ 别把这条简化误扩到失败面。
+   */
+  it.skipIf(!HAS_BUN)('exec 真跑（bun）：成功 ⇒ 直接返回 stdout 原文（⛔ 不套 name/exit 信封）', async () => {
+    writeScript('ok.ts', 'console.log("MSM-OK")\nconsole.log("第二行")\n')
     writeRegistry([{ name: 'ok', path: `${SCRIPTS_REL}/ok.ts`, skill: 't', category: 'mech' }])
-    const r = (await runMsmAsync(dir, { action: 'exec', name: 'ok', args: [] })) as { exit: number; stdout: string; stderr: string }
-    expect(r.exit).toBe(0)
-    expect(r.stdout).toContain('MSM-OK')
-    expect(r.stderr).not.toContain('[TIP]')
+    const r = await runMsmAsync(dir, { action: 'exec', name: 'ok', args: [] })
+    // ① 原文，且换行是**真换行**（不是被 JSON 转义的字面量 \n）
+    expect(typeof r).toBe('string')
+    expect(r).toContain('MSM-OK')
+    expect(r).toContain('第二行')
+    expect(r).toContain('\n')
+    expect(r).not.toContain('\\n')
+    // ② 反向钉：信封必须真的没了
+    expect(r).not.toHaveProperty('stdout')
+    expect(r).not.toHaveProperty('exit')
+    expect(r).not.toHaveProperty('name')
+    // ③ 成功不追加 TIP（TIP 只属失败面）
+    expect(r).not.toContain('[TIP]')
   })
 
+  /**
+   * 🔴 **失败面反向钉（owner 明确要求「失败还是完整结构」）**：
+   * 失败**必须**保留 `exit` 与 `stderr` —— 否则「工具挂了」与「成功但没输出」
+   * 在阅读面上长得一样（D252／D253 同族）。
+   */
   it.skipIf(!HAS_BUN)('exec 真跑（bun）：非零退出 ⇒ 码透传 ＋ 追加 TIP；带 --help 则不加 TIP', async () => {
     writeScript('bad.ts', 'process.exit(3)\n')
     writeRegistry([{ name: 'bad', path: `${SCRIPTS_REL}/bad.ts`, skill: 't', category: 'mech' }])
     const failed = (await runMsmAsync(dir, { action: 'exec', name: 'bad', args: [] })) as { exit: number; stderr: string }
+    // 失败面**仍是结构**（这是本条与上一条的分界，⛔ 别一起简化）
+    expect(typeof failed).toBe('object')
     expect(failed.exit).toBe(3)
     expect(failed.stderr).toContain('[TIP]')
     // hasHelp 分支：业务参数含 --help ⇒ 不再追加提示（对齐 osp）

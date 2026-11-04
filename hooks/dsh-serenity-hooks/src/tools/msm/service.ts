@@ -917,6 +917,31 @@ function msmExecResult(name: string, status: number, stdout: string, stderr: str
       ? { name, exit: 0, ok: true, data: stdout.trim() }
       : { name, exit: status, ok: false, error: (stderr.trim() || stdout.trim()) + tip }
   }
+  /**
+   * 🔴🔴 **2026-11-04 owner 令：成功就吐原文，⛔ 不套信封。**
+   *
+   * owner 原话（看 `msm(carrier-log, [status, --trajectory …])` 的调用卡时）：
+   * 「我想简化这个调用，输出不要套结构 直接 stdout 的内容给出来」，
+   * 并对「失败怎么办」补答：**「失败还是完整结构，成功简化，成功是大概率事件」**。
+   *
+   * ## 为什么这是对的（不是审美偏好）
+   * 修前每一次成功调用都返回 `{name, exit, stdout, stderr}` ——
+   * 一整块**中文排版正文**（`═══` 表头、多行缩进）被塞进 JSON 字符串，
+   * 于是**每一个换行都变成字面量 `\n`**，读者（模型）要先在脑子里做一次反转义。
+   * 那是纯粹的**传输损耗**：`name` 是调用方自己传的（零信息），
+   * `exit:0` 与 `stderr:""` 在成功路径上是常量（零信息）。
+   *
+   * ## 为什么失败路径**保持结构**（owner 明确要求，且理由更硬）
+   * `exit` 与 `stderr` 是**失败信号本身**。若把失败也抖成裸文本，
+   * 「工具挂了」会与「成功了但没输出」在阅读面上**长得一样** ——
+   * 那是本轨迹反复付代价的形态（D252 同族：读数器在跑，但答的不是那个问题；
+   * D253 同族：恒空的读数器会让「我没藏」与「藏了但读不到」publish 成同一输出）。
+   * ⇒ **失败必须能被机械判别**，所以保留 `exit` ＋ 原文。
+   *
+   * ⚠️ **`--format=json` 那一路（上面 `fmtJson` 分支）一字不改**：它是**机器协议**，
+   *    调用方已经声明"我要结构化"，简化它等于破坏契约。
+   */
+  if (status === 0) return stdout.trimEnd()
   return { name, exit: status, stdout, stderr: stderr + tip }
 }
 

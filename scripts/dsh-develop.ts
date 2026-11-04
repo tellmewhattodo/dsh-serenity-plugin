@@ -1363,26 +1363,64 @@ function cmdRunTrajectoryTest(rest: string[]): void {
   if (!existsSync(target)) fail(`轨迹目录不存在: ${target}`)
 
   // 缺省挑它目录里的 *.dev.test.ts（本仓约定；显式给文件名可覆盖）
+  //
+  // 🔴 **2026-11-04：支持 `tests/` 子目录**（轨迹目录清理）。判据与边界：
+  //
+  // 背景 —— 本轨迹根目录曾平铺 **60 个** `*.dev.test.ts`，把身份文件埋掉了；
+  // 清理时它们被移进 `tests/`。若本命令只扫根，那次清理会**静默打断**唯一测试通道
+  // （报「目录里没有 *.dev.test.ts」，而文件明明在）。
+  //
+  // 判据：**先扫根，根没有再看 `tests/`**（⛔ 不合并两处）。
+  //   合并会让"同名的两个测试"变成一个说不清的歧义；分开则"根优先"是明确规则。
+  // ⚠️ 仍然只认**一级**目录（`tests/` 的下层不再递归）：`_retired/` 这类归档子目录
+  //   里的退役脚本**不该被当成当前测试**跑 —— 它们是留档，不是门禁。
   let testFile = explicitFile
   if (!testFile) {
-    const candidates = readdirSync(target).filter((f) => f.endsWith('.dev.test.ts'))
-    if (candidates.length === 0) fail(`目录里没有 *.dev.test.ts: ${target}`)
-    if (candidates.length > 1) {
-      fail(`目录里有多个 *.dev.test.ts（${candidates.join(', ')}）⇒ 请显式指定文件名`)
+    const searchDirs = [target, join(target, 'tests')]
+    let found: { dir: string; files: string[] } | null = null
+    for (const d of searchDirs) {
+      if (!existsSync(d)) continue
+      const candidates = readdirSync(d).filter((f) => f.endsWith('.dev.test.ts'))
+      if (candidates.length > 0) {
+        found = { dir: d, files: candidates }
+        break
+      }
     }
-    testFile = candidates[0]
+    if (!found) fail(`目录里没有 *.dev.test.ts（已查 ${searchDirs.join(' 、 ')}）`)
+    if (found.files.length > 1) {
+      fail(`目录里有多个 *.dev.test.ts（${found.files.join(', ')}）⇒ 请显式指定文件名`)
+    }
+    testFile = found.files[0]
+    return runTrajectoryTestFile(join(found.dir, testFile), found.dir)
   }
-  const testPath = join(target, testFile)
+  // 🔴 显式给文件名时**同样两处都找**（与缺省路径同一判据）。
+  //    ⛔ 否则会出现「不给名字能找到、给了名字反而找不到」—— 那是同一事实的两套规则。
+  for (const d of [target, join(target, 'tests')]) {
+    const p = join(d, testFile)
+    if (existsSync(p)) return runTrajectoryTestFile(p, d)
+  }
+  return runTrajectoryTestFile(join(target, testFile), target) // 落到统一报错
+}
+
+/**
+ * 跑一个确定的测试文件（`cmdRunTrajectoryTest` 的尾半段）。
+ *
+ * 拆出来是因为"找文件"与"跑文件"是两件事：前者有两条路径（根 ／ `tests/`），
+ * 后者只有一条。⛔ 别为了让一个函数容纳两条路径而把尾部复制两份（那就是两份会漂的实现）。
+ *
+ * `cwd` 取**测试文件所在目录**：轨迹自测常按 `./xxx` 相对路径取同目录素材。
+ */
+function runTrajectoryTestFile(testPath: string, cwd: string): void {
   if (!existsSync(testPath)) fail(`测试文件不存在: ${testPath}`)
 
   const bun = process.env.SERENITY_BUN ?? join(HOME_DIR, '.bun', 'bin', 'bun')
   if (!existsSync(bun)) fail(`找不到 bun: ${bun}（可用 SERENITY_BUN 覆盖）`)
 
   console.log(`[dsh-develop] run-trajectory-test: ${testPath}`)
-  console.log(`[dsh-develop] bun: ${bun}（cwd = 轨迹目录；只读，不改该目录任何文件）`)
+  console.log(`[dsh-develop] bun: ${bun}（cwd = ${cwd}；只读，不改该目录任何文件）`)
   // ⚠️ 用 pipe 再回放：要拿到 exit code，同时把被测程序的原话**逐字**透出（不夹杂工具噪音）
   const r = spawnSync(bun, [testPath], {
-    cwd: target,
+    cwd,
     encoding: 'utf-8',
     timeout: 300_000,
     env: process.env,

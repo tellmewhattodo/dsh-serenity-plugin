@@ -198,9 +198,11 @@ describe('msm-ops', () => {
     expect(findEntry(dir, 'hello')).not.toBeNull()
     // 执行断言仅在 TS 运行时在场时进行（无 bun → npx 需联网，机器耦合；见 HAS_BUN 说明）
     if (!HAS_BUN) return
-    const r = runMsm(dir, { action: 'exec', name: 'hello', args: [] }) as { exit: number; stdout: string }
-    expect(r.exit).toBe(0)
-    expect(r.stdout).toContain('hi')
+    // 🔴 2026-11-04 owner 令：成功路径返回**裸 stdout**（不再有 `{exit, stdout}` 信封）。
+    //    本用例的本意 = 「脚本跑成功、输出来了」⇒ 钉返回字符串且含 'hi'。
+    const r = runMsm(dir, { action: 'exec', name: 'hello', args: [] })
+    expect(typeof r).toBe('string')
+    expect(r).toContain('hi')
   })
 
   it('exec 未注册抛错', () => {

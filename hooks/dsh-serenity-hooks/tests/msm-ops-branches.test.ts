@@ -105,11 +105,13 @@ describe('msm-ops · exec 侧路径守卫（拦"注册表被手工改成指向�
     writeScript('ok.ts')
     writeRegistry([entry('ok')])
     // 真跑（本机有 bun）：空脚本 main() 立即退出 0。
-    // ⚠️ 读源码 :840 取证后确认：**非 json 包装**的形状是 `{name, exit, stdout, stderr}` ——
-    //    **没有 `ok` 字段**（`ok` 只在 `:836` 的 fmtJson 侧出现）⇒ 判据用 `exit === 0`。
-    const r = runMsm(dir, { action: 'exec', name: 'ok', args: [] }) as { name?: string; exit?: number }
-    expect(r.name).toBe('ok')
-    expect(r.exit).toBe(0)
+    // 🔴 2026-11-04 owner 令：**成功路径返回裸 stdout**（不再有 `{name, exit}` 信封）。
+    //    本用例的本意是「它真的进入了执行、并且跑成功了」——
+    //    钉「返回的是字符串（= 走了成功分支）」＋「不是结构」，即可达成本意，
+    //    ⛔ 不要为了让它过而放弃断言（D274：改钉本意，不放宽到能过）。
+    const r = runMsm(dir, { action: 'exec', name: 'ok', args: [] })
+    expect(typeof r).toBe('string')
+    expect(r).not.toHaveProperty('exit')
   }, 30_000)
 })
 
@@ -173,16 +175,17 @@ describe('msm-ops · path 型 flag 的两种取值形态（等号式 / 空格式
     // `:803` `const eq = businessArgs.find((a) => a.startsWith(\`--${flag.name}=\`))`
     writeScript('pf.ts')
     writeRegistry([PATH_FLAG_ENTRY])
-    const r = runMsm(dir, { action: 'exec', name: 'pf', args: ['--file=inside.txt'] }) as { exit?: number }
-    expect(r.exit).toBe(0) // 见 A3 注释：非 json 包装无 `ok` 键，判据用 exit
+    // 🔴 成功路径现在是裸 stdout（2026-11-04），本意 = "放行并跑成功" ⇒ 钉返回字符串
+    const r = runMsm(dir, { action: 'exec', name: 'pf', args: ['--file=inside.txt'] })
+    expect(typeof r).toBe('string')
   }, 30_000)
 
   it('🔴 C2：`--file <根内路径>` 空格式 ⇒ 放行（并进入执行）', () => {
     // `:807~810` 的 `indexOf` ＋ `businessArgs[idx + 1]` 分支
     writeScript('pf.ts')
     writeRegistry([PATH_FLAG_ENTRY])
-    const r = runMsm(dir, { action: 'exec', name: 'pf', args: ['--file', 'inside.txt'] }) as { exit?: number }
-    expect(r.exit).toBe(0)
+    const r = runMsm(dir, { action: 'exec', name: 'pf', args: ['--file', 'inside.txt'] })
+    expect(typeof r).toBe('string')
   }, 30_000)
 
   it('🔴 C3：等号式**根外**路径 ⇒ 拒绝（安全边界对两种形态都要成立）', () => {
@@ -202,8 +205,8 @@ describe('msm-ops · path 型 flag 的两种取值形态（等号式 / 空格式
     // 该三元 false ⇒ 跳过校验。若写成 `businessArgs[idx+1]!` 硬取 ⇒ undefined 传进校验函数会炸。
     writeScript('pf.ts')
     writeRegistry([PATH_FLAG_ENTRY])
-    const r = runMsm(dir, { action: 'exec', name: 'pf', args: ['--file'] }) as { exit?: number }
-    expect(r.exit).toBe(0)
+    const r = runMsm(dir, { action: 'exec', name: 'pf', args: ['--file'] })
+    expect(typeof r).toBe('string') // 照常跑成功（裸 stdout）
   }, 30_000)
 
   it('🔴 C6：非 path 型 flag 的取值**不做**越界校验（`type !== "path"` ⇒ continue）', () => {
@@ -211,8 +214,9 @@ describe('msm-ops · path 型 flag 的两种取值形态（等号式 / 空格式
     // 真故障形态：把 string 型 flag 的**故意根外**值传进去 ⇒ 必须原样放行（业务参数无损透传）。
     writeScript('sf.ts')
     writeRegistry([entry('sf', { flags: [{ name: 'note', type: 'string', description: 'n' }] })])
-    const r = runMsm(dir, { action: 'exec', name: 'sf', args: ['--note=../../etc/passwd'] }) as { exit?: number }
-    expect(r.exit).toBe(0) // 不是"应该拒绝"，而是"这一层不管它"（路径校验只归 path 型）
+    const r = runMsm(dir, { action: 'exec', name: 'sf', args: ['--note=../../etc/passwd'] })
+    // 不是"应该拒绝"，而是"这一层不管它"（路径校验只归 path 型）⇒ 照常跑成功
+    expect(typeof r).toBe('string')
   }, 30_000)
 })
 
@@ -225,29 +229,30 @@ describe('msm-ops · 协议 flag 只在**首位**识别（后置必须无损透�
     // `:775` `if (business[0] === '--list')` —— 源码注释逐字承诺：
     // 「业务参数中后置的同名 flag 一律**无损透传**（避免误拦截）」。
     // 既有用例**全部把协议 flag 放首位** ⇒ 这条承诺从未被验证。
-    // 🔴 判据 = 结果**不是**协议形状 `{msms:…}`，而是执行封装（证明没被当成协议吞掉）。
+    // 🔴 判据 = 结果**不是**协议形状 `{msms:…}`，而是执行结果（证明没被当成协议吞掉）。
+    //    2026-11-04 起成功路径是裸 stdout ⇒ "走了真执行路径"钉为"返回字符串"。
     writeScript('a.ts')
     writeRegistry([entry('a')])
-    const r = runMsm(dir, { action: 'exec', name: 'a', args: ['python', '--list'] }) as Record<string, unknown>
+    const r = runMsm(dir, { action: 'exec', name: 'a', args: ['python', '--list'] })
+    expect(typeof r).toBe('string')
     expect(r).not.toHaveProperty('msms')
-    expect(r.name).toBe('a') // 走了真执行路径
   }, 30_000)
 
   it('🔴 D2：`--schema` 不在首位 ⇒ 同样不触发协议（后置透传）', () => {
     writeScript('a.ts')
     writeRegistry([entry('a')])
-    const r = runMsm(dir, { action: 'exec', name: 'a', args: ['run', '--schema', 'a'] }) as Record<string, unknown>
+    const r = runMsm(dir, { action: 'exec', name: 'a', args: ['run', '--schema', 'a'] })
+    expect(typeof r).toBe('string')
     expect(r).not.toHaveProperty('flags') // 协议 schema 形状才有 flags
-    expect(r.name).toBe('a')
   }, 30_000)
 
   it('🔴 D3：`--format=json` 只在首位生效 ⇒ 后置时为**普通业务参数**（不进包装开关）', () => {
     // `:796` `const fmtJson = business[0] === '--format=json'`
     writeScript('a.ts')
     writeRegistry([entry('a')])
-    const r = runMsm(dir, { action: 'exec', name: 'a', args: ['x', '--format=json'] }) as { name?: string; data?: unknown }
-    // 首位才是开关 ⇒ 此处应走**非 json 包装**（无 data 字段）
-    expect(r.name).toBe('a')
+    const r = runMsm(dir, { action: 'exec', name: 'a', args: ['x', '--format=json'] })
+    // 首位才是开关 ⇒ 此处应走**非 json 包装**（无 data 字段，且成功时是裸 stdout）
+    expect(typeof r).toBe('string')
     expect(r).not.toHaveProperty('data')
   }, 30_000)
 
