@@ -32,6 +32,8 @@ export interface WireConfig {
     totpEnabled: boolean
   }
   persona: { mode: string; overrideText: string }
+  /** D287 脱口秀片段（面板里用 `---` 分隔多段） */
+  humor: { enabled: boolean; bits: string[] }
 }
 
 /**
@@ -204,6 +206,7 @@ export async function saveConfig(
       totpEnabled?: boolean
     }
     persona?: { mode?: string; overrideText?: string }
+    humor?: { enabled?: boolean; bits?: string[] }
   },
 ): Promise<WireConfig | null> {
   const res = await fetch(CONFIG_PATH, {

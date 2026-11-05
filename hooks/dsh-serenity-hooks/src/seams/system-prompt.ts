@@ -45,6 +45,8 @@ import {
 import { recordSkillInjections } from '../surface/usage.js'
 import { localstorePath, readGitTrack } from '../tools/localstore/service.js'
 import { readAdvancedSettings } from '../kernel/config.js'
+import { humorBlock } from './humor.js'
+import { workRegisterBlock } from './work-register.js'
 import { isTrajectoryConstrained, readTrajectoryConstraintAt } from '../trajectory/policy/profile.js'
 import { createTrajectoryPromptReader, trajectoryPromptBlock } from '../trajectory/prompt.js'
 import { planPromptInjection, type RawPromptInjection } from '../trajectory/prompt-injection.js'
@@ -56,6 +58,29 @@ function readPersonaSettings(): { mode: string; overrideText: string } {
     return { mode: s.persona.mode ?? '', overrideText: s.persona.overrideText ?? '' }
   } catch {
     return { mode: '', overrideText: '' }
+  }
+}
+
+/** 读取脱口秀片段配置（D287；读取失败 ⇒ 视为关闭，不阻断装配） */
+function readHumorSettings(): { enabled: boolean; bits: string[] } {
+  try {
+    const s = readAdvancedSettings()
+    return { enabled: s.humor.enabled === true, bits: s.humor.bits ?? [] }
+  } catch {
+    return { enabled: false, bits: [] }
+  }
+}
+
+/**
+ * 读取工作语域配置（2026-11-05；读取失败 ⇒ 视为**开**——它是效率项，缺省即生效）
+ * 🔴 注意与 humor 的缺省相反：humor 是装饰（缺省关），本项是效率（缺省开）。
+ */
+function readWorkRegisterSettings(): { enabled: boolean } {
+  try {
+    const s = readAdvancedSettings()
+    return { enabled: s.workRegister.enabled !== false }
+  } catch {
+    return { enabled: true }
   }
 }
 
@@ -517,6 +542,15 @@ export function serenitySystemPrompt(
   scope: string = DEFAULT_SESSION_SCOPE,
   /** 活跃轨迹目录名（给了才有第 ⑧ 段；未绑定轨迹 ⇒ undefined，不注入） */
   dirName?: string,
+  /**
+   * 会话 id —— **脱口秀块（D287）的随机种子**。
+   *
+   * 🔴 为什么必须是会话 id 而不是每次现抽：本函数**每次请求都重新求值**，
+   * 现抽会让系统提示词每轮都变（刷新页面都可能换段），且**无法解释为什么变了**。
+   * ⇒ 同一条会话永远是同一段（owner 要的"会话进行中不变动"），换会话才换。
+   * 未传（如某些冷路径）⇒ 不注入该块（`''`），行为等于该功能没开。
+   */
+  sessionId?: string,
 ): string {
   const persona = readPersonaSettings()
   const personaOn = persona.mode !== '' && persona.overrideText.trim() !== ''
@@ -543,11 +577,37 @@ export function serenitySystemPrompt(
   //    即 review F-05/R-14 那个悬置冲突。⇒ 现在两层**都注入**：persona 只能收窄表达，
   //    不能取消「输出前自检」这件事本身（EAP 是容器纪律，不是风格）。
   if (!plan.replaces.has('eap')) parts.push(eapBlock())
+  /**
+   * 🔴 **D287 脱口秀块（2026-11-04 owner 想法）** —— 纯装饰，不进任何判据路径。
+   *
+   * 位置：**质量层（EAP）之后、表达层（persona）之前** —— 先立标准，再路过一段闲笔，
+   * 最后才谈表达风格（persona 才是真正改风格的那一层）。
+   *
+   * ⚠️ **关闭 / 池空 / 无 sessionId ⇒ `humorBlock` 返回 `''`，不 push**
+   * ⇒ 装配结果**逐字节等于没有本功能**。这条由测试钉住（装饰品不许偷偷改变提示词）。
+   */
+  if (sessionId !== undefined && sessionId !== '') {
+    const hum = readHumorSettings()
+    const bit = humorBlock(sessionId, hum.bits, hum.enabled)
+    if (bit !== '') parts.push(bit)
+  }
   // 表达层（可选，紧跟质量层之后：先立标准，再谈表达）
   if (personaOn) {
     const expr = personaBlock(persona.mode, persona.overrideText)
     if (expr !== '') parts.push(expr)
   }
+  /**
+   * 🔴 **工作语域块（2026-11-05 owner 令）** —— 压开场/声明/重复要许可的摩擦。
+   *
+   * 位置：**persona 之后、运行时状态之前**。理由：它约束的是"怎么开口"，
+   * 必须排在**所有风格层之后**才不会被 persona 覆盖，又要在状态块之前
+   * （状态块讲的是当前事实，属于最贴近执行的上下文）。
+   *
+   * ⚠️ **关闭 ⇒ `workRegisterBlock` 返回 `''`，不 push** ⇒ 装配结果**逐字节等于没有本功能**。
+   */
+  const wr = readWorkRegisterSettings()
+  const wrBlock = workRegisterBlock(wr.enabled)
+  if (wrBlock !== '') parts.push(wrBlock)
   // S134 v1.16.12：运行时状态动态块（safe-mode / localstore）——利用系统提示词约束 agent 行为；
   // 按当前状态条件生成（开关/策略变更每轮装配即时生效）
   const state = [safeModeBlock(root), localstoreBlock(root)].filter((b) => b !== '').join('\n')
@@ -690,7 +750,13 @@ export function registerEntrySkillSectionGlobal(ctx: Context): void {
         //
         // ⚠️ 兼容期：`PROMPT.md` 不存在时，轨迹约束的旧 `systemPromptFile` 仍由
         // `trajectory/session.ts` 自己的 section 追加（见那里的说明）——存量 CCC 不会静默失去章程。
-        const base = serenitySystemPrompt(root, scope, boundDirNameFor(context.agent?.session))
+        const base = serenitySystemPrompt(
+          root,
+          scope,
+          boundDirNameFor(context.agent?.session),
+          // D287 脱口秀块的随机种子 —— 用会话 id ⇒ 同会话永远同段、换会话才换
+          (context.agent?.session as { id?: string } | undefined)?.id,
+        )
         const codeLine = codeModeAdaptationLine(ctx, context.scope)
         return codeLine ? `${base}\n${codeLine}` : base
       },
@@ -727,7 +793,13 @@ export function registerEntrySkillSection(agent: Agent, root: string): boolean {
       text: (context) => {
         // 🔴 T2（2026-10-19）：这里原先也有 `if (isTrajectoryConstrained(...)) return ''` 的防御性旁路，
         // 与全局版一起**删除** —— 装配只剩一条路径（理由见全局版的同段注释）。
-        const base = serenitySystemPrompt(root, scope, boundDirNameFor(agent.session))
+        const base = serenitySystemPrompt(
+          root,
+          scope,
+          boundDirNameFor(agent.session),
+          // D287 脱口秀块的随机种子（同上：会话 id）
+          (agent.session as { id?: string }).id,
+        )
         const codeLine = codeModeAdaptationLine(agent.ctx, context.scope)
         return codeLine ? `${base}\n${codeLine}` : base
       },

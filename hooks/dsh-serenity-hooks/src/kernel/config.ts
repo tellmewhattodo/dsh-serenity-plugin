@@ -65,6 +65,34 @@ interface PersonaSettings {
   overrideText: string
 }
 
+/**
+ * 脱口秀片段（2026-11-04 owner 想法）：
+ * 「收集一版各类脱口秀的片段内容，随机在会话开始 / rebuild 时注入一段到系统提示词，
+ *   这个不会改变什么行为，但是会让过程变得有趣」＋「要有个开关」。
+ *
+ * 🔴 **原文住在用户配置里，⛔ 不进仓**：本仓是 GitHub 公开仓，段子是有版权的创作文本。
+ *   机制在 ACC（怎么选、怎么注入），措辞在用户配置（填什么）—— 与 D23 同款分工。
+ */
+interface HumorSettings {
+  /** 总开关（缺省 **关**：纯装饰不该是默认状态） */
+  enabled: boolean
+  /**
+   * 片段池（每项 = 一段完整文本）。
+   * ⚠️ 面板里用 `---` 分隔多段；这里存拆好的数组。
+   */
+  bits: string[]
+}
+
+/**
+ * 工作语域（2026-11-05 owner 令）：压"开场/声明/重复要许可"的摩擦。
+ * 参考 dsh-purge 的提示词（Apache-2.0），但**只抄减摩擦那半边，⛔ 不抄取消判断那半边**
+ * —— 逐条边界见 `seams/work-register.ts` 的文件头。
+ */
+interface WorkRegisterSettings {
+  /** 总开关（缺省 **开**：这是效率项，不是装饰；owner 令的直接目的就是"避免低效"） */
+  enabled: boolean
+}
+
 /** F4d 建议问答页（v1.26.1）**已于 2026-10-15 整面退役**（owner 裁「砍掉外部问答」）
  * ⇒ 原 `PublicAskSettings`（key ＋ 容器白名单）连同 `AdvancedSettings.publicAsk` 一并删除。
  * 旧配置文件残留 `publicAsk` 节 ⇒ **静默忽略**（`mergeWithDefaults` 不再读它，幂等安全）。 */
@@ -79,6 +107,10 @@ interface PersonaSettings {
 interface AdvancedSettings {
   gateway: GatewaySettings
   persona: PersonaSettings
+  /** 脱口秀片段注入（2026-11-04）：纯装饰，缺省关 */
+  humor: HumorSettings
+  /** 工作语域（2026-11-05）：压开场/声明摩擦，缺省开 */
+  workRegister: WorkRegisterSettings
   /** 主动发送入口（v1.30.9）：**只绑 127.0.0.1** 的独立监听器——CCC 的 MSM 用它发消息给指定用户 */
   weixinApi: WeixinApiSettings
 }
@@ -108,6 +140,15 @@ export function defaultAdvancedSettings(): AdvancedSettings {
     persona: {
       mode: '',
       overrideText: '',
+    },
+    // 🔴 缺省 **关**：纯装饰不该是默认状态（owner 要开关，这里是它的默认值）
+    humor: {
+      enabled: false,
+      bits: [],
+    },
+    // 🔴 缺省 **开**：owner 令的目的就是"避免工作中的低效"，缺省关就等于没做
+    workRegister: {
+      enabled: true,
     },
     weixinApi: {
       enabled: true,
@@ -173,6 +214,8 @@ function mergeWithDefaults(raw: unknown): AdvancedSettings {
   const o = raw as Partial<AdvancedSettings>
   const gateway = (o.gateway ?? {}) as Partial<GatewaySettings>
   const persona = (o.persona ?? {}) as Partial<PersonaSettings>
+  const humor = (o.humor ?? {}) as Partial<HumorSettings>
+  const workRegister = (o.workRegister ?? {}) as Partial<WorkRegisterSettings>
   const weixinApi = (o.weixinApi ?? {}) as Partial<WeixinApiSettings>
   return {
     gateway: {
@@ -202,6 +245,18 @@ function mergeWithDefaults(raw: unknown): AdvancedSettings {
     persona: {
       mode: typeof persona.mode === 'string' ? persona.mode : def.persona.mode,
       overrideText: typeof persona.overrideText === 'string' ? persona.overrideText : def.persona.overrideText,
+    },
+    humor: {
+      enabled: typeof humor.enabled === 'boolean' ? humor.enabled : def.humor.enabled,
+      // 🔴 过滤空串：面板里用 `---` 分隔时会留下空段，空段进提示词就是纯噪声
+      bits: Array.isArray(humor.bits)
+        ? humor.bits.filter((b): b is string => typeof b === 'string' && b.trim() !== '')
+        : def.humor.bits,
+    },
+    workRegister: {
+      enabled: typeof workRegister.enabled === 'boolean'
+        ? workRegister.enabled
+        : def.workRegister.enabled,
     },
     weixinApi: {
       enabled: typeof weixinApi.enabled === 'boolean' ? weixinApi.enabled : def.weixinApi.enabled,
@@ -257,6 +312,21 @@ export function updateAdvancedSettings(patch: Partial<AdvancedSettings>): Advanc
         overrideText: typeof ps.overrideText === 'string' ? ps.overrideText : current.persona.overrideText,
       }
       : current.persona,
+    humor: patch.humor !== undefined
+      ? {
+        enabled: typeof patch.humor.enabled === 'boolean' ? patch.humor.enabled : current.humor.enabled,
+        bits: Array.isArray(patch.humor.bits)
+          ? patch.humor.bits.filter((b): b is string => typeof b === 'string' && b.trim() !== '')
+          : current.humor.bits,
+      }
+      : current.humor,
+    workRegister: patch.workRegister !== undefined
+      ? {
+        enabled: typeof patch.workRegister.enabled === 'boolean'
+          ? patch.workRegister.enabled
+          : current.workRegister.enabled,
+      }
+      : current.workRegister,
     weixinApi: patch.weixinApi !== undefined
       ? {
         enabled: typeof patch.weixinApi.enabled === 'boolean' ? patch.weixinApi.enabled : current.weixinApi.enabled,
@@ -316,6 +386,8 @@ interface AdvancedSettingsWire {
     totpEnabled: boolean
   }
   persona: PersonaSettings
+  humor: HumorSettings
+  workRegister: WorkRegisterSettings
 }
 
 /** 持久化 → wire（剥离 passHash/totpSecret；只留布尔） */
@@ -337,6 +409,8 @@ export function toWire(settings: AdvancedSettings): AdvancedSettingsWire {
       totpEnabled: settings.gateway.totpEnabled,
     },
     persona: settings.persona,
+    humor: settings.humor,
+    workRegister: settings.workRegister,
   }
 }
 
@@ -421,6 +495,14 @@ export function applyWirePatch(wire: Partial<AdvancedSettingsWire>): AdvancedSet
     if (typeof wire.persona.mode === 'string') psPatch.mode = wire.persona.mode
     if (typeof wire.persona.overrideText === 'string') psPatch.overrideText = wire.persona.overrideText
     patch.persona = psPatch
+  }
+  if (wire.humor !== undefined) {
+    const hPatch: HumorSettings = { ...current.humor }
+    if (typeof wire.humor.enabled === 'boolean') hPatch.enabled = wire.humor.enabled
+    if (Array.isArray(wire.humor.bits)) {
+      hPatch.bits = wire.humor.bits.filter((b): b is string => typeof b === 'string' && b.trim() !== '')
+    }
+    patch.humor = hPatch
   }
   return updateAdvancedSettings(patch)
 }

@@ -7,7 +7,8 @@ import { join } from 'node:path'
 import { registerGateway } from '../src/gateway/server.js'
 import { stopAllFaces, faceActive, facePort } from '../src/surface/faces.js'
 import { __setSimpleSourceForTest, defaultSimpleSettings } from '../src/surface/settings.js'
-import { hashPassword } from '../src/kernel/config.js'
+// 🔴 v1.119.0：口令登录退役 ⇒ 拿会话改走 TOTP（判据见 helpers/totp-fixture.ts 头注）
+import { totpAccount, totpLoginBody } from './helpers/totp-fixture.js'
 
 /**
  * gateway-branches.test.ts — 网关面：**cookieSecure 四分支与会话装配退路**（⑤ 第 58 件，S142 2026-09-26）
@@ -87,7 +88,8 @@ async function boot(cfg: { cookieSecure?: boolean }): Promise<{ gwPort: number; 
       enabled: true,
       host: '127.0.0.1',
       port: 0, // 🔴 内核分配 —— 绝不占用真实 3081
-      accounts: [{ id: 'a1', user: 'tester', passHash: hashPassword('pw') }],
+      accounts: [totpAccount('tester')],
+      totpEnabled: true,
       ...(cfg.cookieSecure === true ? { cookieSecure: true } : {}),
     },
     weixinApi: { enabled: false, port: 0 },
@@ -157,7 +159,7 @@ describe('gateway: cookieSecure=true 的四处 Secure 分支（既有用例只�
     const h = await boot({ cookieSecure: true })
     try {
       const csrf = await freshCsrf(h.gwPort)
-      const login = await postLogin(h.gwPort, 'user=tester&password=pw', csrf)
+      const login = await postLogin(h.gwPort, totpLoginBody('tester'), csrf)
       expect(login.status).toBe(302)
 
       const setCookie = String(login.headers['set-cookie'])
@@ -180,7 +182,7 @@ describe('gateway: cookieSecure=true 的四处 Secure 分支（既有用例只�
     const h = await boot({ cookieSecure: true })
     try {
       const csrf = await freshCsrf(h.gwPort)
-      const login = await postLogin(h.gwPort, 'user=tester&password=pw', csrf)
+      const login = await postLogin(h.gwPort, totpLoginBody('tester'), csrf)
       const token = cookieOf(login, 'serenity_session')
       expect(token).not.toBe('')
 
@@ -215,7 +217,7 @@ describe('gateway: cookieSecure=true 的四处 Secure 分支（既有用例只�
         method: 'POST',
         path: '/serenity/login',
         headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: `serenity_csrf=${csrf}` },
-        body: 'user=tester&password=pw',
+        body: totpLoginBody('tester'),
       })
       expect(bad.status).toBe(403) // 源码 :355 的 CSRF 失败分支（回登录页 + 新 csrf；**不是 500、也不是 302**）
 
@@ -241,7 +243,7 @@ describe('gateway: cookieSecure 缺省的正控方向（成对测 —— 累积�
     const h = await boot({})
     try {
       const csrf = await freshCsrf(h.gwPort)
-      const login = await postLogin(h.gwPort, 'user=tester&password=pw', csrf)
+      const login = await postLogin(h.gwPort, totpLoginBody('tester'), csrf)
       expect(login.status).toBe(302)
 
       const setCookie = String(login.headers['set-cookie'])
@@ -264,7 +266,7 @@ describe('gateway: cookieSecure 缺省的正控方向（成对测 —— 累积�
         method: 'POST',
         path: '/serenity/login',
         headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: `serenity_csrf=${csrf}` },
-        body: 'user=tester&password=pw',
+        body: totpLoginBody('tester'),
       })
       const csrfWarns = warn.mock.calls.map((c) => String(c[0])).filter((s) => s.includes('CSRF'))
       expect(csrfWarns.length).toBeGreaterThan(0) // 正控：告警确实打了（否则下面那条断言无意义）

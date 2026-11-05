@@ -32,10 +32,11 @@ vi.mock('@deepseek-ai/dsh-settings', () => ({
   settingsNamespace: (v: string) => v,
 }))
 
-import { hashPassword } from '../src/kernel/config.js'
+// 🔴 v1.119.0：口令登录退役 ⇒ 拿会话改走 TOTP（判据见 helpers/totp-fixture.ts 头注）
+import { totpAccount, totpLoginBody } from './helpers/totp-fixture.js'
+import { SESSION_ABSOLUTE_TTL_MS } from '../src/gateway/auth.js'
 import {
   loginPageHtml,
-  verifyGatewayLogin,
   issueToken,
   validateToken,
   revokeToken,
@@ -79,29 +80,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-describe('F1: verifyGatewayLogin（账号验证）', () => {
-  const accounts = [
-    { user: 'user-b', passHash: hashPassword('secret-1') },
-    { user: 'user-a', passHash: hashPassword('pw2') },
-  ]
-
-  it('正确账号密码 → true', () => {
-    expect(verifyGatewayLogin(accounts, 'user-b', 'secret-1')).toBe(true)
-    expect(verifyGatewayLogin(accounts, 'user-a', 'pw2')).toBe(true)
-  })
-
-  it('错误密码 → false', () => {
-    expect(verifyGatewayLogin(accounts, 'user-b', 'wrong')).toBe(false)
-  })
-
-  it('未知账号 → false', () => {
-    expect(verifyGatewayLogin(accounts, 'nobody', 'x')).toBe(false)
-  })
-
-  it('空账号列表 → 全 false', () => {
-    expect(verifyGatewayLogin([], 'user-b', 'secret-1')).toBe(false)
-  })
-})
+// 🔴 v1.119.0（2026-11-05 owner 令）：**口令登录整条退役** ⇒ 原
+// `describe('F1: verifyGatewayLogin（账号验证）')` 的 4 例**已删除**（被测函数不存在了）。
+// ⛔ 不要改成"跳过"或"改期望值"：那是把一条已作废的契约留在测试里当装饰。
+// 取而代之的判据在下面「登录面集成 ④」（口令即使正确也必须 401）。
 
 describe('F1: token（颁发/校验/登出，v1.22.4 会话化）', () => {
   it('颁发后有效（返回会话含 user）', () => {
@@ -624,7 +606,8 @@ describe('C4 块 A：面 B 冒烟（真实 listener + 真实 HTTP 往返）', ()
         enabled: true,
         host: '127.0.0.1',
         port: 0, // gateway 侧同样内核分配（`toWire`/`readAdvancedSettings` 对 0 无过滤，见 config-ops.ts:193）
-        accounts: [{ id: 'a1', user: 'tester', passHash: hashPassword('pw') }],
+        accounts: [totpAccount('tester')],
+        totpEnabled: true,
       },
       weixinApi: { enabled: false, port: 0 },
     }))
@@ -662,7 +645,7 @@ describe('C4 块 A：面 B 冒烟（真实 listener + 真实 HTTP 往返）', ()
           'x-csrf-token': csrf,
           cookie: `serenity_csrf=${csrf}`,
         },
-        body: 'user=tester&password=pw',
+        body: totpLoginBody('tester'),
       })
       expect(login.status).toBe(302)
       const sessionToken = /serenity_session=([^;]+)/.exec(String(login.headers['set-cookie'] ?? ''))?.[1] ?? ''
@@ -792,7 +775,8 @@ describe('v1.22.3 语义化：外部连接硬断不崩（真 socket ＋ 真上�
         enabled: true,
         host: '127.0.0.1',
         port: 0, // 内核分配（同 C4 冒烟：不猜端口段，防 EADDRINUSE ⇒ 面宿主重试 10s 挂死）
-        accounts: [{ id: 'a1', user: 'tester', passHash: hashPassword('pw') }],
+        accounts: [totpAccount('tester')],
+        totpEnabled: true,
       },
       weixinApi: { enabled: false, port: 0 },
     }))
@@ -820,7 +804,7 @@ describe('v1.22.3 语义化：外部连接硬断不崩（真 socket ＋ 真上�
         res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf-8') }))
       })
       req.on('error', reject)
-      req.end('user=tester&password=pw')
+      req.end(totpLoginBody('tester'))
     })
     const token = /serenity_session=([^;]+)/.exec(String(loginRes.headers['set-cookie'] ?? ''))?.[1] ?? ''
     expect(loginRes.status).toBe(302)
@@ -1025,10 +1009,10 @@ describe('面 B 集成：登录三态 / 账号锁定 / TOTP 二选一与防重�
   const currentTotpCode = (): string => totpCode(TOTP_SECRET, Math.floor(Date.now() / 1000 / TOTP_STEP_SECONDS))
 
   it('① CSRF 缺失 → 403 ＋ 回注新 csrf（重试表单不再是 missing）', async () => {
-    const h = await boot({ accounts: [{ id: 'a1', user: 'tester', passHash: hashPassword('pw') }] })
+    const h = await boot({ accounts: [totpAccount('tester')], totpEnabled: true })
     try {
       // 无 csrf cookie、无表单字段、无 x-csrf-token（= 跨站伪造/直接 curl 的形态）
-      const res = await postLogin(h.gwPort, 'user=tester&password=pw')
+      const res = await postLogin(h.gwPort, totpLoginBody('tester'))
       expect(res.status).toBe(403)
       expect(res.body).toContain('会话校验失败')
       expect(res.body).not.toContain('upstream-main-body')
@@ -1041,26 +1025,27 @@ describe('面 B 集成：登录三态 / 账号锁定 / TOTP 二选一与防重�
     }
   }, 20_000)
 
-  it('② 密码错 → 401；第 5 次失败起文案转「已锁定」；再试 → 429 ＋ retry-after', async () => {
+  it('② 验证码错 → 401；第 5 次失败起文案转「已锁定」；再试 → 429 ＋ retry-after', async () => {
     // 账号名专用于本用例：失败状态是**模块级按 user 存**的（跨用例污染会让计数不确定）
-    const h = await boot({ accounts: [{ id: 'lk1', user: 'lock-user', passHash: hashPassword('pw') }] })
+    const h = await boot({ accounts: [totpAccount('lock-user', 'lk1')], totpEnabled: true })
     try {
-      const first = await postLogin(h.gwPort, 'user=lock-user&password=wrong', await freshCsrf(h.gwPort))
+      // 🔴 v1.119.0：失败形态从"密码错"改成"验证码错"（口令已退役）
+      const first = await postLogin(h.gwPort, 'user=lock-user&code=000000', await freshCsrf(h.gwPort))
       expect(first.status).toBe(401)
-      expect(first.body).toContain('用户名、密码或验证码错误')
+      expect(first.body).toContain('用户名或验证码错误')
       expect(cookieOf(first, 'serenity_csrf')).not.toBe('')
 
       // 再失败 4 次（合计 5 = FAIL_LOCK_THRESHOLD）⇒ 第 5 次的响应**已经带着锁定文案**回来
       let fifth: RawRes | undefined
       for (let i = 0; i < 4; i++) {
-        fifth = await postLogin(h.gwPort, 'user=lock-user&password=wrong', await freshCsrf(h.gwPort))
+        fifth = await postLogin(h.gwPort, 'user=lock-user&code=000000', await freshCsrf(h.gwPort))
       }
       expect(fifth?.status).toBe(401)
       expect(fifth?.body).toContain('尝试过多，账号已锁定')
-      expect(fifth?.body).not.toContain('用户名、密码或验证码错误')
+      expect(fifth?.body).not.toContain('用户名或验证码错误')
 
-      // 已锁定 ⇒ **密码正确也不放行**（锁定前置在密码校验之前）
-      const locked = await postLogin(h.gwPort, 'user=lock-user&password=pw', await freshCsrf(h.gwPort))
+      // 已锁定 ⇒ **验证码正确也不放行**（锁定前置在凭据校验之前）
+      const locked = await postLogin(h.gwPort, totpLoginBody('lock-user'), await freshCsrf(h.gwPort))
       expect(locked.status).toBe(429)
       expect(Number(locked.headers['retry-after'])).toBeGreaterThan(0)
       expect(locked.body).toContain('账号已锁定，请')
@@ -1070,54 +1055,57 @@ describe('面 B 集成：登录三态 / 账号锁定 / TOTP 二选一与防重�
     }
   }, 25_000)
 
-  it('③ TOTP 二选一：只给正确 code（密码留空）→ 302 ＋ 会话可用；同 counter 重放 → 401', async () => {
-    const h = await boot({
-      accounts: [{ id: 't1', user: 'totp-user', passHash: hashPassword('pw'), totpSecret: TOTP_SECRET }],
-      totpEnabled: true,
-    })
+  it('③ TOTP 登录 → 302 ＋ 会话可用 ＋ cookie 带 Max-Age（记住登录）；同 counter 重放 → 401', async () => {
+    const h = await boot({ accounts: [totpAccount('totp-user', 't1')], totpEnabled: true })
     try {
-      const code = currentTotpCode()
-      const ok = await postLogin(h.gwPort, `user=totp-user&password=&code=${code}`, await freshCsrf(h.gwPort))
+      const ok = await postLogin(h.gwPort, totpLoginBody('totp-user'), await freshCsrf(h.gwPort))
       expect(ok.status).toBe(302)
       expect(String(ok.headers.location)).toBe('/')
       const token = cookieOf(ok, 'serenity_session')
       expect(token).not.toBe('')
+
+      // 🔴 v1.119.0 新增判据：cookie **必须带 Max-Age**（否则关浏览器即掉线 = owner 说的"记住"没做到）
+      //    且 Max-Age 必须与 SESSION_ABSOLUTE_TTL_MS 同源 —— ⛔ 不是随便一个正数
+      const setCookie = String(ok.headers['set-cookie'])
+      const maxAge = Number(/Max-Age=(\d+)/.exec(setCookie)?.[1] ?? 0)
+      expect(maxAge).toBe(Math.floor(SESSION_ABSOLUTE_TTL_MS / 1000))
 
       // 会话真有效（不是"只回了个 302"）：拿它反代拿得到上游体
       const proxied = await raw({ port: h.gwPort, method: 'GET', path: '/', headers: { cookie: `serenity_session=${token}` } })
       expect(proxied.body).toBe('upstream-main-body')
 
       // 防重放：同一 code 再来一次 ⇒ 不接受（同 counter 已在 lastTotpCounter 里）
-      const replay = await postLogin(h.gwPort, `user=totp-user&password=&code=${code}`, await freshCsrf(h.gwPort))
+      const replay = await postLogin(h.gwPort, totpLoginBody('totp-user'), await freshCsrf(h.gwPort))
       expect(replay.status).toBe(401)
     } finally {
       await h.cleanup()
     }
   }, 20_000)
 
-  it('④ 负控：totpEnabled=false → 正确 code 也不接受；而同账号密码仍可登录', async () => {
+  it('④ 负控：totpEnabled=false → 正确 code 也不接受；且**口令也不再放行**（两把钥匙都没了）', async () => {
     const h = await boot({
-      accounts: [{ id: 't2', user: 'totp-off-user', passHash: hashPassword('pw'), totpSecret: TOTP_SECRET }],
+      accounts: [totpAccount('totp-off-user', 't2')],
       // 刻意不给 totpEnabled ⇒ 安全默认 = 未配置即不可用
     })
     try {
-      const res = await postLogin(h.gwPort, `user=totp-off-user&password=&code=${currentTotpCode()}`, await freshCsrf(h.gwPort))
+      const res = await postLogin(h.gwPort, totpLoginBody('totp-off-user'), await freshCsrf(h.gwPort))
       expect(res.status).toBe(401)
-      expect(res.body).toContain('用户名、密码或验证码错误')
+      expect(res.body).toContain('用户名或验证码错误')
 
-      // 🔴 正控：同一账号、同一夹具，改用密码 ⇒ 302。否则上一条 401 可能只是夹具坏了
-      const pwOk = await postLogin(h.gwPort, 'user=totp-off-user&password=pw', await freshCsrf(h.gwPort))
-      expect(pwOk.status).toBe(302)
-      expect(cookieOf(pwOk, 'serenity_session')).not.toBe('')
+      // 🔴 反向钉（v1.119.0 的核心）：口令字段**即使正确也不放行**。
+      //    这条是本次改造的**判别力所在** —— 若哪天有人把 passOk 加回去，这里立刻红。
+      const pwAttempt = await postLogin(h.gwPort, 'user=totp-off-user&password=pw', await freshCsrf(h.gwPort))
+      expect(pwAttempt.status).toBe(401)
+      expect(cookieOf(pwAttempt, 'serenity_session')).toBe('')
     } finally {
       await h.cleanup()
     }
   }, 20_000)
 
   it('⑤ 登出 POST → 302 ＋ 清 cookie（Max-Age=0）；旧 token 随即失效', async () => {
-    const h = await boot({ accounts: [{ id: 'a1', user: 'tester', passHash: hashPassword('pw') }] })
+    const h = await boot({ accounts: [totpAccount('tester')], totpEnabled: true })
     try {
-      const login = await postLogin(h.gwPort, 'user=tester&password=pw', await freshCsrf(h.gwPort))
+      const login = await postLogin(h.gwPort, totpLoginBody('tester'), await freshCsrf(h.gwPort))
       expect(login.status).toBe(302)
       const token = cookieOf(login, 'serenity_session')
       expect(token).not.toBe('')
@@ -1239,7 +1227,8 @@ describe('面 B 集成：HTML 注入反代（含 gzip 白屏根因）/ workspace
         enabled: true,
         host: '127.0.0.1',
         port: 0,
-        accounts: [{ id: 'a1', user: 'tester', passHash: hashPassword('pw') }],
+        accounts: [totpAccount('tester')],
+        totpEnabled: true,
         ...(cfg.workspaces === undefined ? {} : { workspaces: cfg.workspaces }),
         ...(cfg.allowWorkspaceCreate === undefined ? {} : { allowWorkspaceCreate: cfg.allowWorkspaceCreate }),
       },
@@ -1266,7 +1255,7 @@ describe('面 B 集成：HTML 注入反代（含 gzip 白屏根因）/ workspace
       method: 'POST',
       path: '/serenity/login',
       headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-csrf-token': csrf, cookie: `serenity_csrf=${csrf}` },
-      body: 'user=tester&password=pw',
+      body: totpLoginBody('tester'),
     })
     expect(login.status).toBe(302)
     const token = cookieOf(login, 'serenity_session')

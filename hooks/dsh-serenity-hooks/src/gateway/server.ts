@@ -28,7 +28,7 @@
 
 import type { Context } from 'cordis'
 import { request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
-import { readAdvancedSettings, migrateLegacyLocalstore, verifyPassword } from '../kernel/config.js'
+import { readAdvancedSettings, migrateLegacyLocalstore } from '../kernel/config.js'
 import { cccRootForCwd } from '../kernel/ccc-roots.js'
 import { readSimpleSettings } from '../surface/settings.js'
 // C4 块 A：listener 生命周期归面宿主（本面=面 B，端口语义见 kernel/ports.ts 的 FACE_PORTS.gateway）
@@ -39,6 +39,8 @@ import {
   issueToken,
   revokeToken,
   validateToken,
+  // 🔴 会话**绝对**寿命上限：cookie 的 Max-Age 必须与它同源（⛔ 不写字面量，两处漂移=静默失效）
+  SESSION_ABSOLUTE_TTL_MS,
   type GatewaySession,
   resetFailState,
   recordLoginFailure,
@@ -79,8 +81,11 @@ export {
 } from './proxy.js'
 export {
   loginPageHtml,
-  verifyGatewayLogin,
+  // 🔴 v1.119.0：`verifyGatewayLogin` **不再导出** —— 口令登录整条退役（见 auth.ts 头注）。
+  //    ⛔ 不要为了"兼容旧 import"把它加回来：那会让"口令还能用"这个错误印象继续存在。
   SESSION_TTL_MS,
+  SESSION_ABSOLUTE_TTL_MS,
+  sessionStorePath,
   issueToken,
   revokeToken,
   validateToken,
@@ -338,7 +343,8 @@ async function startGateway(
       req.on('end', () => {
         const params = new URLSearchParams(body)
         const user = params.get('user') ?? ''
-        const password = params.get('password') ?? ''
+        // ⚠️ `password` **不读**（v1.119.0 口令登录退役）。旧页面若仍提交该字段，
+        // 它会被忽略 —— 这正是期望行为：字段存在不等于它有效力。
         const code = params.get('code') ?? ''
         const remote = req.socket.remoteAddress ?? 'unknown'
 
@@ -376,12 +382,15 @@ async function startGateway(
 
         const accounts = getAccounts()
         const account = accounts.find((a) => a.user === user)
-        // v1.24.6 用户拍板：登录凭据**二选一**——密码 或 Authenticator 码，任一正确即登录。
-        // （此前 v1.22.4 为双因素：密码 && TOTP 都必需；二选一后绑定验证器的账号两种方式皆可）
-        const passOk = account !== undefined && password !== '' && verifyPassword(password, account.passHash)
 
-        // TOTP 校验独立于密码（不要求 passOk 前置）——totpEnabled 关闭时完全不接受 TOTP
-        // （含已绑定账号；安全默认：未配置即不可用）。防重放：同 counter 30s 窗口内拒绝复用。
+        // 🔴 v1.119.0（2026-11-05 owner 令）：**账号密码登录整条退役，只认 TOTP**。
+        // 原话：「砍掉账号密码登录，只允许 authenticator 登录 ⋯ 原因是加强安全性」。
+        //
+        // ⛔ **不要恢复 `passOk`／`verifyPassword`**。`password` 字段仍从表单读出来是为了
+        //    **兼容旧页面缓存**（不报错），但**它不参与任何判定**。
+        // ⚠️ `totpEnabled` 这个开关**保留**，但它现在只决定"是否启用 TOTP 登录"：
+        //    关掉它 = **没有任何登录方式**（网关不可登录）。这不是缺陷，是刻意——
+        //    口令没了，TOTP 再关掉就没有第二把钥匙了，此时把网关关掉才是正确操作。
         let totpOk = false
         if (totpEnabled && account !== undefined
           && typeof account.totpSecret === 'string' && account.totpSecret !== '') {
@@ -391,24 +400,30 @@ async function startGateway(
           if (totpOk && hit !== null) lastTotpCounter.set(account.id, hit)
         }
 
-        if (passOk || totpOk) {
+        if (totpOk) {
           resetFailState(user)
           const token = issueToken(user)
+          // 🔴 cookie 带 Max-Age ⇒ 浏览器**关闭后仍保留**（owner 要的"记住登录"）。
+          //    服务端侧对应的是 SESSION_ABSOLUTE_TTL_MS（30 天硬上限），两者必须同量级：
+          //    cookie 比服务端活得久 ⇒ 用户拿着一个**必死**的 cookie（表现为"莫名其妙的登录页"）。
+          //    ⚠️ 取 `SESSION_ABSOLUTE_TTL_MS` 的秒数，⛔ 不写字面量（两处漂移 = 静默失效）。
+          const maxAgeSec = Math.floor(SESSION_ABSOLUTE_TTL_MS / 1000)
           res.writeHead(302, {
             location: '/',
-            'set-cookie': `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/${cookieSecure ? '; Secure' : ''}`,
+            'set-cookie': `${cookieName}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAgeSec}${cookieSecure ? '; Secure' : ''}`,
           })
           res.end()
-          console.log(`[serenity-hooks] 登录成功: user=${user} ip=${remote} via=${passOk ? 'password' : 'totp'}`)
+          console.log(`[serenity-hooks] 登录成功: user=${user} ip=${remote} via=totp`)
           return
         }
 
-        // 失败路径：密码/TOTP 任一失败都计入账号锁定（防组合爆破）
+        // 失败路径：TOTP 失败计入账号锁定（防爆破）。
+        // ⚠️ 账号不存在与"码错"走同一条文案——不泄露账号是否存在。
         const lockMs = recordLoginFailure(user)
         console.warn(`[serenity-hooks] 登录失败: user=${user} ip=${remote}${lockMs > 0 ? ` 锁定=${Math.ceil(lockMs / 60000)}min` : ''}`)
         const msg = lockMs > 0
           ? `尝试过多，账号已锁定 ${Math.ceil(lockMs / 60000)} 分钟`
-          : '用户名、密码或验证码错误'
+          : '用户名或验证码错误'
         // v1.24.9：失败页注入新 csrf（form + cookie 同步）——用户重试表单带字段
         const retryCsrf = newCsrfToken()
         res.writeHead(401, {

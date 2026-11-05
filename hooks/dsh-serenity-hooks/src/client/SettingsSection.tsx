@@ -30,6 +30,7 @@ import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-
 import { useState } from 'react'
 import { AccountsEditor } from './AccountsEditor.js'
 import { PersonaEditor } from './PersonaEditor.js'
+import { HumorEditor } from './HumorEditor.js'
 import { ImBridgeEditor } from './ImBridgeEditor.js'
 import './SettingsSection.css'
 
@@ -309,6 +310,13 @@ export function SettingsSection(props: SettingsSectionProps): React.JSX.Element 
       </Group>
       <Collapse title="彩蛋模式" desc="替换输出风格提示词（默认关闭）">
         <PersonaEditor />
+      </Collapse>
+
+      {/* D287 脱口秀片段（2026-11-04 owner 想法）：独立的折叠块，⛔ 不并进"彩蛋模式"——
+          彩蛋改的是**输出风格**（会改变行为），而它**纯装饰、不影响任何判断**。
+          两类东西放同一个标题下，读者会以为它们是一回事。 */}
+      <Collapse title="脱口秀片段" desc="会话开始时随机注入一段到系统提示词（纯装饰，默认关闭）">
+        <HumorEditor />
       </Collapse>
 
       {/* IM 桥（原「微信桥」，2026-10-19 泛化）：CCC 级配置——无顶层 plugin 开关

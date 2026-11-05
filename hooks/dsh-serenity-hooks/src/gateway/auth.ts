@@ -10,63 +10,196 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { existsSync, readFileSync, writeFileSync, chmodSync, renameSync } from 'node:fs'
+import { join } from 'node:path'
 import type { IncomingMessage } from 'node:http'
-import { verifyPassword } from '../kernel/config.js'
 
-// ── 账号验证（纯逻辑）：user + password 对 accounts 匹配（scrypt）──
+// ── 账号验证 ──
+//
+// 🔴 **v1.119.0（2026-11-05 owner 令）：账号密码登录整条退役，网关只认 Authenticator（TOTP）。**
+//
+// 原话：「砍掉账号密码登录，只允许 authenticator 登录 ⋯ 原因是加强安全性」。
+//
+// ⛔ **不要加回口令校验的调用**：口令可被复用/撞库/肩窥，TOTP 是动态的且绑定设备。
+// ⇒ 数据模型里的 `passHash` 字段**保留但不参与认证**（见 `kernel/config.ts` 的退役注记）；
+//   保留的理由只是**旧配置文件读得进来**，不是"还能用"。
+// ⇒ 判据（可机械执行，见 `tests/gateway-totp-only.test.ts`）：
+//   `src/gateway/server.ts` 里**不许出现 `password` 参与判定的表达式** ——
+//   即 `passOk` 这个标识符必须 0 命中。⛔ 只 grep 函数名是弱判据（注释里就会命中）。
 
-export function verifyGatewayLogin(
-  accounts: readonly { user: string; passHash: string }[],
-  user: string,
-  password: string,
-): boolean {
-  const account = accounts.find((a) => a.user === user)
-  if (!account) return false
-  return verifyPassword(password, account.passHash)
-}
+// ── 会话（token + 双 TTL + 主动登出 + **磁盘持久化**）──
 
-// ── 会话（token + TTL + 主动登出）──
-
-/** 会话滑动过期时长（毫秒）：24h 无活动 → 失效（用户重新登录） */
+/** 会话**空闲**过期时长（毫秒）：24h 无活动 → 失效 */
 export const SESSION_TTL_MS = 24 * 60 * 60 * 1000
+
+/**
+ * 会话**绝对**寿命上限（毫秒）：30 天。
+ *
+ * 🔴 为什么必须有它（owner 要"记住登录"时最容易踩的坑）：
+ * 只有滑动 TTL 的会话表，**只要用户每天都用，就永远不会过期** ——
+ * 那不是"记住我"，那是"永不过期"。安全上必须有一条**不随活动延长的硬上限**，
+ * 到点强制重新登录（重新出示 TOTP）。
+ *
+ * owner 原话：「考虑 cookie 有效期做法」⇒ 这条就是 cookie `Max-Age` 的服务端对应物。
+ */
+export const SESSION_ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 export interface GatewaySession {
   token: string
   /** 最后活动时间（滑动续期：每次校验通过刷新） */
   lastActiveAt: number
+  /** 签发时间（**绝对寿命基准**，活动不延长它） */
+  createdAt: number
   /** 绑定账号（审计/登出定位） */
   user: string
 }
 
-/** 内存会话表（重启即清空——用户决策） */
+/**
+ * 会话表。
+ *
+ * 🔴 **v1.119.0 变更（owner 令「重启后仍然有效」）**：此前是纯内存、重启即清空。
+ * 现在是**内存 + 磁盘**：启动时按需加载，变更时落盘。
+ * ⚠️ 旧注释写着「重启即清空——用户决策」，**那条决策已被本次 owner 令反转**。
+ */
 const sessions = new Map<string, GatewaySession>()
+
+/** 是否已尝试过从磁盘加载（只尝试一次；文件不存在也算尝试过） */
+let loadAttempted = false
+
+/**
+ * 会话持久化文件路径。
+ * 与 `SERENITY_HOOKS_CONFIG` 同目录（该 env 是测试注入点 ⇒ 测试天然隔离，不会碰真实文件）。
+ * 权限 0600：文件里是**可直接登录的活 token**，比密码 hash 更敏感。
+ */
+export function sessionStorePath(): string {
+  const override = process.env.SERENITY_HOOKS_CONFIG
+  if (override !== undefined && override !== '') {
+    const idx = override.lastIndexOf('/')
+    if (idx > 0) return join(override.slice(0, idx), 'serenity-gateway-sessions.json')
+  }
+  const dshHome = process.env.DSH_HOME ?? join(process.env.HOME ?? '', '.dsh')
+  return join(dshHome, 'serenity-gateway-sessions.json')
+}
+
+/** 从磁盘加载会话（幂等；坏文件 ⇒ 视为空表，不让坏数据挡住登录） */
+function ensureLoaded(): void {
+  if (loadAttempted) return
+  loadAttempted = true
+  const p = sessionStorePath()
+  if (!existsSync(p)) return
+  try {
+    const raw = JSON.parse(readFileSync(p, 'utf-8')) as unknown
+    if (!Array.isArray(raw)) return
+    const now = Date.now()
+    for (const item of raw) {
+      if (item === null || typeof item !== 'object') continue
+      const s = item as Partial<GatewaySession>
+      if (typeof s.token !== 'string' || s.token === '') continue
+      if (typeof s.user !== 'string' || s.user === '') continue
+      const created = typeof s.createdAt === 'number' ? s.createdAt : 0
+      const active = typeof s.lastActiveAt === 'number' ? s.lastActiveAt : created
+      // 加载时**就**做一次双 TTL 过滤：过期的不要带进内存（否则等于延长了寿命）
+      if (created === 0) continue
+      if (now - active > SESSION_TTL_MS) continue
+      if (now - created > SESSION_ABSOLUTE_TTL_MS) continue
+      sessions.set(s.token, { token: s.token, user: s.user, createdAt: created, lastActiveAt: active })
+    }
+  } catch {
+    // 坏 JSON ⇒ 空表。**不删除文件**（保留现场供排查）；下次写盘会覆盖它。
+  }
+}
+
+/**
+ * 落盘（原子替换：临时文件 → rename）。
+ *
+ * 🔴 为什么用 rename 而不是直接 write：**写到一半断电会留下半截 JSON**，
+ * 下次加载就整表丢失（= 所有人都被登出，且没有任何信号）。rename 是原子的。
+ */
+function persist(): void {
+  const p = sessionStorePath()
+  const tmp = `${p}.tmp`
+  try {
+    const list = [...sessions.values()]
+    writeFileSync(tmp, JSON.stringify(list, null, 2) + '\n', 'utf-8')
+    try { chmodSync(tmp, 0o600) } catch { /* 只读挂载等：不阻断 */ }
+    renameSync(tmp, p)
+    try { chmodSync(p, 0o600) } catch { /* 同上 */ }
+  } catch {
+    // 写盘失败**不阻断登录**：内存会话仍然有效，只是重启后丢。
+    // ⚠️ 这是**有意的降级**（可用性优先），但意味着"记住登录"在磁盘满/只读时不成立。
+  }
+}
 
 /** 颁发会话 token（Hex 32 字节） */
 export function issueToken(user: string): string {
+  ensureLoaded()
   const token = randomBytes(32).toString('hex')
-  sessions.set(token, { token, lastActiveAt: Date.now(), user })
+  const now = Date.now()
+  sessions.set(token, { token, lastActiveAt: now, createdAt: now, user })
+  persist()
   return token
 }
 
 /** 主动吊销会话（登出）；返回是否确实存在 */
 export function revokeToken(token: string): boolean {
-  return sessions.delete(token)
+  ensureLoaded()
+  const had = sessions.delete(token)
+  if (had) persist()
+  return had
+}
+
+/** 吊销某账号的全部会话（改 TOTP 绑定/删账号时用：旧 token 不该继续有效） */
+export function revokeAllFor(user: string): number {
+  ensureLoaded()
+  let n = 0
+  for (const [token, s] of sessions) {
+    if (s.user === user) {
+      sessions.delete(token)
+      n += 1
+    }
+  }
+  if (n > 0) persist()
+  return n
 }
 
 /**
- * 校验 token 有效性（滑动过期：有效则刷新 lastActiveAt）。
+ * 校验 token 有效性（**双 TTL**：空闲滑动 ＋ 绝对上限；有效则刷新 lastActiveAt）。
  * @returns 有效会话或 undefined
  */
 export function validateToken(token: string | undefined): GatewaySession | undefined {
   if (typeof token !== 'string' || token === '') return undefined
+  ensureLoaded()
   const session = sessions.get(token)
   if (session === undefined) return undefined
-  if (Date.now() - session.lastActiveAt > SESSION_TTL_MS) {
+  const now = Date.now()
+  // 绝对寿命到点 ⇒ 失效（活动不延长它）
+  if (now - session.createdAt > SESSION_ABSOLUTE_TTL_MS) {
     sessions.delete(token)
+    persist()
     return undefined
   }
-  session.lastActiveAt = Date.now() // 滑动续期
+  // 空闲超时 ⇒ 失效
+  if (now - session.lastActiveAt > SESSION_TTL_MS) {
+    sessions.delete(token)
+    persist()
+    return undefined
+  }
+  session.lastActiveAt = now // 滑动续期
+  // ⚠️ 每次校验都落盘会产生大量写；只在**续期跨度够大**时写（见下）
+  maybePersistOnTouch(session)
   return session
+}
+
+/** 上次落盘的 lastActiveAt 快照（token → 时间），用于给"每轮请求都写盘"限流 */
+const lastPersistedAt = new Map<string, number>()
+/** 续期落盘的最小间隔：小于它的活动只改内存，不写盘（重启后最多丢这么多活动时间） */
+const PERSIST_TOUCH_INTERVAL_MS = 10 * 60 * 1000
+
+function maybePersistOnTouch(session: GatewaySession): void {
+  const prev = lastPersistedAt.get(session.token)
+  if (prev !== undefined && session.lastActiveAt - prev < PERSIST_TOUCH_INTERVAL_MS) return
+  lastPersistedAt.set(session.token, session.lastActiveAt)
+  persist()
 }
 
 // ── 失败锁定（账号维度；不按 IP——用户要求随时随地访问）──
@@ -289,13 +422,11 @@ button:active{background:#2563eb}
 ${csrfField}
 <label for="f-user">用户名</label>
 <input id="f-user" type="text" name="user" placeholder="用户名" autocomplete="username" autocapitalize="none" autocorrect="off" required autofocus enterkeyhint="next">
-<label for="f-pass">密码</label>
-<input id="f-pass" type="password" name="password" placeholder="密码" autocomplete="current-password" enterkeyhint="next">
-<label for="f-code">验证码（已绑定 Authenticator 时填写）</label>
-<input id="f-code" type="text" name="code" placeholder="6 位验证码" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" enterkeyhint="go">
+<label for="f-code">Authenticator 验证码</label>
+<input id="f-code" type="text" name="code" placeholder="6 位验证码" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required enterkeyhint="go">
 <button type="submit">登录</button>
 <div class="error">${extra}</div>
-<p class="hint">已绑定验证器的账号：密码与验证码填一项即可</p>
+<p class="hint">仅支持 Authenticator 验证码登录（口令登录已停用）</p>
 </form>
 <p class="foot">Serenity ACC · dsh-serenity-hooks</p>
 </div></body></html>`

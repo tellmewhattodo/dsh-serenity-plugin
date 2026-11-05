@@ -44,7 +44,8 @@ vi.mock('@deepseek-ai/dsh-settings', () => ({
   settingsNamespace: (v: string) => v,
 }))
 
-import { hashPassword } from '../src/kernel/config.js'
+// 🔴 v1.119.0：口令登录退役 ⇒ 拿会话改走 TOTP（判据见 helpers/totp-fixture.ts 头注）
+import { totpAccount, totpLoginBody } from './helpers/totp-fixture.js'
 import { registerGateway } from '../src/gateway/server.js'
 import { faceActive, facePort, stopAllFaces } from '../src/surface/faces.js'
 import { __setSimpleSourceForTest, defaultSimpleSettings } from '../src/surface/settings.js'
@@ -101,7 +102,8 @@ async function boot(server: import('node:http').Server, mainPort: number): Promi
       enabled: true,
       host: '127.0.0.1',
       port: 0, // 内核分配（不猜端口段，防 EADDRINUSE ⇒ 面宿主重试挂死）
-      accounts: [{ id: 'a1', user: 'tester', passHash: hashPassword('pw') }],
+      accounts: [totpAccount('tester')],
+      totpEnabled: true,
     },
     weixinApi: { enabled: false, port: 0 },
   }))
@@ -177,7 +179,7 @@ function loginRaw(port: number, csrf: string): Promise<{ status: number; cookie:
       },
     )
     req.on('error', reject)
-    req.end('user=tester&password=pw')
+    req.end(totpLoginBody('tester'))
   })
 }
 
