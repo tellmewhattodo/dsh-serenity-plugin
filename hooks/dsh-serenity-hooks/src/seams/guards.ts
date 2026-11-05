@@ -548,21 +548,35 @@ export function forgetHostScheduleToolHiding(_sessionId: string): void {
 // ── 专属工具条件可见（v1.33，S142 §32.11）──
 
 /**
- * 宿主 `dsh-tool-schedule` 注册的 4 个模型可见工具名（**逐字**）。
+ * 宿主 `dsh-tool-schedule` 注册的模型可见工具名（**逐字**）。
  *
  * 🔴 **为什么要在 CCC 内屏蔽**（owner 原话：「这和 CRO 冲突，要求在宁静号激活情况下屏蔽掉」）：
  * 宁静号的唤醒/巡航走 `cognitive_trajectory send-later` → `AGENT_SESSIONS/wake-registry.json`
  * → 中心调度器 5min tick（D58）。宿主这套定时器是**另一个**真相源 ⇒ 两处记账、
  * CRO 判据失真、且模型可能顺手排一个"不在任何账本里"的唤醒。
- * ⚠️ 本清单**合并发射时不做探活**。⚠️ 现状缺口（v1.87.1 如实登记）：宿主**没装**
- *    `dsh-tool-schedule` 时，这 4 个名字会把整次 restrict 拒掉，而退档只保留 ACC 自己的名字
- *    ⇒ 这一格的屏蔽**不生效**（旧实现同样不生效，**未回归**；但"顺带修好了"这句是假的，已删）。
+ *
+ * 🔴🔴 **2026-11-06（S142）：宿主 0.2.2-rc.1 把这套工具改了名，本表没跟上 ⇒ 屏蔽漏了一半**。
+ *   实测（`msm sys node` 读本机装机包的 `lib/index.js`，⛔ 非推断）：
+ *   | 宿主版本 | `dsh-tool-schedule` 真实注册名 |
+ *   |---|---|
+ *   | `0.2.1-rc.2` | `schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete` |
+ *   | `0.2.2-rc.1` | `schedule_create` / `schedule_list` / **`schedule_view`** / **`schedule_edit`** |
+ *   ⇒ `schedule_update` / `schedule_delete` **已不存在**（写在本表里＝永远剔不掉的无效名），
+ *     而 `schedule_view` / `schedule_edit` **从未被屏蔽**（用户在会话里能直接看到并调用它们）。
+ *   **失效形态是静默的**：宿主 `restrict()` 对未知名只会**剔除**（我们那边的降级档还会打
+ *   「跳过 N 个未注册名」），所以"旧名失效＋新名漏网"在读数面上表现为**一切正常**。
+ *   ⇒ 判据：**这张表是宿主侧的名字，宿主改名必须同批改这里**；升级宿主后要**真机核一次工具面**
+ *     （会话里能不能看见 `schedule_*`），⛔ 不能只信单元测试——它测的是本表，本表错了它也绿。
+ *   ⚠️ 本清单**合并发射时不做探活**。⚠️ 现状缺口（v1.87.1 如实登记）：宿主**没装**
+ *      `dsh-tool-schedule` 时，这些名字会把整次 restrict 拒掉，而退档只保留 ACC 自己的名字
+ *      ⇒ 这一格的屏蔽**不生效**（旧实现同样不生效，**未回归**；但"顺带修好了"这句是假的，已删）。
  */
 const HOST_SCHEDULE_TOOL_NAMES = [
   'schedule_create',
   'schedule_list',
-  'schedule_update',
-  'schedule_delete',
+  // 🆕 0.2.2-rc.1 起（`schedule_update`/`schedule_delete` 已被宿主删除，一并移出本表）
+  'schedule_view',
+  'schedule_edit',
 ] as const
 
 /**

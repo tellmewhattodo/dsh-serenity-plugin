@@ -840,27 +840,39 @@ describe('guards: MSM 注册表写保护（需求⑤b——写 deny 读 allow，
 })
 
 describe('guards: CCC 内屏蔽宿主自带定时器工具（源 = computeVisibilitySources.hostSchedule）', () => {
-  it('CCC 内 ⇒ deny 全部 4 个 schedule_* 名字', () => {
+  // 🔴 2026-11-06（S142）：宿主 0.2.2-rc.1 改名 `schedule_update/delete` → `schedule_view/edit`，
+  //    本表没跟上 ⇒ **新名从未被屏蔽**（真机可见可调），旧名则恒被宿主剔除（无效项）。
+  //    ⇒ 本用例钉的必须是**宿主当前真实注册的那几个名字**，不是我们历史上写过的名字。
+  //    ⚠️ 它仍测不到"宿主下次又改名"——那件事只能靠升级后**真机核工具面**（见 HOST_SCHEDULE_TOOL_NAMES 注释）。
+  it('CCC 内 ⇒ deny 宿主当前真实的 4 个 schedule_* 名字（0.2.2-rc.1 口径）', () => {
     expect(denyOf('hostSchedule', dir)).toEqual([
       'schedule_create',
-      'schedule_delete',
+      'schedule_edit',
       'schedule_list',
-      'schedule_update',
+      'schedule_view',
     ])
   })
 
-  it('🔴 合并发射**不做预探活**：4 个名字原样进入 deny（在册与否交给宿主回答）', () => {
+  it('🔴 已删除的旧名不得回流（schedule_update / schedule_delete 在宿主里已不存在）', () => {
+    // 为什么单独钉：这两个名字写回表里**不会报错**——宿主 restrict() 只会把未知名剔掉，
+    // 于是"表里有个永远不会生效的名字"在读数面上完全看不出来（零信号熵，D151 同族）。
+    const deny = denyOf('hostSchedule', dir)
+    expect(deny).not.toContain('schedule_update')
+    expect(deny).not.toContain('schedule_delete')
+  })
+
+  it('🔴 合并发射**不做预探活**：名字原样进入 deny（在册与否交给宿主回答）', () => {
     // 🔴 D184 判据变更记录：原用例名「合并发射时逐个探活：不在册的名字被剔掉」，且注里写着
     //     "方案 C 顺带修掉了旧坑"。**那句是假的** —— v1.87.1 复盘：预探活本身是缺陷来源
     //     （`tools.get` 省略 scope = 全局视图，`schedule_*` 是 agent-plane 贡献 ⇒ 恒 undefined），
     //     删掉之后退档只保留 `REGISTERED_TOOLS`，而 schedule_* **不属** ACC ⇒ 真被拒时这一格**不生效**。
-    //     ⇒ 改钉**源层**契约：源如实给出 4 个名字，剔不剔是发射层的事、由宿主裁决。
+    //     ⇒ 改钉**源层**契约：源如实给出名字，剔不剔是发射层的事、由宿主裁决。
     //     ⚠️ 「宿主没装该包 ⇒ 这格不生效」是**已知缺口**，登记在用例尾注，不假装已修。
     expect(denyOf('hostSchedule', dir)).toEqual([
       'schedule_create',
-      'schedule_delete',
+      'schedule_edit',
       'schedule_list',
-      'schedule_update',
+      'schedule_view',
     ])
   })
 })

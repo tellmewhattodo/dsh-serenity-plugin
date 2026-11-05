@@ -14,6 +14,42 @@
 
 ---
 
+## v1.120.0 — 2026-11-06（宿主 0.2.2-rc.1 适配：定时器工具改名后的屏蔽补全 ＋ 构建链 Node 24 兼容）
+
+> 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
+> 必须是**两个井号 ＋ 空格 ＋ v<semver>**。⛔ 不要为了排版改成 `###`／`#`（会报「CHANGELOG 无条目」）。
+
+| 面 | 变更 |
+|---|---|
+| 🔴 **定时器工具屏蔽漏了一半**（缺陷修复） | 宿主 `0.2.2-rc.1` 把 `dsh-tool-schedule` 的工具名从 `schedule_update` / `schedule_delete` 改成 **`schedule_view` / `schedule_edit`**，而我们的 `HOST_SCHEDULE_TOOL_NAMES` 仍写着旧名 ⇒ **新名从未被屏蔽**（会话里可见可调），旧名则恒被宿主剔除（无效项）。已换成宿主当前真实四名。 |
+| **构建链 Node 24 兼容** | `package.json` 的 `prepare` 加 `--config-loader unrun`：Node 24 起原生类型剥离不做 `.js`→`.ts` 后缀改写，否则 `tsdown.prepare.config.ts` 找不到 `tsdown.config.js`（**会直接打断 npm publish**）。 |
+
+⚠️ **失效形态为什么值得单独记**：宿主 `restrict()` 对未知名**只剔除不报错**，我们自己的降级档还会把它打成
+「跳过 N 个未注册名」——于是「旧名失效 ＋ 新名漏网」在读数面上**表现为一切正常**。
+⇒ 判据：**这张表是宿主侧的事实，宿主改名必须同批改**；升级宿主后要**真机核一次工具面**（会话里能不能看见
+`schedule_*`），⛔ 不能只信单元测试——它测的是我们的表，表错了它也绿。
+
+<details>
+<summary>判据与验收（点开）</summary>
+
+- **取证**（⛔ 非推断，读本机装机包 `lib/index.js` 的 `name:` 声明）：
+  `0.2.1-rc.2` = `schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete`；
+  `0.2.2-rc.1` = `schedule_create` / `schedule_list` / **`schedule_view`** / **`schedule_edit`**。
+- **测试改钉「宿主当前真实名」**，并新增一条**负向钉**：`schedule_update` / `schedule_delete` **不得回流**。
+  理由：回流**不报错**（宿主只剔除），是零信号熵（D151 同族）。
+- **变异检验**：把 `schedule_update` 塞回表 ⇒ `--filter guards` **精确红 3 条**（其中含那条负向钉），
+  还原后三文件 **117 用例**全绿。⇒ 判据有判别力，不是恒真断言。
+- **降级路径未受影响**：宿主 `restrict()` 的错误文案与 0.2.1 **逐字相同**
+  （`tools.restrict() names unknown global tool[s] "…"; known global tools: …`）⇒ `parseUnknownToolNames` 无需改。
+- 🔴 **构建产物核验踩过的坑**：`lib/index.js` 的字节数与上一版**一模一样**，而改动其实已进
+  `lib/contract-*.js`（tsdown 拆 chunk）。⇒ **「字节数没变」不等于「没生效」**，判据必须扫整个 `lib/`（D257 同族）。
+
+**门禁**（全部在 **Node 24.22.2** 上）：typecheck ✅ ／ typecheck-host **0.2.2-rc.1 ＋ 0.2.1-rc.2** 双档 ✅ ／
+test **212 files / 3330** ✅ ／ coverage **95.33%** ✅ ／ build ✅ ／ pack-check **173 文件** ✅。
+</details>
+
+---
+
 ## v1.119.0 — 2026-11-05（工作语域块 ＋ 网关只允许 TOTP ＋ 会话跨重启持久化）
 
 > 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
