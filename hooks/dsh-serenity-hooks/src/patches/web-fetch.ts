@@ -149,9 +149,13 @@ export function isAllowedFetchAddress(address: string): boolean {
 }
 
 /**
- * 解析并校验地址集合（宿主 `HttpFetchResolver` 契约）。
+ * 解析并校验地址集合（本模块自带的 {@link FetchResolver} 契约）。
  *
- * 语义与宿主 `resolvePublicAddresses` 一致——**任一地址不合法即整体拒绝**（防 DNS 重绑定），
+ * ⚠️ **前身是宿主的 `HttpFetchResolver`，但那个类型在 0.2.2-rc.1 已随地址解析层一起被删除**
+ * （见文件头）。这里的语义沿用它，⛔ 但别再说"这是宿主契约" —— 那会让下一个维护者
+ * 去宿主里找一个不存在的类型（D151：退役功能的残留引用是零信号熵）。
+ *
+ * 语义：**任一地址不合法即整体拒绝**（防 DNS 重绑定），
  * 仅判据从「公网单播」放宽为 `isAllowedFetchAddress`。
  */
 export const resolveAllowedAddresses: FetchResolver = async (hostname, signal) => {
