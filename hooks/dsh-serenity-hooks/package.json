@@ -52,7 +52,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "tsdown -c tsdown.config.ts && tsc -p tsconfig.json --emitDeclarationOnly",
-    "prepare": "tsdown --config tsdown.prepare.config.ts && tsc -p tsconfig.json --emitDeclarationOnly"
+    "prepare": "tsdown --config tsdown.prepare.config.ts --config-loader unrun && tsc -p tsconfig.json --emitDeclarationOnly"
   },
   "dsh": {
     "bundle": {

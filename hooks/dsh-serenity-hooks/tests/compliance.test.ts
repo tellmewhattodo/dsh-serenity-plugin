@@ -93,7 +93,18 @@ describe('DSH plugin 合规门禁（v1.15）', () => {
     const outDir = join(HOOKS_DIR, '.tmp-e4-out')
     rmSync(outDir, { recursive: true, force: true })
     try {
-      execFileSync(tsdownBin, ['-c', 'tsdown.prepare.config.ts', '--out-dir', '.tmp-e4-out'], {
+      // 🔴 `--config-loader unrun` 不是可选装饰，是 **Node 24 下让本构建能跑**的必要条件
+      //    （2026-11-05 实测：本机 Node 22.22.1 → 24.22.2 之后本用例由绿转红）。
+      //    机制：Node 24 起 `process.features.typescript === 'strip'`（22 是 `false`），
+      //    tsdown 据此**改用原生类型剥离**加载配置文件；而原生剥离**不做 `.js` → `.ts` 后缀改写**，
+      //    于是 `tsdown.prepare.config.ts` 里的 `export { default } from './tsdown.config.js'`
+      //    会去找**不存在的** `tsdown.config.js`（真身是 `.ts`）⇒ 报
+      //    「Failed to load the config file … Cannot find module …/tsdown.config.js」。
+      //    ⛔ 别把这个 flag 当冗余删掉：删了在 Node 22 上照样绿（差分正控），只在 Node 24 上红。
+      //    同一原因，`package.json` 的 `prepare` 脚本也带同一 flag（那条会打断 npm publish）。
+      //    备选且更彻底的修法 = 把配置里的 `'./tsdown.config.js'` 改成无扩展名或 `.ts`，
+      //    但那会动到 F5 的断言与 dev 构建共用面，收益不足以抵消风险。
+      execFileSync(tsdownBin, ['-c', 'tsdown.prepare.config.ts', '--config-loader', 'unrun', '--out-dir', '.tmp-e4-out'], {
         cwd: HOOKS_DIR,
         encoding: 'utf-8',
       })
