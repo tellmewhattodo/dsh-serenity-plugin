@@ -26,8 +26,30 @@
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import type { Context } from 'cordis'
-import type { HttpFetchLimits, HttpFetchResolver } from '@deepseek-ai/dsh-web-fetch-http'
+import type { HttpFetchLimits } from '@deepseek-ai/dsh-web-fetch-http'
 import { hostWeb } from '../host/access.js'
+
+/**
+ * 🔴 **0.2.2-rc.1 适配（2026-11-05，S142）**：宿主导出的 `HttpFetchResolver` 类型被**删除**了。
+ *
+ * 不是改名，是**整层消失**：`0.2.1-rc.2` 的 `provider.d.ts:24` 有
+ * `export type HttpFetchResolver = (hostname, signal) => Promise<PublicAddress[]>`，
+ * 而 `0.2.2-rc.1` 的同名文件里**没有这个导出**（同时 `network.ts` / `isPublicIpAddress` /
+ * `createPinnedLookup` 也一起消失，构造器从 `(limits, resolveAddresses?)` 缩成 `(limits)`）。
+ * 上游 README 已明写新立场：「It does not restrict destination addresses」。
+ *
+ * ⇒ 本模块**在 0.2.2+ 上已无存在理由**（它当年唯一的作用就是放宽那条地址判据）。
+ * 但**旧宿主（0.1.7 / 0.2.0 / 0.2.1）仍在支持档里**，而它们真的会拦 fake-ip
+ * ⇒ 不能现在删。故此处**自带一份结构等价的契约**，⛔ 不再从宿主 import 那个已消失的类型。
+ *
+ * ⚠️ 退役条件（写给下一个我）：当 `VERIFIED_HOST_BANDS` 的下界抬到 `0.2.2` 之上时，
+ * **本文件连同 `cordis.patch.yml` 的 `disabled: true` 一起整块删除** —— 留着的每一天都是
+ * 一份「没人需要、但将来会漂」的代码。
+ */
+type FetchResolver = (
+  hostname: string,
+  signal: AbortSignal,
+) => Promise<Array<{ address: string; family: 4 | 6 }>>
 
 /**
  * 与宿主 `WebError` 同形的最小错误（带机器可路由的 `code`）。
@@ -132,7 +154,7 @@ export function isAllowedFetchAddress(address: string): boolean {
  * 语义与宿主 `resolvePublicAddresses` 一致——**任一地址不合法即整体拒绝**（防 DNS 重绑定），
  * 仅判据从「公网单播」放宽为 `isAllowedFetchAddress`。
  */
-export const resolveAllowedAddresses: HttpFetchResolver = async (hostname, signal) => {
+export const resolveAllowedAddresses: FetchResolver = async (hostname, signal) => {
   const bare = stripBrackets(hostname)
   const literalFamily = isIP(bare)
   let resolved: Array<{ address: string; family: number }>
@@ -182,7 +204,23 @@ async function lookupAll(hostname: string, signal: AbortSignal): Promise<Array<{
  * 后端包 `@deepseek-ai/dsh-web-fetch-http` 用**动态 import**：宿主版本里若没有该包，
  * 只降级为一条告警（绝不因缺一个可选后端而让整机启动失败——apply 抛错 = dsh 启动失败）。
  * 失败一律响亮但不抛错。
+ *
+ * 🔴 **双宿主形态兼容（0.2.2-rc.1 适配）**：构造器签名在两档之间变了 ——
+ * | 宿主 | 签名 | 我们的 resolver 还起作用吗 |
+ * |---|---|---|
+ * | `≤0.2.1` | `(limits, resolveAddresses?)` | ✅ 起作用（这是本模块存在的理由） |
+ * | `≥0.2.2` | `(limits)` —— 地址判据整层移除 | ❌ 被**忽略**（宿主不再拦任何地址） |
+ *
+ * ⇒ **不能直接 `new Backend(limits, resolver)`**：对着 0.2.2 的 `.d.ts` 它是
+ * `TS2554: Expected 1 arguments, but got 2`（本适配轮实测）。
+ * ⇒ 用一次**局部放宽的构造签名**把两种情况都表达出来：多传的参数在 0.2.2 上被 JS 静默忽略，
+ * 正是我们想要的（那时它已经不需要了）。⛔ 不写成 `as any` —— 那会让将来真正的签名变化静默通过。
  */
+type ProviderCtor = new (
+  limits: HttpFetchLimits,
+  resolveAddresses?: FetchResolver,
+) => { readonly id: string; available(): boolean }
+
 export async function registerWebFetchProvider(ctx: Context): Promise<void> {
   const web = hostWeb(ctx)
   if (typeof web?.registerFetchProvider !== 'function') {
@@ -192,7 +230,8 @@ export async function registerWebFetchProvider(ctx: Context): Promise<void> {
   try {
     const backend = await import('@deepseek-ai/dsh-web-fetch-http')
     const limits: HttpFetchLimits = { ...FETCH_LIMIT_DEFAULTS, userAgent: backend.DEFAULT_USER_AGENT }
-    web.registerFetchProvider(new backend.HttpFetchProvider(limits, resolveAllowedAddresses))
+    const Provider = backend.HttpFetchProvider as unknown as ProviderCtor
+    web.registerFetchProvider(new Provider(limits, resolveAllowedAddresses))
     console.log(`[serenity-hooks] ✓ web fetch provider 已接管（id=${backend.LOCAL_FETCH_PROVIDER_ID}，额外放行 fake-ip 段 198.18.0.0/15）`)
   } catch (error) {
     console.error(`[serenity-hooks] ✗ web fetch provider 注册失败（web_fetch 将不可用）: ${String((error as Error)?.message ?? error)}`)

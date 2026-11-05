@@ -278,6 +278,10 @@ describe('🔒 隐私否决判据：仓库其他公开面（B 面 —— GitHub 
       'README.md',
       'README.en.md',
       'CHANGELOG.md',
+      // 🔴 2026-11-05 CHANGELOG 超级重写时新增：历史条目逐字搬进 `CHANGELOG-archive.md`。
+      // 它**不在 `files[]` 内**（不进 npm 包），但**在 GitHub 公开可读** ⇒ 与 `CHANGELOG.md` 同属 B 面。
+      // ⛔ 不列进来就会留下一个「我扫了 CHANGELOG.md」却漏掉它 1.1 MB 孪生体的**未声明缺口**（D259）。
+      'CHANGELOG-archive.md',
     ]
       .filter((f) => f !== SELF)
       .filter((f) => {
