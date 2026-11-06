@@ -315,3 +315,119 @@ describe('中立入站事件层：渠道身份穿过本层（Q4）', () => {
     expect(questions.join('\n')).toContain('来自飞书的消息')
   })
 })
+
+/**
+ * 🔴🔴 **入站必须投给「该轨迹此刻的载体」**（2026-11-06 生产回归的反向钉）
+ *
+ * ## 这次回归长什么样（真机，不是假想）
+ *
+ * v1.121.0 发布了 `reconstruct`（换代：建新会话 → 绑轨迹 → 归档旧会话）。
+ * 它在**走 IM 桥的那条轨迹**上真跑了（本容器实测，2026-11-06 08:3x）：
+ * ```
+ * reconstruct: 新载体 session-<uuid> 已接管「…<轨迹目录名>…」（旧 skiff-weixin-<code>）
+ * reconstruct: 旧会话 skiff-weixin-<code> 已归档（attempt 1）
+ * im 投递：会话 skiff-weixin-<code> → followup    ← 仍投给已归档的那条
+ * ```
+ * ⇒ 人在微信那头连发四条没人应（`人呢` × 3 ＋ 一条带地址的请求），
+ * 而**每一层日志都报成功**：`followup` 不是空操作，它确实投了 —— 投进一条已被收起来的会话。
+ *
+ * ## 为什么旧用例全绿（判据盲区，比 bug 本身更值得记）
+ *
+ * 旧的 10 条用例全都**只走"还没有载体"那条路**（先 `create` 出派生 id）。
+ * 那正是**派生值正确**的那一格 ⇒ 它们结构上不可能看见这次回归。
+ * ⇒ 判据必须显式钉住**两种状态**（已绑定 / 未绑定），并把它们当成**两件事**断言。
+ */
+describe('中立入站事件层：投递目标是「绑定真相源」，不是派生值', () => {
+  /** 写一条轨迹的载体声明（`current.dsh_session_bind`，D172 起的唯一真相源） */
+  function bindCarrier(code: string, sessionId: string): void {
+    const d = join(dir, 'AGENT_SESSIONS', `2026-10-19--${code}--probe`)
+    writeFileSync(join(d, 'current.dsh_session_bind'), JSON.stringify({
+      sessionId, at: Date.now(), action: 'activate',
+    }, null, 2))
+  }
+
+  /**
+   * fake ctx：既能 `create`（未绑定路径）也能 `get`（绑定探针要问它"这条会话在不在"）。
+   * `archived` 用来模拟宿主归档集 —— 判活时**归档优先于 live**（见 `isSessionAlive`）。
+   */
+  function ctxWithCradle(archived: string[] = []): { ctx: unknown; created: string[]; delivered: string[] } {
+    const created: string[] = []
+    const delivered: string[] = []
+    const makeAgent = (id: string) => ({
+      session: { id, events: [] as unknown[] },
+      ctx: { systemPrompt: { section: () => {} } },
+      followup: () => {
+        delivered.push(id)
+        return undefined
+      },
+      interrupt: () => {},
+    })
+    const agents = new Map<string, ReturnType<typeof makeAgent>>()
+    const ctx = {
+      get: (name: string) => {
+        if (name === 'workspaceRegistry') {
+          return { list: () => [{ path: dir }], archivedSessionIds: archived }
+        }
+        return undefined
+      },
+      agents: {
+        get: (id: string) => agents.get(id),
+        create: async (opts: { sessionId: string; setup?: (c: unknown) => Promise<void> }) => {
+          created.push(opts.sessionId)
+          const a = makeAgent(opts.sessionId)
+          agents.set(opts.sessionId, a)
+          await opts.setup?.(a as never)
+          return { agent: a }
+        },
+        resume: async () => { throw Object.assign(new Error('nf'), { name: 'SessionPersistenceNotFoundError' }) },
+      },
+      on: (_e: string, cb: (p: unknown) => void) => { cb({ status: 'idle' }); return () => {} },
+    }
+    return { ctx, created, delivered }
+  }
+
+  it('🔴 已绑定 ⇒ 投给**绑定的那条**（⛔ 不是 `skiff-weixin-<code>` 派生值）', async () => {
+    makeTrajectory('probe-code')
+    // 🔴 这一格是本次回归的**唯一靶子**：绑定指向一条非派生 id 的会话
+    //    （`reconstruct` 建出来的载体就是这种形状：`session-<uuid>`）
+    const carrier = 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    bindCarrier('probe-code', carrier)
+    subscribe('acct-a', 'u-bound', 'probe-code')
+    const { handleInboundEvent, resolveInboundTarget } = await import('../src/im/inbound-event.js')
+    const { ctx, created, delivered } = ctxWithCradle()
+    // 绑定的那条会话活着（进程内 loaded）⇒ 探针判它 usable
+    const live = { session: { id: carrier, events: [] }, ctx: { systemPrompt: { section: () => {} } }, followup: () => { delivered.push(carrier) }, interrupt: () => {} }
+    ;(ctx as { agents: { get: (id: string) => unknown } }).agents.get = (id: string) => (id === carrier ? live : undefined)
+
+    const target = await resolveInboundTarget(ctx as never, { account: 'acct-a', user: 'u-bound', cccFallback: null })
+    expect(target).not.toBeNull()
+    await handleInboundEvent(ctx as never, dir, 'acct-a', {
+      sendText: async () => {}, typingStart: async () => {}, typingStop: async () => {},
+    }, { userId: 'u-bound', text: '人呢', media: [], hasVoice: false }, { target: target! })
+
+    // 🔴 判据 = 消息落进**绑定那条**，且**没有**按派生值另建一条
+    expect(delivered, '必须投给绑定的载体').toContain(carrier)
+    expect(created, '⛔ 已绑定就不该再按派生值新建会话').not.toContain('skiff-weixin-probe-code')
+  })
+
+  it('🔴 绑定的那条**已被归档** ⇒ 视同没绑定，退回派生值（不投给归档会话）', async () => {
+    makeTrajectory('probe-code')
+    const stale = 'session-archived-carrier'
+    bindCarrier('probe-code', stale)
+    subscribe('acct-a', 'u-stale', 'probe-code')
+    const { handleInboundEvent, resolveInboundTarget } = await import('../src/im/inbound-event.js')
+    // 归档集里有它 ⇒ 探针判死 ⇒ `listBoundSessionIds` 返回空 ⇒ 走派生兜底
+    const { ctx, created, delivered } = ctxWithCradle([stale])
+
+    const target = await resolveInboundTarget(ctx as never, { account: 'acct-a', user: 'u-stale', cccFallback: null })
+    expect(target).not.toBeNull()
+    await handleInboundEvent(ctx as never, dir, 'acct-a', {
+      sendText: async () => {}, typingStart: async () => {}, typingStop: async () => {},
+    }, { userId: 'u-stale', text: '人呢', media: [], hasVoice: false }, { target: target! })
+
+    // 归档会话一字都不该收到；派生值那条被建成新载体
+    expect(delivered, '⛔ 已归档会话不得收到投递').not.toContain(stale)
+    expect(created, '无可用绑定 ⇒ 按派生值建第一条载体').toContain('skiff-weixin-probe-code')
+  })
+})
+

@@ -37,7 +37,9 @@ import { appendHumanChannelAudit, planInboundRoute, type InboundRoutePlan } from
 import { readSimpleSettings } from '../surface/settings.js'
 import { readWeixinSettings, weixinSessionIdForTrajectory, matchWeixinRoute, sanitizeFileName, weixinInboundDir } from './route.js'
 import { sniffImageExt, markdownToPlainText } from './ilink.js'
-import { readTrajectoryConstraintByCode, type TrajectoryConstraint } from '../trajectory/policy/profile.js'
+import { readTrajectoryConstraintByCode, findDirNameByCode, type TrajectoryConstraint } from '../trajectory/policy/profile.js'
+import { listBoundSessionIds } from '../trajectory/bound.js'
+import { hostAliveProbe } from '../trajectory/alive.js'
 import { stripThink } from '../surface/text.js'
 import {
   createTrajectoryAgent, getTrajectoryAgent, deliverToTrajectory, workspaceCognitiveTrajectoryLine,
@@ -212,6 +214,60 @@ export async function resolveInboundTarget(ctx: Context, input: {
 // ── 中立主流程 ─────────────────────────────────────────────────────────────
 
 /**
+ * 入站投递**投给哪条会话**：先问绑定真相源，派生值只作"还没有载体"时的兜底。
+ *
+ * ## 🔴 为什么必须有这一格（2026-11-06 生产回归，v1.121.0 `reconstruct` 引入）
+ *
+ * 原实现是**纯函数派生**：`weixinSessionIdForTrajectory(code)` ⇒ 恒等于 `skiff-weixin-<code>`。
+ * 那个前提在 `reconstruct` 之前是成立的 —— 载体 id 一旦派生就永不变。
+ *
+ * 但 `reconstruct` 的语义**正是"换一条载体"**：它建新会话（`session-<uuid>`）、把轨迹绑过去、
+ * **归档旧会话**。⇒ 派生值与真实载体**从此分叉**，而入站仍按派生值投递 ⇒
+ * **消息被投进一条已归档的会话**。
+ *
+ * 真机读数（2026-11-06 08:3x，宿主日志逐字）：
+ * ```
+ * reconstruct: 新载体 session-0fd78851… 已接管「…zhaocai-xingzai…」（旧 skiff-weixin-zhaocai-xingzai）
+ * reconstruct: 旧会话 skiff-weixin-zhaocai-xingzai 已归档（attempt 1）
+ * im 投递：会话 skiff-weixin-zhaocai-xingzai → followup     ← 投给已归档的那条
+ * ```
+ * ⇒ 人在微信那头**连发四条没人应**，而**日志里每一层都报成功**（`followup` 不是空操作）。
+ * 这正是本仓最怕的形态：**静默**。
+ *
+ * ## 判据的层级（为什么不能只改 `reconstruct`）
+ *
+ * | 改法 | 为什么不行 |
+ * |---|---|
+ * | 让 `reconstruct` 把新载体 id **派生**成 `skiff-weixin-<code>` | 撞宿主与 ACC 双方的「一个会话至多一条轨迹」；且第二次换代时旧 id 还被占着 |
+ * | `reconstruct` 之后**改写派生函数** | 派生函数是**纯函数**，它不知道谁刚换代；给它加状态 = 造第二真相源 |
+ * | ✅ **投递前问绑定真相源** | 绑定文件（`current.dsh_session_bind`）**本来就是**"此刻谁在承载它"的唯一真相源（D172），换来换去都写在这一个槽位里 |
+ *
+ * ⚠️ **兜底不是"静默退回旧行为"，是"这条轨迹还没有载体"**：那时派生值是对的 ——
+ * `createTrajectoryAgent` 会按它建出第一条载体。⇒ 两种状态**语义不同**，不是同一个 bug 的宽容版。
+ *
+ * @param ctx 插件上下文（`hostAliveProbe` 要用它取宿主事实）
+ * @param root CCC 根
+ * @param code 目标轨迹编码
+ * @returns 该轨迹此刻的载体 id；未绑定 / 取不到事实 ⇒ 派生值
+ */
+function carrierSessionIdForIm(ctx: Context, root: string, code: string): string {
+  const derived = weixinSessionIdForTrajectory(code)
+  try {
+    const dirName = findDirNameByCode(root, code)
+    if (dirName === null) return derived
+    // 🔴 **必须传探针**：绑定文件里可能还写着一条已被归档的会话
+    //    （`reconstruct` 换代后槽位会改写，但手工归档 / 崩溃残留不会）⇒ 不传探针等于
+    //    把"文件在就算绑定"那个已在别处修掉的漏洞在这里再开一次（见 `listBoundSessionIds` 的注释）。
+    const bound = listBoundSessionIds(root, dirName, hostAliveProbe(ctx))
+    return bound.length > 0 ? (bound[0] as string) : derived
+  } catch {
+    // 取不到绑定事实（宿主服务缺失 / 磁盘抖动）⇒ 退回派生值：
+    // 宁可投给"按规矩该有的那条"，也不要因为一次异常把消息丢掉（丢消息是更坏的失败）。
+    return derived
+  }
+}
+
+/**
  * 同会话入站**串行化**（2026-10-21，修"同一条消息被处理两轮"的第二个缺陷）。
  *
  * ## 为什么必须有锁（R↓，代价换来的）
@@ -329,8 +385,8 @@ export async function handleInboundEvent(
 
   let releaseLock: (() => void) | null = null
   try {
-    // 🔴 会话 id **由轨迹编码派生**（身份挂在轨迹上，不挂在用户上）。
-    const sessionId = weixinSessionIdForTrajectory(trajectory)
+    // 🔴 会话 id = **该轨迹此刻的载体**，取绑定真相源；派生值只作"还没绑定"时的兜底。
+    const sessionId = carrierSessionIdForIm(ctx, root, trajectory)
     /**
      * 🔴 **同会话串行化**（2026-10-21 引入；**2026-10-24 理由已变，见下**）。
      *
