@@ -379,7 +379,7 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
         onClick={() => setOpen((v) => !v)}
         title={
           inCcc
-            ? `Serenity v${status.accVersion} — ${status.root}（${status.safeModeOn ? 'SAFE ON — 写工具已隐藏' : 'SAFE OFF — 写工具全开，无保护'}）`
+            ? `Serenity v${status.accVersion} — ${status.root}（${status.safeModeOn ? 'SAFE ON — bash 已隐藏' : 'SAFE OFF — bash 可用'}）`
             : 'Serenity（未激活）'
         }
       >
@@ -397,8 +397,8 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
               className={cx('sp-safeBadge', status.safeModeOn ? 'sp-safeBadgeOn' : 'sp-safeBadgeOff')}
               title={
                 status.safeModeOn
-                  ? 'safe-mode ON — 写工具已隐藏（状态信息；开关在 设置 → Serenity）'
-                  : 'safe-mode OFF — 写工具全开（状态信息；开关在 设置 → Serenity）'
+                  ? 'safe-mode ON — bash 已隐藏（状态信息；开关在 设置 → Serenity）'
+                  : 'safe-mode OFF — bash 可用（状态信息；开关在 设置 → Serenity）'
               }
             >
               <span className={cx('sp-safeDot')} />
@@ -470,8 +470,8 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
                     )}
                     title={
                       status.safeModeOn
-                        ? 'safe-mode ON —— 写工具已隐藏（点击关闭）'
-                        : 'safe-mode OFF —— 写工具全开（点击开启）'
+                        ? 'safe-mode ON —— bash 已隐藏（点击关闭）'
+                        : 'safe-mode OFF —— bash 可用（点击开启）'
                     }
                     onClick={() => void toggleSafeMode(!status.safeModeOn)}
                   >

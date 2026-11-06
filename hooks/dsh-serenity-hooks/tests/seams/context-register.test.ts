@@ -286,12 +286,25 @@ describe('registerContext: 非 CCC 会话的工具面隐藏（v1.56.6 接线）'
 
     await fireCreated(ctx, agent)
 
-    // ⚠️ 不能断言 "零 restrict" —— CCC 内本来就有 im-bridge / acc-diag 两条**条件可见**同步会发
-    //    restrict（本临时 CCC 未配 IM 通道、未声明 exclusiveTools ⇒ 各自发一条，**这是既有正确行为**）。
+    // ⚠️ 不能断言 "零 restrict" —— CCC 内本来就有条件可见同步会发 restrict
+    //    （im-bridge 未配 IM 通道 / 宿主 schedule_* 在 CCC 内恒隐 / alwaysDeny 常驻表
+    //     ⇒ 各发来源、合并后一条，**这是既有正确行为**）。
     //    判别点 = **有没有"整工具面隐藏"那一条**（deny 覆盖 REGISTERED_TOOLS）。
-    const fullHide = restrictCalls.filter((c) => (c.deny ?? []).length === REGISTERED_TOOLS.length)
+    //
+    // 🔴 2026-11-06 修正（D274 同族：改钉本意，不放宽阈值）：
+    //    原判别式是 `deny.length === REGISTERED_TOOLS.length` —— **用长度当集合的替身**。
+    //    `alwaysDeny` 从 1 项扩到 8 项后，它(8) + hostSchedule(4) + imBridge(1) = **13**，
+    //    与 `REGISTERED_TOOLS.length` **碰巧相等** ⇒ 本用例假红。
+    //    这不是"判据太严"，是**判据钉错了东西**：要判的是「这条 restrict 是否覆盖了全部
+    //    已注册工具」，长度只是它的一个必要不充分条件。
+    //    ⇒ 改成真正的集合判据（`⊇ REGISTERED_TOOLS`），它对"数目碰巧相等"免疫。
+    const registeredSet = new Set<string>(REGISTERED_TOOLS)
+    const fullHide = restrictCalls.filter((c) => {
+      const deny = new Set(c.deny ?? [])
+      return [...registeredSet].every((name) => deny.has(name))
+    })
     expect(fullHide).toHaveLength(0)
-    // 判别性：确认本用例**真的**观测到了那两条条件可见（否则"零 fullHide"可能是"什么都没发生"）
+    // 判别性：确认本用例**真的**观测到了那几条条件可见（否则"零 fullHide"可能是"什么都没发生"）
     expect(restrictCalls.length).toBeGreaterThan(0)
   })
 })

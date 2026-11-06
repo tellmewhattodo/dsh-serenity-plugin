@@ -18,7 +18,6 @@ import {
   readBlacklist,
   pathInside,
   readCccName,
-  readSafeModeHiddenTools,
   type BlacklistRule,
 } from '../kernel/ccc.js'
 import { cccRootForCwd } from '../kernel/ccc-roots.js'
@@ -323,18 +322,18 @@ export function computeVisibilitySources(sessionId: string, root: string | null)
     return out
   }
 
-  // ② 安全模式：基础表 ∪ CCC 声明的 hiddenTools（**只在安全模式开启时**贡献）
+  // ② 安全模式：**只藏 bash**（owner 2026-11-06 令「安全模式开关只影响 bash 开关」）
+  //
+  // 🔴 2026-11-06 判据变更（D184）：本源**不再读** `safeMode.hiddenTools`。
+  //    该键整条退役——它表达的是"安全模式期间的附加屏蔽"，而实测需求恰恰相反：
+  //    那 10 项里的有效 7 项**任何时候都该关**（宿主自己会在后台驱动会话 / 改边界 / 装代码），
+  //    跟着文件开关忽隐忽现反而是缺陷。⇒ 它们已并入 `ALWAYS_DENY_TOOLS`（CCC 内恒隐）。
+  //    ⚠️ 存量 CCC 若仍写着本键 ⇒ **静默忽略**（schemastery 非 strict，不报错、不生效）——
+  //       这正是 D151 警告的形态，故配置面已在 v1.123.0 同批清空。
   out.push(
     sourceOf('safeMode', () => {
       if (!isSafeModeOn(root)) return { deny: [] }
-      let declared: string[] = []
-      try {
-        declared = readSafeModeHiddenTools(root)
-      } catch (e) {
-        // 声明读不到 ≠ 安全模式不生效：基础表仍必须藏（退化为只藏基础表）
-        return { deny: [...SAFE_MODE_DENY_TOOLS], error: (e as Error).message }
-      }
-      return { deny: [...new Set([...SAFE_MODE_DENY_TOOLS, ...declared])] }
+      return { deny: [...SAFE_MODE_DENY_TOOLS] }
     }),
   )
 
@@ -414,31 +413,80 @@ function resolveAgentCwd(exec: ToolExecution): string {
 }
 
 /**
- * 安全模式开启时从模型工具列表隐藏的工具 —— **基础表**（只隐藏 bash；write/edit 保留）。
- * 它**恒隐**、与 CCC 配置无关；CCC 声明的 `safeMode.hiddenTools` 是**附加**项（见下）。
+ * 安全模式开启时从模型工具列表隐藏的工具 —— **安全模式唯一的开关对象**。
+ *
+ * 🔴 **2026-11-06 owner 令：「安全模式开关只影响 bash 开关」**。
+ * 在此之前这里还并进了 CCC 声明的 `safeMode.hiddenTools`（v1.51.4 起的附加屏蔽面）；
+ * 该配置键**已整条退役**（见 {@link ALWAYS_DENY_TOOLS} 头的判据变更记录）。
+ * ⇒ 本表现在**只有一个条目**，而这不是"还没补全"：**安全模式管的就是它**。
+ *
+ * write/edit 刻意保留：安全模式要挡的是"起 shell 做任意事"，不是挡文件编辑
+ * （编辑受路径越界与黑名单两道门约束，与本开关无关）。
  */
-const SAFE_MODE_DENY_TOOLS = ['bash']
+const SAFE_MODE_DENY_TOOLS = ['bash'] as const
 
 /**
- * **常驻拒绝表** —— 与安全模式**无关**，任何 CCC、任何时刻都隐藏（v1.106.0，owner 2026-11-01 令）。
+ * **CCC 内恒隐表** —— 只要会话在 CCC 目录内就隐藏，**与安全模式开关无关**。
  *
- * 为什么与 `SAFE_MODE_DENY_TOOLS` 分开成两张表（而不是往那张里加一项）：
- * 那张表的**名字即语义**——"安全模式期间的附加拒绝"。把常驻项塞进去会让"名字与行为不符"，
- * 而这类错位**没有机械信号**（D151：退役/错位的开关零信号）。⇒ 两张表、两条来源，各说各的。
+ * ## 判据（owner 2026-11-06 令）
  *
- * ## 首个条目：`ask_user_question`
+ * > 「subagent 一套 tool 常开，安全模式开关只影响 bash 开关，剩余的都是只要在 CCC 目录就关」
  *
- * owner 原话（2026-11-01）：**「宁静号追求更高程度的自动化和轨迹协作，这种阻塞性的东西会降低效率」**
- * ⇒ 它会让一轮停下来等人回答，与"轨迹自驱 + 轨迹间协作"直接冲突。
+ * 三句话对应三张表，本表是第三句的落点：
+ *
+ * | 范围 | 表 | 何时生效 |
+ * |---|---|---|
+ * | subagent 一族（`subagent` / `subagent_fork` / `send_message` / `list_agents` / `interrupt_agent` / `list_subagent_models`） | **不入任何表** | 常开 |
+ * | shell | {@link SAFE_MODE_DENY_TOOLS} | 只随安全模式开关 |
+ * | 其余（本表 ＋ {@link HOST_SCHEDULE_TOOL_NAMES}） | 本表 | 只要在 CCC 内 |
+ *
+ * ## 🔴 判据变更记录（D184：必须说出原前提被谁取代）
+ *
+ * 本表原名「常驻拒绝表」，**只有一个条目** `ask_user_question`，理由是 owner 2026-11-01 那句
+ * 「宁静号追求更高程度的自动化和轨迹协作，这种阻塞性的东西会降低效率」。
+ * 那条老判据**没有错，只是窄**：它针对的是"阻塞"，而 owner 2026-11-06 收紧成
+ * **"凡不属于 CCC 工作流、且宿主自己会在后台驱动会话的，一律在 CCC 内关掉"**。
+ * ⇒ 老的 `safeMode.hiddenTools` 面（10 项，其中 3 项宿主根本没注册）被**整条吸收进本表**，
+ * 淘汰掉的是"用安全模式开关控制这些工具"的旧形态 —— 它们本来就该**一直关着**，
+ * 跟着一个文件开关忽隐忽现反而是缺陷（安全模式关着时它们会重新出现）。
+ *
+ * ## 逐条为什么在这张表里
+ *
+ * | 工具 | 为什么在 CCC 内一律关 |
+ * |---|---|
+ * | `ask_user_question` | 阻塞式提问，与"轨迹自驱 + 轨迹间协作"冲突（owner 2026-11-01 原话） |
+ * | `job_output` / `job_list` / `job_kill` | 宿主的后台作业控制面。本仓没有 ACC 侧的后台作业模型，模型看得见就会去用 ⇒ 造出"宿主自己也有一本账"的第二记账面 |
+ * | `workflow` | 大型编排的执行器；轨迹协作走 `cognitive_trajectory send-*` 与 CRO，不走它 |
+ * | `exit_plan_mode` | 计划模式的出口；CCC 的计划形态是 `todo_write` ＋ `SESSION.md`，不是宿主的 plan-mode |
+ * | `plugin_manager` | 改 profile 属**用户面**（它能装任意 Host 代码，宿主自己在提示词里也这么写）；agent 不该有它 |
+ * | `working_directory` | 🔴 **宿主 0.2.2-rc.1 新增**（owner 2026-11-06：「我们也关掉」）。它改的是**会话 cwd**，而 cwd 是 CCC 边界判定与 `cccRootForCwd` 的输入之一 ⇒ 让模型能改它，等于让模型能移动自己所在的边界。CCC 的"换目录"语义由轨迹本身表达（一条轨迹一个工作目录），不需要会话内漂移 |
+ *
+ * ## 与另外两张表的关系
+ *
+ * - **不并进** {@link SAFE_MODE_DENY_TOOLS}：那张表的名字即语义是"安全模式期间的拒绝"。
+ *   把恒隐项塞进去会让"安全模式关着 ⇒ 这些工具全回来"—— 那正是本次要消灭的形态（D151 同族：错位零信号）。
+ * - **不并进** {@link HOST_SCHEDULE_TOOL_NAMES}：那张表的条目**全部来自宿主包**
+ *   （`dsh-tool-schedule`），与"我们自己的工具面变更"分开登记，宿主改名时只需改那一张。
  *
  * ⚠️ **边界（诚实标注，D255）**：
  *  - 本表是**藏**（`tools.restrict({deny})` 让模型看不见），**不是禁** —— 它不阻止经别的路径调用。
- *    要真禁得住需在 tool-call 层拦截，那是另一件事，不在本次范围。
+ *    要真禁得住需在 tool-call 层拦截，那是另一件事。
  *  - 它**不依赖** `.serenity-safe-on`：安全模式关着也照样藏。
  *  - 宿主若不认识某个名字，`applyVisibilityDecision` 会从它的错误里解析并只剔掉那几个
  *    （⇒ 本表写错一个名字**不会**连累其它来源，也不会静默冻结）。
+ *  - 🔴 **非 CCC 会话本表不生效**（`computeVisibilitySources` 在非 CCC 时早返回）——
+ *    owner 的令针对的是"宁静号里"，非 CCC 不是 ACC 的管辖面（见同文件 `nonCcc` 源的用例）。
  */
-const ALWAYS_DENY_TOOLS = ['ask_user_question'] as const
+export const ALWAYS_DENY_TOOLS = [
+  'ask_user_question',
+  'job_output',
+  'job_list',
+  'job_kill',
+  'workflow',
+  'exit_plan_mode',
+  'plugin_manager',
+  'working_directory',
+] as const
 
 /**
  * agent key → 安全模式下的隐藏状态（v1.51.4：由"一次性 disposer"升级为"签名 ＋ 实际 deny ＋ disposer"）。

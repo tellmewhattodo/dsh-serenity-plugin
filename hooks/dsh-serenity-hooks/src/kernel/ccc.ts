@@ -119,12 +119,15 @@ interface SerenityConfig {
   safeMode?: {
     blacklist?: string[];
     /**
-     * **安全模式开启期间**额外从模型工具清单隐藏的工具（v1.51.4，owner 2026-10-09 令）。
+     * 🔴 **已于 v1.123.0 退役**（owner 2026-11-06 令「安全模式开关只影响 bash 开关」）。
      *
-     * 语义（与 `exclusiveTools` 的区别，判据是"条件"）：本键不是无条件的可见性白名单，
-     * 而是**条件屏蔽**——`\.serenity-safe-on` 标记存在时才隐藏，标记消失即**全部恢复**
-     * （基础表恒隐 `bash` 不受影响）。机制在 ACC、声明在 CCC（D23）：
-     * ACC 代码里不出现任何具体工具名。
+     * 原语义（v1.51.4）：安全模式开启期间**额外**隐藏这些工具。
+     * 现语义：安全模式**只藏 `bash`**；其余"CCC 内一律关"的那批改由
+     * `seams/guards.ts` 的 `ALWAYS_DENY_TOOLS` **恒隐**（不再随本开关忽隐忽现）。
+     *
+     * ⚠️ 存量 CCC 里仍写着本键 ⇒ **静默忽略**（schemastery 非 strict：不报错、不生效）。
+     * 这正是 D151 警告的"写了但不生效、且没人知道"的形态 ⇒ 配置面已同批清空。
+     * 类型保留只为"读旧文件不炸"，⛔ **没有任何读取方**（`readSafeModeHiddenTools` 已删）。
      */
     hiddenTools?: string[];
   };
@@ -511,11 +514,11 @@ export function loadSerenityConfig(root: string, paths: string[] = DEFAULT_SEREN
  *
  * ## 失败方向 = **fail-open，但坏项逐条报告**（与另外两处刻意不同）
  *
- * 不订阅 ≠ 危险动作：它只是"没有通知"，不会藏掉任何能力（对比 `safeMode.hiddenTools`
- * 是 fail-open 因为**隐藏**才是危险方向）。⇒ 整体读不到 ⇒ 空表。
+ * 不订阅 ≠ 危险动作：它只是"没有通知"，不会藏掉任何能力（对比已删除的
+ * `safeMode.hiddenTools` 是 fail-open 因为**隐藏**才是危险方向）。⇒ 整体读不到 ⇒ 空表。
  *
  * 🔴 **但"坏项"不能一起吞掉**：配置里写了这一条、却因为成员名写错而**永远不触发**，
- * 是与 `safeMode.hiddenTools` 写错工具名**同族的静默失效**（写了但不生效，且没人知道）。
+ * 是与当年 `safeMode.hiddenTools` 写错工具名**同族的静默失效**（写了但不生效，且没人知道）。
  * ⇒ 本函数返回 `{ subs, problems }`：合法项照常生效，坏项进 `problems` 供调用方响亮告警。
  * ⚠️ 这与"整表读不到就空表"并不矛盾：前者是**文件级**失败（无法解析），
  * 后者是**条目级**失败（能解析但内容不成立）—— **两个粒度、两种处置**（D233 同族）。
@@ -590,32 +593,19 @@ export function readUserQuotesEnabled(root: string, paths: string[] = DEFAULT_SE
 }
 
 /**
- * 读取 CCC 声明的「安全模式期间隐藏的工具」清单（`safeMode.hiddenTools`，v1.51.4）。
+ * 🔴 **`readSafeModeHiddenTools` 已于 v1.123.0 删除**（owner 2026-11-06 令
+ * 「安全模式开关只影响 bash 开关」）。
  *
- * 语义（R↓）：**标记文件存在 ⇒ 才生效**。deny = `['bash', ...本清单]`（并集去重）；
- * 标记消失 ⇒ 连同 `bash` 一起解除（调用点在 `syncSafeModeRestriction`，与基础表同一处）。
+ * 原语义：读 `safeMode.hiddenTools` —— **安全模式开启期间**的附加屏蔽。
+ * 删除后：安全模式只藏 `bash`；其余"在 CCC 内一律关"的那批工具**不再随开关忽隐忽现**，
+ * 改由 `seams/guards.ts` 的 `ALWAYS_DENY_TOOLS` 恒隐。
  *
- * 失败方向 = **fail-open**（与已删除的 `exclusiveTools` 的 fail-closed 相反，理由不同）：
- * 未配置 / 字段缺失 / 配置损坏 ⇒ **空数组** = 只隐藏基础表。本键是**附加**屏蔽，
- * 读不到声明就等于"没有证据要求多藏"；且**隐藏是危险方向**（藏掉 agent 真正要用的工具
- * 会静默损害能力），而配置损坏本身已有 `loadSerenityConfig` 的响亮告警（不静默）。
- *
- * 🔴 名字在此**不做**校验——未注册的名字会被 DSH `restrict` 拒绝（宿主契约逐字：
- * "Empty filters, unknown names, scope-local names, and reserved transport names **fail**"）
- * ⇒ **调用方必须按"失败退化为基础表"处理**（见 `syncSafeModeRestriction`），
- * 否则 CCC 写错一个名字会连 `bash` 的隐藏一起丢掉。
- *
- * @param root CCC 根
- * @param paths 候选配置相对路径
- * @returns 去空白后的工具名列表（非字符串/空白项被丢弃）
+ * ⛔ 别为了"以后可能还要按开关多藏几件"把它加回来：
+ * 实测（2026-11-06 本机 0.2.2-rc.1）该键当时那 11 项里 **3 项宿主根本没注册**（空转，
+ * 因宿主 `restrict()` 对未知名只会剔除 ⇒ 零信号），其余 7 项**任何时候都该关**
+ * （跟着文件开关忽隐忽现反而是缺陷）。⇒ 若将来真要再引入"随开关变化的屏蔽面"，
+ * 第一个要回答的问题是"**它为什么不该一直关**"。
  */
-export function readSafeModeHiddenTools(root: string, paths: string[] = DEFAULT_SERENITY_CONFIG_PATHS): string[] {
-  const list = loadSerenityConfig(root, paths).safeMode?.hiddenTools;
-  if (!Array.isArray(list)) return [];
-  return list
-    .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
-    .map((x) => x.trim());
-}
 
 /**
  * 读取 CCC 声明的「轨迹默认 skill」清单（`trajectory.skills`，v1.44.0）。

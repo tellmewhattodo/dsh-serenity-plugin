@@ -8,10 +8,11 @@ import {
   getNonCccHiddenDiagnostics,
   getHostScheduleHiddenDiagnostics,
   computeVisibilitySources,
+  ALWAYS_DENY_TOOLS,
 } from '../src/seams/guards.js'
 import { REGISTERED_TOOLS, CONDITIONAL_TOOL_COUNT } from '../src/kernel/invariant.js'
 import { registerImChannel, __resetImChannelsForTest } from '../src/im/channels.js'
-import { readBlacklist, matchBlacklist, pathInside, readSafeModeHiddenTools, type BlacklistRule } from '../src/kernel/ccc.js'
+import { readBlacklist, matchBlacklist, pathInside, type BlacklistRule } from '../src/kernel/ccc.js'
 import type { TrajectoryConstraint } from '../src/trajectory/policy/profile.js'
 
 let dir: string
@@ -258,84 +259,55 @@ describe('blacklist: 对象条目解析（对齐 osp readBlacklist）', () => {
   })
 })
 
-describe('readSafeModeHiddenTools（判据：fail-open）', () => {
-  function write(cfg: unknown): void {
-    mkdirSync(join(dir, '.opencode'), { recursive: true })
-    writeFileSync(join(dir, '.opencode', 'serenity.json'), typeof cfg === 'string' ? cfg : JSON.stringify(cfg))
-  }
-
-  it('未配置 / 无该键 / 非数组 ⇒ []（不抛）', () => {
-    expect(readSafeModeHiddenTools(dir)).toEqual([])
-    write({ safeMode: {} })
-    expect(readSafeModeHiddenTools(dir)).toEqual([])
-    write({ safeMode: { hiddenTools: 'workflow' } })
-    expect(readSafeModeHiddenTools(dir)).toEqual([])
-  })
-
-  it('读数组 / 去空白 / 丢非字符串 / 保序', () => {
-    write({ safeMode: { hiddenTools: [' workflow ', 42, null, '', 'job_kill'] } })
-    expect(readSafeModeHiddenTools(dir)).toEqual(['workflow', 'job_kill'])
-  })
-
-  it('🔴 配置损坏 ⇒ []（fail-open：隐藏是危险方向，读不到声明就不多藏）', () => {
-    write('{ this is not json')
-    expect(() => readSafeModeHiddenTools(dir)).not.toThrow()
-    expect(readSafeModeHiddenTools(dir)).toEqual([])
-  })
-})
-
 describe('safe-mode 工具隐藏（源 = computeVisibilitySources.safeMode）', () => {
   /**
    * 🔴 方案 C 后：六条 sync 合并成一次发射，**每源的判据仍要逐条钉**。
    * ⇒ 这里问纯函数 `computeVisibilitySources`（判据一条未动，只是不再需要替身宿主）。
+   *
+   * 🔴🔴 **2026-11-06 owner 令（判据变更，D184）**：
+   *   「subagent 一套 tool 常开，**安全模式开关只影响 bash 开关**，剩余的都是只要在
+   *     CCC 目录就关」。
+   * ⇒ 本源从「基础表 ∪ CCC 声明的 `hiddenTools`」收成**只有 `bash`**；
+   *    配置键 `safeMode.hiddenTools` 整条退役（`readSafeModeHiddenTools` 已删）。
+   * ⚠️ **原前提被谁取代**：老前提 = "CCC 可以声明一批只在安全模式期间多藏的工具"。
+   *    实测（本机 0.2.2-rc.1）那 11 项里 **3 项宿主根本没注册**（空转），
+   *    其余 7 项**任何时候都该关** ⇒ 跟着文件开关忽隐忽现反而是缺陷。
+   * ⇒ 它们已并入 `ALWAYS_DENY_TOOLS`（见下方 alwaysDeny 那一组）。
    */
   function declareHidden(list: unknown): void {
     mkdirSync(join(dir, '.opencode'), { recursive: true })
     writeFileSync(join(dir, '.opencode', 'serenity.json'), JSON.stringify({ safeMode: { hiddenTools: list } }))
   }
 
-  it('未声明 → 只隐藏基础表（bash），write/edit 保留', () => {
+  it('安全模式开 → 只隐藏 bash；write/edit 保留', () => {
     writeFileSync(join(dir, '.serenity-safe-on'), 'x')
     const deny = denyOf('safeMode', dir)
     expect(deny).toEqual(['bash'])
     expect(deny).not.toContain('write')
+    expect(deny).not.toContain('edit')
   })
 
-  it('声明 hiddenTools → deny = 基础表 ∪ 声明（安全模式开启期间）', () => {
-    writeFileSync(join(dir, '.serenity-safe-on'), 'x')
-    declareHidden(['workflow', 'job_kill'])
-    expect(denyOf('safeMode', dir)).toEqual(['bash', 'job_kill', 'workflow'])
-  })
-
-  it('无安全模式标记 → 声明不生效（本源不贡献任何 deny）', () => {
-    declareHidden(['workflow'])
+  it('无安全模式标记 → 本源不贡献任何 deny（bash 也不藏）', () => {
     expect(denyOf('safeMode', dir)).toEqual([])
   })
 
-  it('🔴 声明读坏 ≠ 安全模式失效：退化为只藏基础表（bash 不许丢）', () => {
+  it('🔴 退役键 `hiddenTools` 不再被读取（写了也不生效，且不报错）', () => {
+    // 这条钉的是**退役本身**：若有人把"读 hiddenTools"加回来，本用例立刻红。
+    // ⚠️ 它同时是 D151 的守卫：这个键留在存量配置里是**静默无效**的，
+    //    所以配置面已同批清空（本机 .opencode/serenity.json）。
     writeFileSync(join(dir, '.serenity-safe-on'), 'x')
-    // 坏 JSON ⇒ readSafeModeHiddenTools 内部**fail-open 返回 []**（它自己不抛，见上一条 describe）
-    // ⇒ 本源的 deny 退化成基础表；**这不是错误路径**，`error` 字段应当为空。
-    // 🔴 如实记录：我最初在这里断言 `error` 非空（以为会抛），那是**把 fail-open 当成了抛错**。
-    //    两者对上游的意义不同：抛错要告警，fail-open 是既定语义（"隐藏是危险方向，读不到就不多藏"）。
+    declareHidden(['workflow', 'job_kill'])
+    expect(denyOf('safeMode', dir)).toEqual(['bash'])
+  })
+
+  it('声明读坏 ≠ 安全模式失效：仍然只藏 bash（不抛、不告警）', () => {
+    writeFileSync(join(dir, '.serenity-safe-on'), 'x')
     mkdirSync(join(dir, '.opencode'), { recursive: true })
     writeFileSync(join(dir, '.opencode', 'serenity.json'), '{ bad json')
     const src = computeVisibilitySources('s-test', dir).find((x) => x.id === 'safeMode')!
     expect(src.ok).toBe(true)
     expect([...src.deny]).toEqual(['bash'])
     expect(src.error).toBeUndefined()
-  })
-
-  it('非法声明项（数字/空白）跳过，只留字符串', () => {
-    writeFileSync(join(dir, '.serenity-safe-on'), 'x')
-    declareHidden([42, null, '  ', 'workflow'])
-    expect(denyOf('safeMode', dir)).toEqual(['bash', 'workflow'])
-  })
-
-  it('声明与基础表重名 ⇒ 去重', () => {
-    writeFileSync(join(dir, '.serenity-safe-on'), 'x')
-    declareHidden(['bash', 'workflow'])
-    expect(denyOf('safeMode', dir)).toEqual(['bash', 'workflow'])
   })
 })
 describe('guards: im-bridge 条件可见（源 = computeVisibilitySources.imBridge，**轨迹级**）', () => {
@@ -426,11 +398,11 @@ describe('guards: im-bridge 条件可见（源 = computeVisibilitySources.imBrid
 describe('guards: 常驻拒绝表（源 = computeVisibilitySources.alwaysDeny，v1.106.0）', () => {
   // owner 2026-11-01 令：ask_user_question 是阻塞式提问，与「自动化 + 轨迹协作」冲突
   //   ⇒ 常驻隐藏，**与安全模式无关**。
-  // 🔴 本组的主判据是**第二、三条**（安全模式开关都不改变本源的集合）——那是本机制区别于
-  //    `safeMode.hiddenTools` 的**唯一那一维**。只测"藏了"会被 safeMode 的实现顺手满足（假绿）。
+  // 🔴 本组的主判据是**第二、三条**（安全模式开关都不改变本源的集合）——那正是本机制区别于
+  //    `safeMode` 源的**唯一那一维**。只测"藏了"会被 safeMode 的实现顺手满足（假绿）。
 
-  it('CCC 内 ⇒ 恒贡献 deny ask_user_question', () => {
-    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
+  it('CCC 内 ⇒ 恒贡献本表全部条目', () => {
+    expect(denyOf('alwaysDeny', dir)).toEqual([...ALWAYS_DENY_TOOLS].sort())
   })
 
   it('🔴 安全模式**关着**：safeMode 源为空，而 alwaysDeny 仍非空（解耦判据）', () => {
@@ -438,21 +410,21 @@ describe('guards: 常驻拒绝表（源 = computeVisibilitySources.alwaysDeny，
     if (existsSync(safeOn)) rmSync(safeOn)
     // 正控：关掉安全模式后 safeMode 源确实退化为空（证明下面那条非空不是"安全模式恰好开着"）
     expect(denyOf('safeMode', dir)).toEqual([])
-    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
+    expect(denyOf('alwaysDeny', dir)).toEqual([...ALWAYS_DENY_TOOLS].sort())
   })
 
   it('🔴 安全模式**开着**也不会被并进 safeMode 那张表（两表分离判据）', () => {
     writeFileSync(join(dir, '.serenity-safe-on'), 'on')
     // 正控：安全模式开着时基础表生效
     expect(denyOf('safeMode', dir)).toContain('bash')
-    // 🔴 主断言：ask_user_question **不得**出现在 safeMode 源 ——
-    //    若它出现在那里，说明被错放进 SAFE_MODE_DENY_TOOLS，于是"与安全模式无关"就假了
+    // 🔴 主断言：本表条目**不得**出现在 safeMode 源 ——
+    //    若出现在那里，说明被错放进 SAFE_MODE_DENY_TOOLS，于是"与安全模式无关"就假了
     //    （D151：错放没有机械信号，只有这条断言能抓住它）
-    expect(denyOf('safeMode', dir)).not.toContain('ask_user_question')
-    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
+    for (const name of ALWAYS_DENY_TOOLS) expect(denyOf('safeMode', dir)).not.toContain(name)
+    expect(denyOf('alwaysDeny', dir)).toEqual([...ALWAYS_DENY_TOOLS].sort())
   })
 
-  it('CCC 的 hiddenTools 声明改变不了本源的集合（本源不读配置）', () => {
+  it('🔴 退役键 `hiddenTools` 声明改变不了本源的集合（本源不读配置）', () => {
     writeFileSync(join(dir, '.serenity-safe-on'), 'on')
     mkdirSync(join(dir, '.opencode'), { recursive: true })
     // 故意声明**别的**工具：本源的集合必须纹丝不动
@@ -460,7 +432,24 @@ describe('guards: 常驻拒绝表（源 = computeVisibilitySources.alwaysDeny，
       join(dir, '.opencode', 'serenity.json'),
       JSON.stringify({ safeMode: { hiddenTools: ['workflow'] } }),
     )
-    expect(denyOf('alwaysDeny', dir)).toEqual(['ask_user_question'])
+    // `workflow` 本来就在本表里（它不是因声明才进来的），故这里要钉的是"不多不少"
+    expect(denyOf('alwaysDeny', dir)).toEqual([...ALWAYS_DENY_TOOLS].sort())
+  })
+
+  it('🔴 subagent 一族**不在**本表（owner 2026-11-06 令：常开）', () => {
+    // 为什么单独钉：owner 的原话是「subagent 一套 tool 常开」——
+    // 若有人把它们挪进本表，功能会**静默消失**（工具从 schema 移除，模型根本看不见），
+    // 而所有"藏住了"的用例照样绿。这条是唯一能抓住它的。
+    const deny = denyOf('alwaysDeny', dir)
+    for (const name of ['subagent', 'subagent_fork', 'send_message', 'list_agents', 'interrupt_agent', 'list_subagent_models']) {
+      expect(deny).not.toContain(name)
+    }
+  })
+
+  it('🔴 working_directory 在本表（宿主 0.2.2-rc.1 新增，owner 令「我们也关掉」）', () => {
+    // 它改的是**会话 cwd**，而 cwd 是 CCC 边界判定（`cccRootForCwd`）的输入之一
+    // ⇒ 让模型能改 cwd，等于让模型能移动自己所在的边界。
+    expect(denyOf('alwaysDeny', dir)).toContain('working_directory')
   })
 
   it('非 CCC（root=null）⇒ 本源缺席，且插件整体退让（不干预宿主工具）', () => {

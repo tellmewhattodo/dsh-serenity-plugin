@@ -14,6 +14,52 @@
 
 ---
 
+## v1.123.0 — 2026-11-06（工具屏蔽重整：三张表各归各位 ＋ 退役 `safeMode.hiddenTools`）
+
+> 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
+> 必须是**两个井号 ＋ 空格 ＋ v<semver>**。⛔ 不要为了排版改成 `###`／`#`（会报「CHANGELOG 无条目」）。
+
+### 判据从哪来（owner 2026-11-06 原话）
+
+> 「subagent 一套 tool 常开，安全模式开关只影响 bash 开关，剩余的都是只要在 CCC 目录就关；
+> 宿主没注册的可以干掉了，宿主新增的 `working_directory` 我们也关掉」
+
+三句话 ⇒ **三张表，各管一段**，不再互相渗透：
+
+| 范围 | 表 | 何时生效 | 成员 |
+|---|---|---|---|
+| subagent 一族 | **不入任何表** | **常开** | `subagent` `subagent_fork` `send_message` `list_agents` `interrupt_agent` `list_subagent_models` |
+| shell | `SAFE_MODE_DENY_TOOLS` | **只随 `.serenity-safe-on`** | `bash` |
+| 其余 | `ALWAYS_DENY_TOOLS` | **只要在 CCC 内** | 见下 |
+
+### 🔴 结构变更：`safeMode.hiddenTools` 整条退役
+
+| 面 | 变更 |
+|---|---|
+| **退役的键** | `safeMode.hiddenTools`（v1.51.4 起）。`readSafeModeHiddenTools()` **已删除**，`computeVisibilitySources` 的 `safeMode` 源**不再读配置**，只返回 `['bash']`。存量配置里残留该键 ⇒ **静默忽略**（schemastery 非 strict）。 |
+| **为什么要淘汰这个形态** | 它表达"安全模式期间的**附加**屏蔽"，而实测需求恰恰相反：那批工具**任何时候都该关**。跟着一个文件开关**忽隐忽现**不是保护，是缺陷——安全模式一关，`job_*` / `workflow` / `plugin_manager` 就全回来了。 |
+| **`alwaysDeny` 源扩表** | 从 1 项 → **8 项**：`ask_user_question`（v1.106.0 起）＋ `job_output` `job_list` `job_kill` `workflow` `exit_plan_mode` `plugin_manager` ＋ 🆕 `working_directory`。理由逐条写在 `ALWAYS_DENY_TOOLS` 头部。 |
+| 🆕 **`working_directory`（宿主 0.2.2-rc.1 新增）** | 它改的是**会话 cwd**，而 cwd 是 CCC 边界判定（`cccRootForCwd`）的输入之一 ⇒ 让模型能改 cwd，等于让模型能移动自己所在的边界。 |
+| ⛔ **删掉 3 个空转名** | `str_replace_editor` / `email_send` / `email_reply` —— 实测装机包 grep **零命中**（宿主从未注册过这三个名字；邮箱是 profile patch 面的 `tool-email` 插件，工具名不是这两个）。旧表里它们**永远剔不掉**（宿主 `restrict()` 对未知名只剔除），属零信号熵（D151）。 |
+| **面板文案同步** | `SafeModePanel.tsx` 四处「写工具已隐藏 / 写工具全开」→「bash 已隐藏 / bash 可用」。旧文案在本次改造后**已经是假的**：安全模式开着时 `write`/`edit` 从来都在。 |
+
+### 测试
+
+- `guards.test.ts`：删掉 `readSafeModeHiddenTools` 那组（函数已不存在）；`safeMode` 组重写为「只藏 bash」＋ 新增**退役键不生效**的反向钉；`alwaysDeny` 组改为对着 `ALWAYS_DENY_TOOLS` 判，并新增两条：**subagent 一族不得进入本表**（进了就静默失去委派能力，而所有"藏住了"的用例照样绿）／**`working_directory` 必须在本表**。
+- `seams/context-register.test.ts`：一处**假红**，成因值得记 —— 原判别式用 `deny.length === REGISTERED_TOOLS.length` 当"是否隐藏了全部工具"，而 `alwaysDeny` 扩到 8 项后，`8 + hostSchedule(4) + imBridge(1) = 13` 与 `REGISTERED_TOOLS.length` **碰巧相等** ⇒ 误判成全隐藏。**长度是集合的必要不充分条件**，改成真集合判据（`⊇ REGISTERED_TOOLS`）后对"数目碰巧相等"免疫。
+
+**变异检验**：从表里删 `working_directory` ⇒ `--filter guards` **精确红 1 条**（正是新加的那条）；还原后 114/114 绿。
+
+### 门禁
+
+typecheck ✅ ／ typecheck-host 0.2.2-rc.1 ✅ ／ test **213 files / 3357 tests** ✅ ／ coverage **95.06%** ✅ ／ build ✅ ／ pack-check ✅
+
+> 🔴 **可外推的判据**：**「随开关变化的屏蔽面」要能被追问一句"它为什么不该一直关"**。
+> 答案若含糊，那它就不该挂在开关上——开关的每一次翻转都会让一批工具凭空出现，
+> 而"它回来了"这件事本身不会触发任何告警。
+
+---
+
 ## v1.122.0 — 2026-11-06（🔴 P0 回归修复：`reconstruct` 换代后 IM 入站投给已归档的旧载体）
 
 > 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
