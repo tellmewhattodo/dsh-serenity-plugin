@@ -59,6 +59,7 @@ vi.mock('@deepseek-ai/dsh-session', () => ({
 }))
 
 import { name, inject, apply, type Config } from '../src/index.ts'
+import { REGISTERED_TOOLS } from '../src/kernel/invariant.js'
 import { __setSimpleSourceForTest, defaultSimpleSettings, SERENITY_SETTINGS_NS } from '../src/surface/settings.js'
 
 /**
@@ -144,11 +145,18 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     expect(typeof apply).toBe('function')
   })
 
-  it('apply 注册 11 个真实工具（v1.30 命名重构 + v1.31.0 im-bridge + v1.52 ontology + v1.54 serenity-skill-creator，后两者条件可见；2026-10-28 下线 cheap-worker ⇒ 13→12；v1.106.0 acc-diag 并入 dashboard diag ⇒ 12→11）', () => {
+  it('apply 注册全部「具备的工具面」＝ REGISTERED_TOOLS 去掉开关注的 diagram（⛔ 不手写数字）', () => {
     const { ctx, register } = mockCtx()
     apply(ctx, FULL_CONFIG)
-    expect(register).toHaveBeenCalledTimes(11)
+    // 🔴 **数字从 `REGISTERED_TOOLS` 推**（2026-11-06 修）：此前写死 11，
+    //    加 `reconstruct` 后它红得对，但红的原因是"夹具过期"而不是"实现错了"——
+    //    手写数字会随每次工具面变更变成噪音，而噪音会训练人"这条红了大概是夹具问题"。
+    //    ⚠️ 判据强度不变：仍然是"注册数**恰好**等于该注册的那个集合"，多一个少一个都红。
+    const expected = REGISTERED_TOOLS.filter((n) => n !== 'diagram')
+    expect(register).toHaveBeenCalledTimes(expected.length)
     const names = register.mock.calls.map((c) => (c[0] as { name: string }).name)
+    // 逐名对账（比数字更强：数字对而名字换了照样红）
+    expect([...names].sort()).toEqual([...expected].sort())
     expect(names).toContain('container_fs')
     expect(names).toContain('cognitive_trajectory')
     expect(names).toContain('dashboard')
@@ -158,27 +166,29 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     expect(names).not.toContain('cheap-worker')
     expect(names).toContain('localstore')
     expect(names).toContain('container_admin')
-    expect(names).toContain('cognitive_trajectory')
     expect(names).toContain('im-bridge')
     // 🔒 v1.106.0 回归钉：acc-diag 已并入 dashboard diag ⇒ **不得**再有独立工具
     expect(names).not.toContain('acc-diag')
     expect(names).toContain('ontology')
     expect(names).toContain('serenity-skill-creator')
+    // 🆕 v1.121.0：reconstruct 恒被 register（可见性由 `when` 判，**不靠不注册**）
+    expect(names).toContain('reconstruct')
   })
 
-  it('🆕 D104：diagram 工具按开关注册 —— 关（缺省）时**不注册**，开时成为第 12 个', () => {
+  it('🆕 D104：diagram 工具按开关注册 —— 关（缺省）时**不注册**，开时**恰好多这一个**', () => {
     // 关（= 本文件的 FULL_CONFIG 不带 diagramEnabled）
     const off = mockCtx()
     apply(off.ctx, FULL_CONFIG)
     const offNames = off.register.mock.calls.map((c) => (c[0] as { name: string }).name)
     expect(offNames).not.toContain('diagram')
-    expect(off.register).toHaveBeenCalledTimes(11)
-    // 开 ⇒ **多一个**（不是"多注册一遍全部"：总数为 12 才算对）
+    const withoutDiagram = REGISTERED_TOOLS.length - 1
+    expect(off.register).toHaveBeenCalledTimes(withoutDiagram)
+    // 开 ⇒ **多一个**（不是"多注册一遍全部"：总数恰好 +1 才算对）
     const on = mockCtx()
     apply(on.ctx, { ...FULL_CONFIG, diagramEnabled: true } as Config)
     const onNames = on.register.mock.calls.map((c) => (c[0] as { name: string }).name)
     expect(onNames).toContain('diagram')
-    expect(on.register).toHaveBeenCalledTimes(12)
+    expect(on.register).toHaveBeenCalledTimes(withoutDiagram + 1)
   })
 
   /**
@@ -193,10 +203,14 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
    * ③ **别的命名空间**的写入不得把工具打出来（漏掉 ns 过滤会变成"任何设置写入都注册一次"）。
    */
   it('🆕 v1.51.1：diagram 开关**热生效** —— 拨开/拨回都当场生效，且只认本插件的命名空间', () => {
+    // 🔴 数字一律从 `REGISTERED_TOOLS` 推（⛔ 不写死）：写死会让每次工具面变更都制造一条
+    //    "夹具过期"的红，而那种红训练人忽视本用例 —— 它恰恰是**热生效**唯一的机械钉子。
+    const base = REGISTERED_TOOLS.length - 1 // 初始态：diagram 关 ⇒ 比全表少一个
     const cfg: Config = { ...FULL_CONFIG, diagramEnabled: false }
     const { ctx, register, on, disposers } = mockCtx()
     apply(ctx, cfg)
     expect(registeredNames(register)).not.toContain('diagram') // 初始：关
+    expect(register).toHaveBeenCalledTimes(base)
 
     // 宿主写了一份**新配置**（真宿主 = 换 `fiber.config`；本替身无 fiber ⇒ 源 = 我们注入的这份）
     let enabled = false
@@ -210,7 +224,7 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
       enabled = true
       emit(ctx, 'settings/document-updated', SERENITY_SETTINGS_NS, 2)
       expect(registeredNames(register)).toContain('diagram')
-      expect(register).toHaveBeenCalledTimes(12) // 只多这一个，不是"重注册一遍全部"
+      expect(register).toHaveBeenCalledTimes(base + 1) // 只多这一个，不是"重注册一遍全部"
 
       // ② 拨回 ⇒ **注销**（工具从模型工具清单里消失，不是"留着但不响应"）
       const idx = registeredNames(register).indexOf('diagram')
@@ -222,8 +236,8 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
       // ①b 兜底通道：宿主事件面若换名，`session/created` 仍能把开关的最新值同步过来
       enabled = true
       emit(ctx, 'session/created')
-      expect(registeredNames(register)).toHaveLength(13) // 再一次注册（前一次已注销）⇒ 第二次同名注册
-      expect(disposers[12]).not.toBe(disposers[idx])
+      expect(registeredNames(register)).toHaveLength(base + 2) // 再一次注册（前一次已注销）⇒ 第二次同名注册
+      expect(disposers[base + 1]).not.toBe(disposers[idx])
     } finally {
       __setSimpleSourceForTest(null) // 模块级源必须复位（跨用例泄漏会让别处的门控判据失真）
     }
@@ -291,7 +305,7 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     expect(() => apply(ctx, FULL_CONFIG)).not.toThrow()
     expect(warn.mock.calls.some((c) => String(c[0]).includes('ctx.effect 不可用'))).toBe(true)
     warn.mockRestore()
-    expect(register).toHaveBeenCalledTimes(11) // 其余装配不受影响
+    expect(register).toHaveBeenCalledTimes(REGISTERED_TOOLS.length - 1) // 其余装配不受影响（diagram 关）
   })
 
   it('config 开关控制注册项', () => {

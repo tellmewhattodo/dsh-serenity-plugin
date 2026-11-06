@@ -6,24 +6,27 @@ import { tmpdir } from 'node:os'
 import { verifyToolConsistency, assertManifestProse, REGISTERED_TOOLS, CONDITIONAL_TOOL_COUNT } from '../src/kernel/invariant.js'
 
 describe('invariant: 清单与注册工具一致性', () => {
-  it('一致时零问题（13 工具，与 dsh.plugin.json contributes.tools 一致）', () => {
+  it('一致时零问题（清单与 REGISTERED_TOOLS 同集合 ⇒ 两侧不得有一处手写）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'inv-'))
     const manifest = join(dir, 'dsh.plugin.json')
+    // 🔴 **夹具从 REGISTERED_TOOLS 派生，⛔ 不手写名单**：
+    //    2026-11-06 实测 —— 这条夹具原先把 12 个名字写死，加 `reconstruct` 后它**红得对**，
+    //    但它红的原因是"夹具过期"而不是"实现错了"。手写名单会随每次工具面变更变成噪音，
+    //    而噪音会训练人"这条红了大概是夹具问题" ⇒ 真正的不一致反而被放过去。
     writeFileSync(
       manifest,
-      JSON.stringify({
-        id: 'x',
-        contributes: {
-          tools: ['container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'localstore', 'container_admin', 'im-bridge', 'diagram', 'ontology', 'serenity-skill-creator'],
-        },
-      }),
+      JSON.stringify({ id: 'x', contributes: { tools: [...REGISTERED_TOOLS] } }),
     )
     expect(verifyToolConsistency(manifest, REGISTERED_TOOLS)).toEqual([])
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('REGISTERED_TOOLS 含 12 工具（v1.30 命名重构 + v1.31.0 im-bridge + v1.51 diagram + v1.52 ontology + v1.54 serenity-skill-creator；2026-10-28 下线 cheap-worker ⇒ 14→13；v1.106.0 acc-diag 并入 dashboard diag ⇒ 13→12）', () => {
-    expect(REGISTERED_TOOLS).toHaveLength(12)
+  it('REGISTERED_TOOLS：常驻 10 ＋ 条件 3（v1.121.0 加 reconstruct；数量由两个常量对账，⛔ 不写死总数）', () => {
+    // 🔴 只钉**结构不变量**（常驻/条件两段的划分），不钉总数：
+    //    总数每加一个工具就要改一次数字，而那个数字**不承载任何判据**（真正的判据是
+    //    "与清单同集合"，由上面那条用例守）。写死它 ⇒ 每次加工具都制造一条必然过期的断言。
+    expect(REGISTERED_TOOLS.length - CONDITIONAL_TOOL_COUNT).toBe(10)
+    expect(CONDITIONAL_TOOL_COUNT).toBe(3)
     expect(REGISTERED_TOOLS).toContain('container_fs')
     expect(REGISTERED_TOOLS).toContain('container_admin')
     expect(REGISTERED_TOOLS).toContain('cognitive_trajectory')
@@ -31,10 +34,10 @@ describe('invariant: 清单与注册工具一致性', () => {
     expect(REGISTERED_TOOLS).toContain('praxis')
     expect(REGISTERED_TOOLS).toContain('dashboard')
     expect(REGISTERED_TOOLS).toContain('localstore')
-    expect(REGISTERED_TOOLS).toContain('cognitive_trajectory')
-    // v1.31.1：v1.31.0 漏改此处与清单（双侧同错 → 陈旧一致静默通过），本次补齐
     expect(REGISTERED_TOOLS).toContain('im-bridge')
     expect(REGISTERED_TOOLS).toContain('serenity-skill-creator')
+    // v1.121.0：reconstruct 必须在**条件段**（末 CONDITIONAL_TOOL_COUNT 项）
+    expect((REGISTERED_TOOLS as readonly string[]).slice(-CONDITIONAL_TOOL_COUNT)).toContain('reconstruct')
   })
 
   it('真实清单与 REGISTERED_TOOLS 一致（防双侧陈旧再次静默通过）', () => {

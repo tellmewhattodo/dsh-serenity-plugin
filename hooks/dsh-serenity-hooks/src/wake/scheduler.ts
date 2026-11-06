@@ -581,10 +581,22 @@ export async function sendToCognitiveTrajectory(
  *
  * @returns 命中返回 agent 与取得方式；任一步失败返回**带原因**的 error（不静默、不误报成功）
  */
-async function createAndBindTarget(
+export async function createAndBindTarget(
   ctx: unknown,
   root: string,
   dirName: string,
+  /**
+   * 🆕 `reconstruct` 换代用（2026-11-06）：**允许顶掉该轨迹此刻仍在位的旧载体**。
+   *
+   * 为什么必须显式传：`claimBinding` 的「轨迹唯一」判据在旧载体**还活着**时会把无 takeover 的
+   * 写入判成 `TRAJECTORY_OCCUPIED`。而 `send-now` 那条路的语义恰恰是"只在**从未有过**载体时自建"
+   * （`carrierState !== 'never'` 就拒）⇒ 它**永远**不会走到"顶掉活载体"这一格，
+   * 故缺省 `false` 是它的正确取值，不受影响。
+   *
+   * ⚠️ `reconstruct` 与 `rebuild` 是**唯二**该传 `true` 的调用方：它们都是"载体换代"这个
+   * 显式声明的动作。静默换代正是"一条轨迹长出两个载体"的成因（见 `bind-file.ts` 头注）。
+   */
+  opts: { takeover?: boolean } = {},
 ): Promise<{ agent: Agent; how: string } | { error: string; notReady?: boolean }> {
   const sc = hostService<HostSessionController>(ctx, 'sessionController')
   const create = sc?.create
@@ -631,6 +643,12 @@ async function createAndBindTarget(
       // 🔴 布尔事实：这条载体是 ACC 以"用户开场白"形态建的（D171）。
       //    不从 `note` 文案推 —— 文案会改，判据不能长在文案上（D151 同族）。
       createdAsUser: true,
+      // reconstruct 换代：顶掉仍在位的旧载体（缺省 false ⇒ send-now 语义一字不变）
+      ...(opts.takeover === true ? { takeover: true } : {}),
+      // 🔴 **必须传宿主存活探针**：不传 ⇒ `claimBinding` 沿用"文件在就算占用"的旧语义
+      //    （保守拒绝）⇒ 换代在旧载体仍活着时**必然**被判 `TRAJECTORY_OCCUPIED`
+      //    ⇒ 新会话建出来了却没绑上，而回执只显示一句 `⚠️ 绑定写入失败`。
+      alive: hostAliveProbe(ctx),
     },
   )
   // ③b 🔴 **投一条"用户形态"开场白**（D171 / owner 裁 B）。

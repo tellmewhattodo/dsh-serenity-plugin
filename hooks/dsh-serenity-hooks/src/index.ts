@@ -45,6 +45,8 @@ import { readDshVersion } from './surface/status.js'
 import { registerSettingsSection, readSimpleSettings, SERENITY_SETTINGS_NS } from './surface/settings.js'
 import { registerGateway } from './gateway/server.js'
 import { registerRebuildTurnHook } from './trajectory/rebuild.js'
+import { registerReconstructTurnHook, makeReconstructWhen, supportsActivation } from './trajectory/reconstruct.js'
+import { createReconstructTool } from './tools/reconstruct.js'
 import { registerOutputGuardHook } from './guard/seam.js'
 import { migrateLegacyLocalstore, globalConfigPath } from './kernel/config.js'
 import { registerWakeScheduler } from './wake/scheduler.js'
@@ -450,12 +452,24 @@ export function apply(ctx: Context, config: Config): void {
   // 🔴 面板拨开关**无需**额外热同步订阅：宿主 `fiber.update()` 的语义 = 校验新 config 后 **restart 本插件**
   //    （cordis `Fiber.update` 文档）⇒ apply 重跑、这一行自然重新判一次。
   if (config.tools) registerDiagramTool(ctx)
+  // 🆕 v1.121.0（owner 2026-11-06 令）：`reconstruct` —— 会话累计用量过大时**换代**。
+  // 🔴 **唯一一个用 `register(def, { when })` 的工具**：平时不进模型声明、也不进派发
+  //    （宿主契约逐字 "False excludes it from both declarations and dispatch"），达阈值才出现。
+  //    ⛔ 不要"顺手"改成 `restrict({deny})` —— restrict 只能 deny，做不到"达阈值再放出来"。
+  // ⚠️ 低档宿主（< 0.2.2-rc.1）没有 `register` 的第二参数 ⇒ 多传的实参被静默忽略
+  //    ⇒ 那个档位上它**常驻可见**（降级，不是缺陷；`supportsActivation()` 会把这个读数落进诊断）。
+  //
+  // 🔴 **门在 `config.tools` 上**（与上面所有 tool 注册同门）：`tools:false` 是全关，
+  //    漏了这一处会让"关掉工具面"仍然多出一个工具（且它带着 `when`，看起来像"只有它有特权"）。
+  if (config.tools) registerReconstructTool(ctx)
   // v1.21 F1：双端口网关（第二监听器 + 登录 + 反代；v1.22 起 plugin 全局——
   // enabled 读 DSH settings 开关，host/port/accounts 读全局文件，不依赖具体 CCC；
   // 旧 CCC localstore 配置在首个 agent/session-start 时一次性迁移）
   registerGateway(ctx)
   // v1.22.4 定稿：cognitive_trajectory rebuild（原 session_rebuild）排队 → agent/turn-stopping 时执行真正清空（复用旧会话原地重来）
   registerRebuildTurnHook(ctx)
+  // 🆕 v1.121.0：reconstruct 的换代执行点（与 rebuild 同形：**无 pending 零开销**）
+  registerReconstructTurnHook(ctx)
   // v1.26.3 输出守卫：最终输出敏感词检测 + steer 打回重生成（凭据/机制/MSM 名不泄露给用户）
   registerOutputGuardHook(ctx)
   // v1.21 F3：use 激活宁静号会话时同步重命名当前 dsh 会话（在 createCognitiveTrajectoryTool 内实现，
@@ -573,6 +587,50 @@ export function apply(ctx: Context, config: Config): void {
  * 🔴 **关的时候要注销**（不是"留着但不响应"）：与"关时不注册"同一口径 —— 工具不出现在模型清单里。
  * @param ctx - 插件上下文
  */
+/**
+ * 注册 `reconstruct` 工具（v1.121.0，owner 2026-11-06 令）。
+ *
+ * ## 与其它条件工具的区别（这一格是本仓唯一）
+ *
+ * `im-bridge` / `diagram` 的条件都靠 `seams/guards.ts` 的 `restrict({ deny })` 施加。
+ * 而宿主 `restrict` **只能 deny，不能 allow** ⇒ 那套机制只能"平时藏起来"，
+ * 做不到"达阈值再放出来"。`reconstruct` 要的正是后者 ⇒ 走 `register(def, { when })`：
+ * 宿主每步 `resolve()` 时问一次，`false` 时**既不进模型声明，也不进派发**。
+ *
+ * ⚠️ **档位降级（如实登记）**：第二参数只在宿主 `≥0.2.2-rc.1` 存在。
+ * 低档下多传的实参被 JS 静默忽略 ⇒ 那个档位上 `reconstruct` **常驻可见**。
+ * 这是"宿主没这个能力"的降级，不是缺陷；`supportsActivation()` 把它落进
+ * `AGENT_SESSIONS/.reconstruct-diag.json`，让读数面能区分"没出现"与"出现了但藏不住"。
+ *
+ * @param ctx - 插件上下文（`when` 要读 `sessionProjections`）
+ */
+function registerReconstructTool(ctx: Context): void {
+  try {
+    const when = makeReconstructWhen(ctx)
+    const tools = ctx.tools as unknown as {
+      register: (def: unknown, options?: { when?: (c: { agent?: unknown }) => boolean }) => () => void
+    }
+    if (supportsActivation()) {
+      // ⚠️ `when` 的参数类型按宿主契约收窄（`ToolActivationContext.agent: Agent`），
+      //    而上面那个 `register` 断言用的是 `unknown` —— 两者不兼容是**断言写法**造成的，
+      //    不是真类型冲突。⇒ 这里在断言面上再放宽一次（⛔ 不改 `makeReconstructWhen` 的签名：
+      //    它自己要与宿主契约逐字对齐，不该为了迁就一处断言而退化成 unknown）。
+      tools.register(createReconstructTool(ctx), {
+        when: when as unknown as (c: { agent?: unknown }) => boolean,
+      })
+    } else {
+      // 低档宿主：不传第二参数（传了也被忽略，但显式分开写能让源码读者看出这条降级）
+      tools.register(createReconstructTool(ctx))
+      console.log(
+        '[serenity-hooks] reconstruct：当前宿主不支持工具准入条件 ⇒ 该工具常驻可见（降级，非缺陷）',
+      )
+    }
+  } catch (err) {
+    // 注册失败不得成为启动单点；但要响亮（"阈值到了工具没出现"看起来会像阈值坏了）
+    console.error(`[serenity-hooks] ✗ reconstruct 工具注册失败: ${String((err as Error)?.message ?? err)}`)
+  }
+}
+
 function registerDiagramTool(ctx: Context): void {
   /** 当前注册的 disposer（`null` = 未注册）。宿主 `ctx.tools.register` **返回注销器**。 */
   let dispose: (() => void) | null = null

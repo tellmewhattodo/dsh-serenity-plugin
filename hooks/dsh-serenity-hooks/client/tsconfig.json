@@ -68,7 +68,13 @@
       "@deepseek-ai/dsh-api-session-controller/client": ["../node_modules/@deepseek-ai/dsh-api-session-controller/lib/types/client/index.d.ts"],
       "@deepseek-ai/dsh-client-locale": ["../node_modules/@deepseek-ai/dsh-client-locale"],
       "react": ["../node_modules/@types/react"],
-      "react/jsx-runtime": ["../node_modules/@types/react/jsx-runtime"]
+      "react/jsx-runtime": ["../node_modules/@types/react/jsx-runtime"],
+      // v1.121.0：popover 改走 `createPortal`（宿主 0.2.2 给标题簇加了 `mask-image`，
+      // mask 会**裁切 fixed 后代** ⇒ fixed 那条老逃生路在该档失效，宿主自己的槽位契约
+      // 也明写 "overlays must portal"）。`react-dom` 在 `tsdown.config.ts` 的 PLATFORM_MODULES
+      // 里是 external（运行时由宿主冻结模块表解析），**类型**则要靠这里 —— 与 `react` 同规矩：
+      // paths 条目必须同时有 devDependency（已加 `@types/react-dom@^18.3.7`），否则 tsc 回落 = 假红。
+      "react-dom": ["../node_modules/@types/react-dom"]
     }
   },
   "include": ["../src/client"]

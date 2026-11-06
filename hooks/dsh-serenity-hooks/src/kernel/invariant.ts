@@ -109,20 +109,18 @@ export function assertManifestProse(
   }
 
   // ② 两份 README 的 §3.1 标题（防"表体更新了、标题里的数字没更新"）
-  const cn = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
-  const countCn =
-    n <= 10
-      ? cn[n]
-      : n < 20
-        ? `十${cn[n - 10]}`
-        : `二十${n === 20 ? '' : cn[n - 20]}`
+  const countCn = cnNumberOf(n)
+  // 🔴 条件数也用同一套中文数字（此前 README 标题里的"两个"是**写死**的 ⇒ 条件数一变就漏）。
+  //    ⚠️ 必须经函数调用而不是就地三元 —— `CONDITIONAL_TOOL_COUNT` 是**字面量类型**（`3`），
+  //    就地判 `<= 10` 之后 TS 会把后续分支缩窄成 `never`，于是 `=== 20` 报"无重叠"（不是逻辑错，是窄化）。
+  const condCn = cnNumberOf(CONDITIONAL_TOOL_COUNT)
   for (const p of readmePaths) {
     if (!existsSync(p)) {
       issues.push(`README 不存在：${p}`)
       continue
     }
     const text = readFileSync(p, 'utf-8')
-    const m = text.match(/^###\s*3\.1\s*(\S+?)个工具/m)
+    const m = text.match(/^###\s*3\.1\s*(\S+?)个工具(?:（其中(\S+?)个按条件出现）)?/m)
     if (!m) {
       issues.push(`${p} 里找不到 §3.1 的「…个工具」标题（形态已变 ⇒ 钉子也要跟着改）`)
       continue
@@ -130,8 +128,28 @@ export function assertManifestProse(
     if (m[1] !== countCn) {
       issues.push(`${p} 的 §3.1 标题写「${m[1]}个工具」，应为「${countCn}个工具」（工具数已 ${n}）`)
     }
+    // 🔴 「其中 N 个按条件出现」也要判：那个数字一变，标题照样在撒谎，而旧钉子只看总数。
+    if (m[2] !== undefined && m[2] !== condCn) {
+      issues.push(`${p} 的 §3.1 标题写「其中${m[2]}个按条件出现」，应为「其中${condCn}个按条件出现」（条件工具数已 ${CONDITIONAL_TOOL_COUNT}）`)
+    }
   }
   return issues
+}
+
+/**
+ * 阿拉伯数字 → 中文数字（README §3.1 标题用；只覆盖到 29，够 README 用）。
+ *
+ * 🔴 抽成函数是**必须**的，不是洁癖：`CONDITIONAL_TOOL_COUNT` 是**字面量类型**，
+ * 就地写三元时 TS 会在第一个分支之后把类型缩窄成 `never` ⇒ `=== 20` 处报
+ * "types '3' and '20' have no overlap"（TS2367）。那**不是逻辑错**，是窄化造成的假报，
+ * 而"给假报让路"最简单的做法就是放宽类型 —— ⛔ 那会连带丢掉真正的越界保护。
+ * 走函数调用 ⇒ 入参类型是 `number`，窄化不发生，判据与顺序都不变。
+ */
+function cnNumberOf(n: number): string {
+  const cn = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+  if (n <= 10) return cn[n] ?? String(n)
+  if (n < 20) return `十${cn[n - 10] ?? ''}`
+  return `二十${n === 20 ? '' : (cn[n - 20] ?? '')}`
 }
 
 /**
@@ -160,16 +178,18 @@ export function assertManifestProse(
  * 同规格：**条件可见与否不影响这里列它**（本常量 = "插件**具备**的工具面"）。
  */
 export const REGISTERED_TOOLS = [
-  // ⚠️ **顺序有意义**：**常驻在前、条件在后**（条件者 = `im-bridge` / `diagram`）。
-  //   它被 `assertManifestProse`（本文件）用来把"后两个按条件出现"这类句子**钉成可判**——
+  // ⚠️ **顺序有意义**：**常驻在前、条件在后**（条件者 = `im-bridge` / `diagram` / `reconstruct`）。
+  //   它被 `assertManifestProse`（本文件）用来把"后几个按条件出现"这类句子**钉成可判**——
   //   所以**别按字母序重排**，加工具时**加在对应段的末尾**（常驻加在 `serenity-skill-creator` 之后、
   //   条件加在末位），否则那条钉子会对**正确的文字**报假错。
   'container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'ontology',
   'serenity-skill-creator', 'localstore', 'container_admin',
-  // ↓ 条件出现的两个（按注册期的条件钩子判可见性，见各自 `src/tools/*.ts`）
+  // ↓ 条件出现的三个（按注册期的条件钩子判可见性，见各自 `src/tools/*.ts`）
   //   ⚠️ v1.106.0：原第三个 `acc-diag` **已并入 `dashboard diag`** ⇒ 13 项，条件 2 项。
-  'im-bridge', 'diagram',
+  //   ⚠️ v1.121.0：新增 `reconstruct`（条件 = **累计 token 达阈值**，走 `register(def,{when})`
+  //      而不是其他工具用的 `restrict({deny})`）⇒ 13 项，条件 3 项。
+  'im-bridge', 'diagram', 'reconstruct',
 ] as const
 
 /** 条件出现的工具数（`REGISTERED_TOOLS` 的**末段**；`assertManifestProse` 用） */
-export const CONDITIONAL_TOOL_COUNT = 2
+export const CONDITIONAL_TOOL_COUNT = 3

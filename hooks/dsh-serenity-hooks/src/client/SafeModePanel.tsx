@@ -26,6 +26,7 @@ import {
   IconWarningOutlineMedium,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import './SafeModePanel.css'
 
 /** 会话头部操作区（list 槽）props */
@@ -287,7 +288,15 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
   useEffect(() => {
     if (!open) return
     const onDocMouseDown = (e: MouseEvent): void => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
+      // 🔴 portal 之后**必须同时认 popover 自己**（v1.121.0）：
+      //   卡片已挂到 `document.body`，不再是 `rootRef` 的 DOM 后代
+      //   ⇒ 只判 `root.contains` 会把"点卡片内部"判成外部点击，卡片一开就关。
+      //   这是本次改动**同批必须**付的一格，不是可选优化（不付就是修出第二个 bug）。
+      const target = e.target as Node | null
+      if (target !== null && (rootRef.current?.contains(target) === true || popRef.current?.contains(target) === true)) {
+        return
+      }
+      setOpen(false)
     }
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') setOpen(false)
@@ -402,8 +411,28 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
 
       {/* 自绘 popover（v1.36.1：加宽为两栏——左=信息 / 右=航行动画；外点/Escape 关闭）
           v1.39.1：`position:fixed` + 坐标由上面的 useLayoutEffect 计算（避免被祖先 overflow 裁切）。
-          落位前渲染在屏外（POP_OFFSCREEN）——布局仍在，故 `offsetWidth/Height` 可量。 */}
-      {open && (
+          落位前渲染在屏外（POP_OFFSCREEN）——布局仍在，故 `offsetWidth/Height` 可量。
+
+          🔴🔴 v1.121.0（owner 报障「升级到 0.2.2 后这个地方点击弹不出来了」）：
+          **卡片改走 `createPortal(…, document.body)`** —— 它不再挂在 `sp-root` 里。
+
+          根因（逐字对读 `_tmp/host-0.2.1-rc.2` vs `0.2.2-rc.1` 的宿主 `css$4` 段）：
+            0.2.1：`.titleCluster{flex:1;align-items:center;gap:10px;min-width:0;display:flex}` ← 干净
+            0.2.2：同上 ＋ `--title-cluster-fade:20px` ＋ `margin/padding`
+                   ＋ **`mask-image:linear-gradient(to left, transparent …, #000 …)`**
+                   ＋ **`overflow:clip`**
+          ⇒ `mask-image` 会**裁切 fixed 后代**（同 transform/filter/contain 一族），
+            于是 v1.39.1 那条"fixed 是逃生路"的注释在这个档位上**已不成立**。
+            宿主自己的槽位契约也明写了这件事（`slots.d.ts` 的
+            "…overflow is clipped and faded before the utilities, **so overlays must portal**"）
+            ⇒ 我们不是绕过宿主，而是照它的要求做。
+
+          ⚠️ **代价（同批已付，不是可选）**：portal 出去后卡片**不在 root 的 DOM 子树里** ⇒
+            上面那个"外点关闭"判据必须同时认 `popRef.contains`，否则点卡片内部会被判成外部点击、
+            一开就关（详见那个 effect 的注释）。
+          ⚠️ 定位逻辑（`useLayoutEffect` 的 `getBoundingClientRect` ＋ 视口夹取）**原样保留** ——
+            `position:fixed` 在 body 下仍是视口坐标，换父亲不改坐标系。 */}
+      {open && createPortal(
         <div
           ref={popRef}
           className={cx('sp-pop', 'sp-popVoyage')}
@@ -578,7 +607,10 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
               tabIndex={-1}
             />
           </div>
-        </div>
+        </div>,
+        // ⚠️ 挂到 `document.body` 而不是别的容器：`sp-pop` 的 `position:fixed` 是视口坐标，
+        //    只有 body 下才保证**没有任何祖先**能再裁它（mask / transform / filter / contain 全部不为所动）。
+        document.body,
       )}
     </div>
   )

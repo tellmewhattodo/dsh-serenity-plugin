@@ -23,6 +23,7 @@ import { readSimpleSettings } from '../surface/settings.js'
 import { trajectoryConstraintParticipates } from '../trajectory/session.js'
 import { getActiveSessionInfo } from '../trajectory/core.js'
 import { readLastBound } from '../trajectory/bound.js'
+import { shouldOfferReconstruct, reconstructReminderText } from '../trajectory/reconstruct.js'
 import { eventToken, ACK_PREFIX, ACK_SKIP_PREFIX, REBUILD_TODO_FILENAME } from '../trajectory/assistant.js'
 import { recordToolUsage } from '../surface/usage.js'
 import { PLUGIN_SOURCE } from '../kernel/message-source.js'
@@ -574,6 +575,29 @@ export function registerKeeper(ctx: Context, opts: KeeperRegistration = {}): voi
       } else {
         // 文件不存在（size === null）或已回到限内 → 清零，提醒自动停止
         rebuildTodoStates.delete(scope)
+      }
+    }
+
+    // ⑤ 🆕 **载体过大 → `reconstruct` 提醒**（v1.121.0，owner 2026-11-06 令）。
+    //
+    // 与 ② **同族但看的是另一个量**（这一点判错会让整个功能失效，见 `trajectory/reconstruct.ts` 头注）：
+    //   · ② 读 `contextPressure.projectedTokens` —— **当前** prompt 有多大，rebuild 后会回落；
+    //   · ⑤ 读 `tokenUsage.totals` 四桶全加 —— **跨轮累加**的用量，rebuild 后**不回落**。
+    // ⇒ ⑤ 治的是"这条日志本身太大了"，② 治的是"这一轮 prompt 太大了"，两者可以同时成立。
+    //
+    // 🔴 **不 escalete、不重复计数**：`reconstruct` 是不可逆的换代（旧会话被归档），
+    //   催得越勤不等于越好；一句话说清"该调什么"就够。⛔ 也别把它做成"必须"（D255：条件与保证同句）。
+    if (participatesRebuild) {
+      const session = (exec as { agent?: { session?: unknown } }).agent?.session
+      if (session) {
+        try {
+          if (shouldOfferReconstruct(ctx, session)) {
+            const id = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? ''
+            blocks.push({ type: 'text', text: reconstructReminderText(id) })
+          }
+        } catch {
+          /* 判据异常不得打断本缝（它每轮都跑）；工具可见性那条 `when` 会独立再判一次 */
+        }
       }
     }
 

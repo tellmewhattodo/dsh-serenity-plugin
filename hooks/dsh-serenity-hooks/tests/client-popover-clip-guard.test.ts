@@ -11,17 +11,33 @@
  *
  * 修法（v1.39.1）：`.sp-pop` 改 `position:fixed`（**fixed 子元素不受祖先 overflow 裁切**）
  *   ＋ SafeModePanel 用 `getBoundingClientRect()` 算坐标并夹取进视口。
- *   （本仓 client 侧无 `react-dom` 依赖 ⇒ `createPortal` 不可用。）
  *
- * 本测试**机械守卫该形态**：`.sp-pop` 一旦被改回 absolute 定位（或被"顺手简化"回去），
+ * 🔴🔴 v1.121.0 —— **上一条修法在宿主 0.2.2 上失效了**，本文件因此加了一组新守卫。
+ *   owner 报障原文：「升级到 0.2.2 后 这个地方点击弹不出来了」（红框 = 会话头部的
+ *   `Serenity vX.Y.Z | SAFE ON` 胶囊）。
+ *   根因（逐字对读宿主 `dsh-client-ui-conversation/lib/client.js` 的 `css$4` 段）：
+ *     · 0.2.1-rc.2：`.titleCluster{flex:1;align-items:center;gap:10px;min-width:0;display:flex}` ← 干净
+ *     · 0.2.2-rc.1：同上 ＋ `--title-cluster-fade:20px` ＋ `margin/padding`
+ *                  ＋ **`mask-image:linear-gradient(…)`** ＋ **`overflow:clip`**
+ *   `mask-image` 与 transform/filter/contain **同族** —— 都会让 `position:fixed` 的后代
+ *   被祖先裁切 ⇒ "fixed 是逃生路"这个前提在 0.2.2 上**不成立**。
+ *   宿主自己的槽位契约也明写了 *"overflow is clipped and faded … so overlays must portal"*。
+ *   ⇒ 卡片改走 `createPortal(…, document.body)`；`position:fixed` **保留**（body 下仍是视口坐标）。
+ *   ⚠️ 同批必须付的代价：portal 之后 `rootRef.contains` **恒 false** ⇒ 外点关闭判据不加
+ *      `popRef.contains` 就会"一开就关"（那不是第二个 bug，是本改动的直接后果）。
+ *
+ * 本测试**机械守卫这两条形态**（fixed ＋ portal ＋ 双 ref 判据）：任一被"顺手简化"回去
  * 立即变红——因为那不是样式偏好，而是本 bug 的**成因本身**。
- * 行为面证据（hit-test / 三档宽度）在 **CCC（宁静号仓）** 的
+ * 行为面证据在 **CCC（宁静号仓）** 的
  *   `AGENT_SESSIONS/2026-08-24--S142--dsh-serenity-plugin 长期维护/ui-probe/`
  * （CDP 真机探针：`measure.mjs`（测量唯一真相源）／`probe.mjs`／`verify.mjs`／`mock-probe.mjs` ＋ `artifacts/` 读数），
  * **不在本插件仓** —— 两仓分离（本插件仓只放代码与单测；真机取证链住在 CCC）。
  * ⚠️ 2026-09-25 更正：此行原先只写 `ui-probe/`（**仓内相对路径写法**）⇒ 在本仓找不到，
  * 会被读成"指向一个已删目录"（地图 §3-9 第 9 行当时就是这么判的）。
- * 本单测跑在 node 环境（无 DOM）⇒ 只能守**形态**；行为面必须回上面那条路径取证。
+ * ⚠️ 本单测跑在 node 环境（无 DOM）⇒ 只能守**形态**；行为面必须回上面那条路径取证。
+ * ⚠️ v1.121.0 订正：本文件原先写"本仓 client 侧无 react-dom 依赖 ⇒ createPortal 不可用"——
+ *   **那句是错的**：`react-dom` 一直在 `tsdown.config.ts` 的 `PLATFORM_MODULES` 里（external）。
+ *   已删；不要再按那句去否定 portal 这条路。
  */
 
 import { describe, it, expect } from 'vitest'
@@ -75,6 +91,54 @@ describe('自绘 popover 定位形态（防"祖先 overflow 裁切"回归）', (
   it('落位前渲染在屏外（避免未定位时闪现在 0,0）', () => {
     expect(tsx).toMatch(/POP_OFFSCREEN/)
     expect(tsx).toMatch(/popPos\s*\?/)
+  })
+})
+
+/**
+ * 🔴🔴 v1.121.0 守卫组 —— **宿主 0.2.2 的 `mask-image` 破掉了"fixed 逃生路"**
+ *
+ * 为什么这组断言必须存在（而不是"多测一点更保险"）：
+ *   上一组把 `position:fixed` 钉死了，而那**正是**本 bug 的前提假设。
+ *   前提已被宿主改掉 ⇒ 只钉 fixed 会得到一个**恒绿但方向已错**的测试（D252 同族：
+ *   读数器在跑、数值在动，但不是那个问题）。
+ *   所以这一组钉的是**"祖先不再能裁它"这件事怎么兑现**：portal 到 body。
+ *
+ * ⚠️ 每条都配了它要防的**具体回归形态**，不写"更安全一点"这类无靶断言。
+ */
+describe('popover 必须 portal 出 titleCluster（宿主 0.2.2 加了 mask-image）', () => {
+  const pop = ruleBody(css, '.sp-pop')
+
+  it('① 卡片真的走 createPortal，且挂到 document.body', () => {
+    // 回归形态 = 有人觉得"fixed 已经够了"把 portal 去掉 ⇒ 0.2.2 上直接回到"点不开"
+    expect(tsx, 'popover 必须用 createPortal 渲染').toMatch(/createPortal\s*\(/)
+    // 挂载点必须是 body：挂到别的容器等于换了个可能仍有祖先裁切的父亲
+    expect(tsx, 'portal 挂载点必须是 document.body').toMatch(/document\.body/)
+  })
+
+  it('② createPortal 与 open 同条件（关着的时候不留一个空 body 子节点）', () => {
+    // 回归形态 = `{createPortal(...)}` 无条件渲染、只靠 CSS 隐藏 ⇒ 关闭态仍有 iframe 在 body 上
+    // （航行动画会被白白加载一次，且 WebGL 上下文不释放）
+    expect(tsx).toMatch(/\{open\s*&&\s*createPortal\(/)
+  })
+
+  it('③ 外点关闭判据同时认 root 与 pop（portal 后 root.contains 对卡片恒 false）', () => {
+    // 🔴 这一格是**本改动的直接代价**，不是可选优化：
+    //   卡片已经不在 root 的 DOM 子树里 ⇒ 只判 root ⇒ 点卡片内部被判成"外部点击" ⇒ 一开就关。
+    //   回归形态 = 有人"顺手简化"成 `if (!rootRef.current.contains(t)) setOpen(false)`。
+    expect(tsx, 'root 侧判据必须在').toMatch(/rootRef\.current\?\.contains/)
+    expect(tsx, 'pop 侧判据必须在（否则一开就关）').toMatch(/popRef\.current\?\.contains/)
+  })
+
+  it('④ fixed 保留（body 下仍是视口坐标；真正解决裁切的是"没有祖先"）', () => {
+    // 反面形态 = 以为"portal 了就不需要 fixed"，改成 absolute ⇒ 相对 body 绝对定位、
+    // 页面滚动时卡片与胶囊脱钩（我们的坐标是**视口**坐标，来自 getBoundingClientRect）
+    expect(pop).toMatch(/position:\s*fixed/)
+  })
+
+  it('⑤ 说明面不再宣称"本仓无 react-dom 依赖"（那句已证伪）', () => {
+    // D151 同族：退役/失效的说明面是零信号熵 —— 下一个维护者会据此否掉 portal 这条路。
+    // 判据范围 = 本面板的两个源文件（CSS 里的历史注释已就地订正，故只查 tsx 与测试自身之外的断言来源）。
+    expect(tsx, 'tsx 里不得再出现"无 react-dom 依赖"这类断言').not.toMatch(/无\s*`?react-dom`?\s*依赖/)
   })
 })
 

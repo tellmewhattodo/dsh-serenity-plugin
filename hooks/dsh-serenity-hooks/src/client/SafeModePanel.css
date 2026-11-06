@@ -210,7 +210,21 @@
      坐标由 SafeModePanel 用 `getBoundingClientRect()` 算出并夹取进视口（见 .tsx 的 useLayoutEffect）。
      （本仓 client 侧**无 `react-dom` 依赖** ⇒ `createPortal` 不可用；fixed 是等效且更轻的出路。
        已在真机验证祖先链**无** transform/filter/contain/will-change ⇒ fixed 不会被降级为相对某祖先。）
-     宽度仍走 `min(680px, 100vw-24px)`（窄视口兜底），窄屏退回单栏见文末 @media。 */
+       ⚠️ **v1.121.0 订正**：上一句的"无 `react-dom` 依赖"**是错的** —— `react-dom` 一直在
+       `tsdown.config.ts` 的 `PLATFORM_MODULES` 里（external，运行时由宿主冻结模块表解析），
+       宿主自己也真在调用 `createPortal`（2 处）。当时是**读错了一个配置**，不是能力边界。
+     宽度仍走 `min(680px, 100vw-24px)`（窄视口兜底），窄屏退回单栏见文末 @media。
+
+   🔴🔴 v1.121.0 —— 上面那句"已在真机验证祖先链无 transform/filter/contain/will-change"
+   **已失效**：它不再是保证，只是 **2026-09-17 那一刻的快照**（快照不是保证）。
+   宿主 0.2.2 给同一个 `.titleCluster` 加上了 **`mask-image` ＋ `overflow:clip`**，
+   而 `mask-image` 与 transform/filter/contain 同族 —— **会裁切 fixed 后代**
+   ⇒ `position:fixed` 这条逃生路在该档失效（症状 = owner 报的"点击弹不出来"）。
+   ⇒ 现在卡片由 **`createPortal(…, document.body)`** 承载（见 .tsx 里那段根因注释），
+     **`position:fixed` 保留** —— 它在 body 下依旧是视口坐标，换父亲不改坐标系；
+     真正解决裁切的是"没有祖先"，不是"没有 fixed"。
+   ⇒ 旧注释**故意留着不改不删**：它是这个缺陷的成因记录（R↓）。
+     但 ⛔ 任何"已验过祖先链"的断言都不得再被当成保证 —— 宿主下次可能再加同族的另一个属性。 */
 .sp-pop {
   position: fixed; /* 不受祖先 overflow:hidden 裁切；left/top 由 JS 计算 */
   top: 0; /* ← 声明默认值，JS 会覆写（未落位时组件给 -9999 屏外值，不会闪到右下角） */

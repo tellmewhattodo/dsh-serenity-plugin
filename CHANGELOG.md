@@ -14,6 +14,72 @@
 
 ---
 
+## v1.121.0 — 2026-11-06（新工具 `reconstruct` ＋ 宿主 0.2.2 下状态面板点不开的修复）
+
+> 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
+> 必须是**两个井号 ＋ 空格 ＋ v<semver>**。⛔ 不要为了排版改成 `###`／`#`（会报「CHANGELOG 无条目」）。
+
+### 面 A —— 新工具 `reconstruct`（累计用量过大时会话换代）
+
+| 面 | 变更 |
+|---|---|
+| 🆕 **新工具 `reconstruct`**（条件可见） | `rebuild` 的**换代版**：建**新** dsh 会话 → 把同一条认知轨迹绑过去 → 在新会话注入继续锚点 → **归档旧会话**。`rebuild` 治"模型上下文太大"（原地清空，日志继续长）；它治"这条日志本身太大"（真正换一条日志）。owner 2026-11-06 令，**与 rebuild 并存**（Q3）。 |
+| 🆕 **条件可见的新机制** | 全仓**唯一**用 `ctx.tools.register(def, { when })` 的工具：宿主每步 `resolve()` 时问一次，`false` ⇒ **既不进模型声明也不进派发**。其余条件工具的 `restrict({deny})` **只能 deny 不能 allow**，做不到"达阈值才放出来"。 |
+| 🆕 **触发判据＝四桶全加，阈值 10 亿** | `tokenUsage.totals` 的 `uncachedInput + cacheRead + cacheWrite + output` 之和（= 宿主界面 pill 同口径）。⚠️ **只读 `uncachedInputTokens` 会差 37 倍**，让阈值在真需要它的会话上**永不触发**。 |
+| 🆕 **提示词注入** | 达阈值时 `seams/keeper.ts` 每轮注入一句 `[RECONSTRUCT]`，含**会话 id ＋ 动作名**，不给 token 数值（D64）。 |
+| **`createAndBindTarget` 增 `{ takeover }`** | 换代必须显式声明 takeover，否则 `claimBinding` 判 `TRAJECTORY_OCCUPIED`（旧载体此刻还活着）⇒ 新会话建出来却没绑上，回执只有一句 `⚠️ 绑定写入失败`。同时**必须传 `hostAliveProbe`**。 |
+
+⚠️ **档位降级（如实登记）**：`register()` 的第二参数只在宿主 `≥0.2.2-rc.1` 存在
+（`0.1.7` / `0.2.0` / `0.2.1` 三档签名是 `register(definition)`）。低档下多传的实参被 JS 静默忽略
+⇒ 那个档位上 `reconstruct` **常驻可见**。这不是缺陷，是"宿主没这个能力"的降级；
+`supportsActivation()` 把该读数写进 `AGENT_SESSIONS/.reconstruct-diag.json`，
+让读数面能区分"没出现"与"出现了但藏不住"。
+
+### 面 B —— 🔴 会话头部状态胶囊在宿主 0.2.2 上"点击弹不出来"（缺陷修复）
+
+owner 报障原文：「升级到 0.2.2 后 这个地方点击弹不出来了」（红框 = 会话头部的 `Serenity vX.Y.Z | SAFE ON` 胶囊）。
+
+| 面 | 变更 |
+|---|---|
+| 🔴 **根因** | 宿主 `0.2.2-rc.1` 给标题簇 `.titleCluster` 加了 **`mask-image: linear-gradient(…)`** 与 **`overflow: clip`**（`0.2.1-rc.2` 上这两条都没有）。`mask-image` 与 transform/filter/contain **同族** —— 都会**裁切 `position:fixed` 的后代** ⇒ v1.39.1 那条"改 fixed 就能逃出祖先裁切"的逃生路在该档位上**失效**，卡片整片被裁掉、看起来就是"点了没反应"。 |
+| **修法** | 卡片改走 **`createPortal(…, document.body)`**；`position:fixed` **保留**（body 下仍是视口坐标，换父亲不改坐标系）。宿主自己的槽位契约也明写 *"overflow is clipped and faded … so overlays must portal"* ⇒ 这是照契约做，不是绕过宿主。 |
+| 🔴 **同批必须付的一格** | portal 出去后卡片**不再在 `rootRef` 的 DOM 子树里** ⇒ "外点关闭"判据必须同时认 `popRef.current.contains(...)`，否则点卡片内部会被判成外部点击、**一开就关**。这一格不付就是修出第二个 bug。 |
+| **文件** | `src/client/SafeModePanel.tsx`（portal ＋ 双 ref 判据）｜`SafeModePanel.css`（记录成因；`.sp-pop` 上的自定义属性随 portal 断链问题已就近说明）｜`client/tsconfig.json` ＋ `devDependencies` 加 `@types/react-dom`（**类型**基准；`react-dom` 本体一直在 `tsdown.config.ts` 的 `PLATFORM_MODULES` 里，external 由宿主模块表解析）。 |
+
+⚠️ **一处说明面纠错（D151 同族）**：`SafeModePanel.css` 与 `client-popover-clip-guard.test.ts` 里
+原先都写着 *"本仓 client 侧无 `react-dom` 依赖 ⇒ `createPortal` 不可用"* —— **那句是错的**，
+正是它让这条路被绕开了一整年。已就地订正，并把"已验过祖先链无裁切"降级为**快照而非保证**。
+
+<details>
+<summary>判据与验收（点开）</summary>
+
+- **口径取证两路独立**（互不共享代码路径）：
+  ① 解压本会话日志（33,429 条事件）逐条累加 `assistant/message.usage` ⇒ 四桶 **1376.2 M**；
+  ② 读宿主自己的持久化投影缓存 `~/.dsh/storages/session_projcache/sessions/<id>.json`
+     ⇒ `tokenUsage.totals` 四桶 **1391.2 M**（差值 = 中间又跑了一夜）。
+  分桶对读：`uncachedInput 36.8 M` ／ `cacheRead 1351.2 M` ／ `output 3.0 M` ／ `cacheWrite 0`。
+  ⇒ **只读 `uncachedInputTokens` = 37 M，差 37 倍**，而两个读数在代码里长得一样（D252 同族）。
+- **正控（非恒空）**：另一条会话（`platform-9063`）同字段四桶 **322 M** ⇒ 该量确实随会话变化。
+  ⚠️ 但 322 M **不能**充当"新会话从 0 起算"的证据（那要等真机变异检验）。
+- **`when` 的三条契约约束**（宿主逐字）：rejection **fails step preparation** ⇒ 整段 try/catch 且失败静默；
+  *"Conditions must not mutate registrations or start tool work"* ⇒ 只读投影 ＋ **按会话节流 60s** 落观测。
+- **已知未被证明的一格**：`workspace/session-activity` 在轮末的窗口长度未测 ⇒ 归档走**延后 2s ＋ 有界 3 次**
+  （成功即停，⛔ 不无限重试）；三次都失败则落诊断并停下（旧会话留在活跃清单，绑定已指向新载体）。
+- **变异靶子**：`reconstruct.test.ts` 断言"只读 `uncachedInputTokens` 远小于四桶（>30 倍）**且低于阈值**"
+  —— 实现若退化成单桶口径，这条精确红，而"能读到数"的弱断言仍会绿。
+- **面 B 的形态守卫**（`tests/client-popover-clip-guard.test.ts`，新增 5 条）：
+  ① 必须 `createPortal` 且挂到 `document.body` ② `{open && createPortal(`（关着不留 body 子节点）
+  ③ 外点关闭必须**同时**认 `rootRef.current?.contains` 与 `popRef.current?.contains`
+  ④ `position:fixed` 仍须保留 ⑤ `tsx` 里不得再出现"无 react-dom 依赖"这类断言。
+  **变异检验两组各精确红 1 条**：去掉 portal ⇒ ②红；去掉 `popRef` 判据 ⇒ ③红（其余 13 条仍绿）。
+  ⚠️ 单独盯 `position:fixed` 的那组**在这两次变异下全绿** —— 这恰好证明"只钉 fixed"方向已错（D252 同族）。
+
+**门禁**（Node 24.22.2）：typecheck ✅ ／ typecheck-host 0.2.2-rc.1（node 100 文件 ／ client 193 文件）✅ ／
+test **213 files / 3358** ✅ ／ coverage **95.05%** ✅。
+</details>
+
+---
+
 ## v1.120.0 — 2026-11-06（宿主 0.2.2-rc.1 适配：定时器工具改名后的屏蔽补全 ＋ 构建链 Node 24 兼容）
 
 > 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
