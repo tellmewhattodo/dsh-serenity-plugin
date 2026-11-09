@@ -26,8 +26,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { injectVoyageVocab, scanVoyageLiveVocab } from './vocab.js'
-import { findPackageRoot } from '../../kernel/constants.js'
+import { injectVoyageVocab, injectVoyageVersion, scanVoyageLiveVocab } from './vocab.js'
+import { findPackageRoot, ACC_VERSION } from '../../kernel/constants.js'
 // 类型引用：拉入 webserver 的 cordis 声明增强（ctx.webServer）；运行时擦除
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
@@ -106,6 +106,15 @@ export function registerVoyageApi(
       } catch (err: any) {
         sendJson(res, 500, { error: `voyage asset unavailable: ${err?.message ?? String(err)}` })
         return
+      }
+      // ── 版本号注入（v1.127.0，与词表注入**互相独立**）──
+      // 蓝图标注层的标题栏要写"这张图是哪一版"；资产是静态单文件、看不见 package.json
+      // ⇒ 唯一可信来源是本进程的 ACC_VERSION。失败只少这一条标注，不影响其它。
+      // ⚠️ 它**无条件**执行（不依赖 root）：版本与"哪个 CCC"无关。
+      try {
+        html = injectVoyageVersion(html, ACC_VERSION)
+      } catch {
+        /* 注入失败 ⇒ 标题栏那格显示 —（退化，不是缺陷） */
       }
       // ── 词表按当前 CCC 注入（只改那一行；任何环节失败 ⇒ 原样返回）──
       let root: string | null = null

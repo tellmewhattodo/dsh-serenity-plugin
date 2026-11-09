@@ -144,3 +144,27 @@ export function injectVoyageVocab(html: string, live: VoyageLiveVocab | null): s
   // 用函数式 replace 避免 `$&`/`$1` 之类的替换串语义（payload 里可能有 `$`）
   return html.replace(VOCAB_LINE_RE, () => `var VOCAB = ${JSON.stringify(merged)};`)
 }
+
+/** 资产里版本占位符的锚（`<meta name="serenity-acc-version" content="…">`） */
+const VERSION_META_RE = /(<meta name="serenity-acc-version" content=")[^"]*(")/
+
+/**
+ * 把 ACC 版本号注入资产 HTML（v1.127.0）。
+ *
+ * 🔴 **为什么版本要注入、而不是让资产自己读**：资产是**静态单文件**，它对
+ * `package.json` 一无所知；而蓝图标注层的标题栏要写"这张图是哪一版"。
+ * 唯一可信来源 = 服务端进程里的 `ACC_VERSION`（它自己也是从 `package.json` 读的）。
+ *
+ * 判据与 `injectVoyageVocab` 同一条：**认不出锚就原样返回**，⛔ 不报错
+ * （装饰页不该因为资产结构变了一行就打不开）。
+ *
+ * ⚠️ 与词表注入**互相独立**：词表注入失败不影响版本注入，反之亦然 ——
+ * 它们服务两个不同的标注，任一缺失只少了那一条信息。
+ *
+ * @returns 注入后的 HTML；未命中锚时**与入参逐字节相同**
+ */
+export function injectVoyageVersion(html: string, version: string): string {
+  if (!version) return html
+  if (!VERSION_META_RE.test(html)) return html
+  return html.replace(VERSION_META_RE, (_all, head: string, tail: string) => `${head}${version}${tail}`)
+}

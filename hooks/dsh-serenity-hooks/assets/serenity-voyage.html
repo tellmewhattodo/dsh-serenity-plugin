@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="color-scheme" content="dark">
+<meta name="serenity-acc-version" content="__ACC_VERSION__">
 <title>Serenity · 认知星空</title>
 <style>
   :root{
@@ -162,12 +163,128 @@
     background-position:center center;
   }
   body.blueprint .grain{ opacity:0; }
+
+  /* 🔴 全屏蓝图档：深色档的整层 HUD 也要让位（2026-11-09 真机实测，v1.127.0）。
+     判据与 §8b「深色档的内容层整类不要」同条：`.speed` 是 `#eafff8`（近白）、
+     `.brand h1` 靠**深色描边**立字、`.facts` 是 `rgba(9,20,25,.40)` 玻璃拟态 ——
+     这三样描述的语汇是「深空里的仪表」，在白纸上它们分别读成
+     **看不见的字** / 一层灰雾 / 一块压住标题栏的深色砖。⛔ 不是"配色要调淡"，是语义不成立。
+     ⚠️ 信息损失已核（D276）：`§8c` 的标题栏是 `.facts` 的**超集**
+     （图号/册数/线条/面/比例尺/视图/版本/会话/本体），只丢了「仓库」「公理」两个读数；
+     而卡片档（owner 唯一看得到的那一档）本来就没有 HUD，故本改动**不动卡片档**。 */
+  body.blueprint .ui{ display:none !important; }
+
+  /* ---------- 蓝图档的**标注层**（2026-11-09 S142，v1.127.0）----------
+     🔴 为什么要这一层（owner：「太单调，要让人看了觉得有趣有启发」）：
+        第一版只做对了**语汇**（纸白+网格+线稿），但图纸上**没有一个字**——
+        它是一张"好看的船"，不是一张**图纸**。工程图之所以是工程图，在于
+        **标注**：每个部件有引线、每处尺寸有数字，而且那些数字**必须是真的**。
+     🔴 所以本层的硬约束：**每一个数字都来自运行时真实对象**（`VOCAB.counts` /
+        真实 mesh 数量 / 真实包围盒），⛔ 一个都不许写死（同 §8 的 HUD 判据：
+        手写常量在"呈现真实资产"这件事上没有一次是对的）。
+
+     判据（为什么引线跟着船动、而文字块不动）：
+       · 引线端点 = 部件的**世界坐标投影**（每帧算）⇒ 船在动，指针对准它
+       · 文字块 = 屏幕固定锚点 ⇒ 文字不会随运镜乱飞、永远可读
+       ⇒ 两头都取各自的稳定端，中间那根斜线就是"活"的部分。 */
+  .bp-sheet{
+    position:fixed; inset:0; z-index:6; pointer-events:none;
+    display:none;
+  }
+  body.blueprint .bp-sheet{ display:block; }
+  /* 卡片模式：这是宿主面板里的**背景**，空间只有约 500×440 ⇒ 标注必须缩小但⛔ 不删。
+     🔴 判据：owner 看到的正是这张卡片；在卡片里把标注全关掉，等于"有趣有启发"
+        只存在于一个他永远打不开的全屏页里。⇒ 缩小、贴边、保留。 */
+  body.card .bp-scale{ display:none; }
+  body.card .bp-note b{ font-size:9.5px; letter-spacing:.06em; }
+  body.card .bp-note i{ font-size:8.5px; letter-spacing:.02em; }
+  body.card .bp-sheet .bp-lead,
+  body.card .bp-sheet .bp-knee{ stroke-width:.8; opacity:.62; }
+  body.card .bp-sheet .bp-leadDot{ opacity:.7; }
+
+  .bp-sheet svg{ position:absolute; inset:0; width:100%; height:100%; overflow:visible; }
+  .bp-sheet .bp-lead{ fill:none; stroke:#2f5f9e; stroke-width:1; opacity:.75; }
+  .bp-sheet .bp-leadDot{ fill:#2f5f9e; opacity:.8; }
+  /* 引线内端那个小圆 = 工程图的"引出点"；外端接一条短横线再落字 */
+  .bp-sheet .bp-knee{ fill:none; stroke:#2f5f9e; stroke-width:1; opacity:.75; }
+
+  .bp-note{
+    position:absolute; transform:translateY(-50%);
+    font-family:var(--mono); line-height:1.45; white-space:nowrap;
+    color:#1c4a86;
+    /* 🔴 top 由 JS 每帧写（跟随锚点投影）；初始值只防首帧闪在 0px */
+    top:50%;
+  }
+  .bp-note b{
+    display:block; font-family:var(--ping); font-weight:600;
+    font-size:clamp(10px,1.02vw,12.5px); letter-spacing:.12em;
+  }
+  .bp-note i{
+    display:block; font-style:normal; font-size:clamp(9px,.86vw,11px);
+    letter-spacing:.06em; color:#5b7fae;
+  }
+
+  /* 标题栏：卡片的**真实像素**只有约 500×440（宿主右栏），装不下 5 行表
+     ⇒ 卡片模式只留最要紧的两格（图号 + 册数），其余让位。⛔ 不整块删掉 ——
+        那是这张图唯一还在说"这是谁的、哪一版"的地方。 */
+  .bp-title{
+    position:absolute; right:18px; bottom:18px;
+    border:1px solid rgba(47,95,158,.45);
+    background:rgba(255,255,255,.55);
+    font-family:var(--mono); font-size:clamp(8.5px,.82vw,10.5px);
+    color:#1c4a86; letter-spacing:.06em;
+  }
+  .bp-title table{ border-collapse:collapse; }
+  .bp-title th{
+    font-family:var(--ping); font-weight:600; text-align:left;
+    padding:3px 8px; border-right:1px solid rgba(47,95,158,.28);
+    border-bottom:1px solid rgba(47,95,158,.28); color:#5b7fae;
+    letter-spacing:.12em; white-space:nowrap;
+  }
+  .bp-title td{
+    padding:3px 10px; border-bottom:1px solid rgba(47,95,158,.28);
+    white-space:nowrap; font-variant-numeric:tabular-nums;
+  }
+  .bp-title tr:last-child th, .bp-title tr:last-child td{ border-bottom:0; }
+  .bp-title .bp-tname{
+    font-family:var(--ping); font-weight:700; font-size:1.22em;
+    letter-spacing:.22em; color:#153a6b;
+  }
+  body.card .bp-title{
+    right:8px; bottom:8px; font-size:8px; letter-spacing:.04em;
+  }
+  body.card .bp-title th, body.card .bp-title td{ padding:1.5px 5px; }
+  body.card .bp-title .bp-tname{ font-size:1.05em; letter-spacing:.14em; }
+  body.card .bp-title tr[data-soft]{ display:none; }
+
+  /* 左侧标尺：图纸身份的那一圈细刻度（纯装饰，但少了它就不像图纸） */
+  .bp-scale{
+    position:absolute; left:14px; top:50%; transform:translateY(-50%);
+    display:flex; flex-direction:column; gap:0;
+    font-family:var(--mono); font-size:9px; color:rgba(28,74,134,.55);
+    letter-spacing:.1em;
+  }
+  .bp-scale span{
+    display:block; width:56px; height:24px; line-height:24px;
+    border-top:1px solid rgba(47,95,158,.22); padding-left:6px;
+  }
+  .bp-scale span:last-child{ border-bottom:1px solid rgba(47,95,158,.22); }
 </style>
 </head>
 <body>
 <canvas id="gl" role="img" aria-label="三维动画：宁静号飞船在由代码字符构成的认知星野中航行。"></canvas>
 <div class="veil" aria-hidden="true"></div>
 <div class="grain" aria-hidden="true"></div>
+
+<!-- 蓝图档标注层（只在该档显示）：引线由 JS 每帧指向真实部件，文字块固定在屏上 -->
+<div class="bp-sheet" aria-hidden="true">
+  <svg id="bpSvg"></svg>
+  <div class="bp-scale">
+    <span>FR 01</span><span>FR 02</span><span>FR 03</span>
+    <span>FR 04</span><span>FR 05</span><span>FR 06</span>
+  </div>
+  <div class="bp-title" id="bpTitle"></div>
+</div>
 
 <div class="ui">
   <div class="row">
@@ -2758,6 +2875,20 @@ if (CARD) {
   });
 }
 
+/* 🔴 蓝图档：铭牌（code slabs）同样整层关掉（2026-11-09 真机实测，v1.127.0）。
+   判据与上面 CARD 那条**同一条**，但换了个失效形态：铭牌材质是 `0x0c1e20`（近黑金属），
+   语义是「立在深空里的金属牌」——在白纸上它读成**画面左下角一块黑三角**
+   （实测：1440×793 全屏档，r≈16 的那一块，卡在视口下缘）。
+   ⛔ 不是"把它调淡"就成立：它承载的语汇（金属、铭刻、星空陈设）在蓝图里一个都不存在。
+   ⚠️ 与 CARD 分开写而不合并成 `CARD || BLUEPRINT`：两档关它的**理由不同**
+      （卡片是"被裁成半截的噪点"，蓝图是"白纸上的黑斑"），合并会把判据揉成
+      "因为它是卡片档所以关"，下一个人改卡片档时就会顺手把蓝图档一起改坏。 */
+if (BLUEPRINT) {
+  scene.traverse(function (o) {
+    if (o.userData && o.userData.rz !== undefined) o.visible = false;
+  });
+}
+
 // ───────────────────────── 7. 自动运镜 ─────────────────────────
 // 🔴 诊断机位（v2 新增，**不是交互控件**）：`?cam=side|front|top|rear|3q` 把相机钉死。
 //    为什么需要它：自动运镜同一时刻只有一个角度，而"造型对不对"必须从多个角度合起来判 ——
@@ -2804,9 +2935,24 @@ function driveCamera(t) {
     return;
   }
 
+  /* 蓝图档：**近景特写**。
+     🔴 首次真机读数（2026-11-09，1440×813）：沿用卡片模式的 rad=54 ⇒ 船只有约 350px 宽，
+        6 条引线的端点**全部挤在那一小片里** —— 线在指，但指不出任何可分辨的部件。
+        ⇒ 标注能否成立**先决于被标注物在画面里够不够大**，不是文字写得好不好。
+        蓝图档独立定距：船要占画面主体（约占宽度一半），标注才有指向意义。 */
+  var bpCam = BLUEPRINT;
   var az = t * 0.052;
   // 卡片模式：半径 43→62（飞船约缩到 69%，实测 76 会"孤零零"）、仰角摆动收窄，让构图安静下来
-  var rad = (CARD ? 54 : 29) + Math.sin(t * 0.037) * (CARD ? 6 : 7) + Math.sin(t * 0.011) * (CARD ? 3 : 4);
+  /* 🔴 蓝图档 × 卡片档 ≠ 蓝图档全屏（2026-11-09 真机实测，v1.127.0）：
+     全屏 1440 宽下 rad=34 时船约 350px（占宽 24%），两侧留白充足；
+     但卡片只 542 宽、**水平 FOV 随之变窄** ⇒ 同样 rad=34 量出船占宽 **93%**，
+     六条标注全压在船身上（读数：560×673 视口下 6 条文字块 y 落在 262~376，
+     而船体投影覆盖同一带）。
+     ⇒ 判据：**标注需要的两侧留白是"比例"而不是"像素"**，窄视口必须按比例后退。
+     实测取值：/ 34 → 卡片 68（船约占宽一半，两侧各留 ~25% 给引线与文字）。
+     ⚠️ 这是"给标注腾地方"，⛔ 不是"把船缩小所以更好看"——船变小本身是代价。 */
+  var baseRad = bpCam ? (CARD ? 68 : 34) : (CARD ? 54 : 29);
+  var rad = baseRad + Math.sin(t * 0.037) * (CARD ? 6 : 7) + Math.sin(t * 0.011) * (CARD ? 3 : 4);
   var el = (CARD ? 7 : 10) + Math.sin(t * 0.043) * (CARD ? 3 : 6) + Math.sin(t * 0.017) * (CARD ? 1.5 : 3);
   camera.position.set(
     Math.cos(az) * rad * 0.62 + 8 + Math.sin(t * 0.53) * 0.6,
@@ -2815,7 +2961,7 @@ function driveCamera(t) {
   );
   // 卡片模式：飞船整体下压到画面下三分之一——合成实测（§12.44）显示，居中时船体最亮的
   // 舷窗/灯带正落在宿主卡片的正文行后面，白字被亮部冲淡。抬 lookAt 即把主体推低。
-  lookAt.set(ship.position.x - 2.2, ship.position.y + (CARD ? 3.8 : 0.2), ship.position.z);
+  lookAt.set(ship.position.x - 2.2, ship.position.y + (bpCam ? 0.6 : (CARD ? 3.8 : 0.2)), ship.position.z);
   camera.lookAt(lookAt);
   camera.rotation.z += Math.sin(t * 0.29) * 0.012;
 
@@ -3047,6 +3193,276 @@ window.SERENITY = {
   uTime: uTime, SIM: SIM
 };
 
+/* ═════════════════ 8c. 蓝图档的标注层（2026-11-09 S142，v1.127.0）═════════════════
+   owner：「太单调，要让人看了觉得有趣有启发」。
+
+   🔴 第一版的问题不是"画得不好"，是**一个信息都没有** —— 纸白+网格+线稿只是一张
+      "好看的船"。图纸之所以是图纸，在于**标注**：每个部件有引线、每处读数有数字。
+
+   🔴🔴 **本层唯一的硬约束：每个数字都必须从运行时真实对象取**，⛔ 一个都不许写死。
+     先例就在同一个文件 §8 的注释里 ——「旧版这里写死 19/35/84/12/56/190，随后就漂了；
+     手写常量在『呈现真实资产』这件事上没有一次是对的」。
+     ⇒ 本层取数只有四个来源：
+        ① `VOCAB.counts`（构建期扫描出来的真名册长度）
+        ② `VOCAB.skills` / `VOCAB.msms` / `VOCAB.onto` 的真实条目
+        ③ 场景里**数出来**的 mesh 数、边数（`window.__blueprint` 同批产物）
+        ④ 船体真实包围盒（`Box3`）
+     取不到的就不写 —— 宁可少一条标注，也不许编一个数字。
+
+   判据（引线为什么这样画）：
+     · 内端 = 部件的**世界坐标投影**（每帧重算）⇒ 船在动，圆点始终咬在部件上
+     · 外端 = 屏幕固定锚点 + 一小段膝线 ⇒ 文字块永不随运镜乱飞、始终可读
+     ⇒ 两端各取自己的稳定端，中间那根斜线才是"活"的部分。
+     这就是工程图上"引出线"的画法，不是我临时想的。 */
+var bpLayer = null;
+
+function bpBox3(obj) {
+  var b = new T.Box3().setFromObject(obj);
+  return b.isEmpty() ? null : b;
+}
+
+/** 部件 → 世界坐标锚点（找不到就返回 null，该条标注自动不画） */
+function bpAnchorOf(ship, which) {
+  var ud = ship.userData || {};
+  if (which === 'engine') return ud.mainFlame ? ud.mainFlame.getWorldPosition(new T.Vector3()) : null;
+  if (which === 'nacelle') {
+    var ns = ud.nacelles || [];
+    return ns.length ? ns[0].getWorldPosition(new T.Vector3()) : null;
+  }
+  if (which === 'radar') return ud.radar ? ud.radar.getWorldPosition(new T.Vector3()) : null;
+  if (which === 'windows') {
+    var wm = ud.windowMats || [];
+    // windowMats 里存的是材质，不是对象 ⇒ 退回用整船包围盒的"前上方"作锚点
+    var box = bpBox3(ship);
+    if (!box) return null;
+    return new T.Vector3(box.max.x * 0.62, box.max.y * 0.92, 0);
+  }
+  if (which === 'hull') {
+    var b2 = bpBox3(ship);
+    return b2 ? b2.getCenter(new T.Vector3()) : null;
+  }
+  return null;
+}
+
+/**
+ * 组装标注表。**每一条都必须能说清"这个数字从哪来"**，说不清的就不进表。
+ */
+function bpBuildNotes() {
+  var c = (VOCAB && VOCAB.counts) || {};
+  var msms = (VOCAB && VOCAB.msms) || [];
+  var skills = (VOCAB && VOCAB.skills) || [];
+  var onto = (VOCAB && VOCAB.onto) || [];
+  var bp = window.__blueprint || {};
+  var box = bpBox3(ship);
+  var dims = box ? [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z] : null;
+
+  var notes = [];
+
+  /* ① 主引擎：真实尾焰对象在，才画这条 */
+  if (ship.userData && ship.userData.mainFlame) {
+    notes.push({
+      side: 'right', y: 0.34, anchor: 'engine',
+      head: '主推进 / MAIN DRIVE',
+      body: '尾焰随推力脉动 · 实光同步'
+    });
+  }
+
+  /* ② 工具面：msms 的真实条数 + 前几个真名（⛔ 不是"84 个工具"这种空话） */
+  if (c.msm) {
+    /* 🔴 卡片档只列 1 个真名（2026-11-09 真机实测，v1.127.0）：
+       三个真名让这条文字块宽到 **271px**，而卡片（542 宽）里船两侧的留白各只有约 160px
+       ⇒ 它是六条里**唯一一条横穿船体**的（其余五条最宽 111px，全部落在留白内）。
+       ⇒ 判据：**文字的宽度也是"能不能分辨"的一部分** —— 分不清指向哪的标注，与没有标注同价
+         （同 D298 那条：指得准但指不出，等于没指）。
+       ⚠️ 代价如实登记：卡片里少看到两个 MSM 名字。⛔ 不删整条 —— 条数本身是真读数。 */
+    var names = msms.slice(0, CARD ? 1 : 3).join(' · ');
+    notes.push({
+      side: 'right', y: 0.46, anchor: 'nacelle',
+      head: '短舱 · 工具面 / MSM',
+      body: c.msm + ' 具 ｜ ' + names
+    });
+  }
+
+  /* ③ 技能面：真实条数 + 建模过的数量（onto 是 skills 的子集 ⇒ 比例是真读数） */
+  if (c.skill) {
+    notes.push({
+      side: 'left', y: 0.34, anchor: 'windows',
+      head: '舷窗 · 技能面 / SKILL',
+      body: c.skill + ' 项 ｜ 已建模 ' + (c.onto || onto.length || 0)
+    });
+  }
+
+  /* ④ 结构：线稿真实读数（mesh / 轮廓边 / 跳过的） */
+  if (bp.meshes) {
+    notes.push({
+      side: 'left', y: 0.46, anchor: 'hull',
+      head: '壳体 / HULL',
+      body: bp.meshes + ' 网格 ｜ ' + bp.edges + ' 轮廓边'
+    });
+  }
+
+  /* ⑤ 尺寸：真实包围盒，⚠️ 单位是**场景单位**，不是米 —— 写清楚免得被当成真尺寸 */
+  if (dims) {
+    notes.push({
+      side: 'left', y: 0.58, anchor: 'hull',
+      head: '总长 / L.O.A.',
+      body: dims[0].toFixed(2) + ' u（场景单位）'
+    });
+  }
+
+  /* ⑥ 雷达：真实对象存在才画 —— 这条的"启示"是：它是一直在转的那件东西 */
+  if (ship.userData && ship.userData.radar) {
+    notes.push({
+      side: 'right', y: 0.58, anchor: 'radar',
+      head: '雷达 / SENSOR',
+      body: '匀速转动 · 不随航速变化'
+    });
+  }
+
+  return notes;
+}
+
+/** 标题栏：这张图纸的身份 —— 全是真读数 */
+function bpBuildTitle() {
+  var c = (VOCAB && VOCAB.counts) || {};
+  var bp = window.__blueprint || {};
+  var ver = (document.querySelector('meta[name="serenity-acc-version"]') || {}).content || '—';
+  /* 图号 = 真实的「技能数-工具数」⇒ 这条图号本身随容器演进（不是装饰） */
+  var no = 'SN-' + String(c.skill || 0).padStart(2, '0') + '-' + String(c.msm || 0).padStart(2, '0');
+  /* 前三行是"这张图是什么"；后两行标 `data-soft` ⇒ 卡片尺寸下自动收起（地方不够） */
+  var rows = [
+    { cells: ['图号', no, '册数', (c.skill || 0) + ' 技能 / ' + (c.msm || 0) + ' 工具'] },
+    { cells: ['线条', (bp.edges || 0) + ' 边', '面', (bp.meshes || 0) + ' 网格'] },
+    { cells: ['比例尺', '网格 24px = 1 格', '制图', 'S142'] },
+    { soft: true, cells: ['视图', '侧前 3/4', '版本', ver] },
+    { soft: true, cells: ['会话', (c.session || 0) + ' 条在册', '本体', (c.onto || 0) + ' 已建模'] }
+  ];
+  var html = '<table>';
+  html += '<tr><td class="bp-tname" colspan="4">宁静号 · 认知蓝图</td></tr>';
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    html += '<tr' + (r.soft ? ' data-soft="1"' : '') + '>' +
+      '<th>' + r.cells[0] + '</th><td>' + r.cells[1] + '</td>' +
+      '<th>' + r.cells[2] + '</th><td>' + r.cells[3] + '</td></tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
+/** 建层（只在蓝图档调用一次） */
+function bpInit() {
+  if (!BLUEPRINT) return;
+  var sheet = document.querySelector('.bp-sheet');
+  var svg = document.getElementById('bpSvg');
+  if (!sheet || !svg) return;
+
+  var notes = bpBuildNotes();
+  var els = [];
+  for (var i = 0; i < notes.length; i++) {
+    var n = notes[i];
+    var el = document.createElement('div');
+    el.className = 'bp-note';
+    el.innerHTML = '<b>' + n.head + '</b><i>' + n.body + '</i>';
+    /* 右栏文字落在屏幕右侧、左栏落在左侧；y 是视口比例
+       🔴 首读修正：贴边 3.2% 会让文字块离船太远，引线一拉就是 500px 的斜线，
+          指向感消失（看起来像"从船里射出去的光线"而不是标注）⇒ 收到 9%/13% 一带。
+       🔴 二次修正（2026-11-09，v1.127.0 真机 1440×793）：左侧还站着 `.bp-scale`
+          （FR 01~06 标尺，占 x=14~70）。左栏文字原在 5%（x=72）⇒ 标尺右缘与文字左缘
+          **只差 2px**，六格刻度的下半段又恰好与三条标注同高 ⇒ 读起来像
+          「FR 04 就是壳体那条标注的编号」，而那两样东西**毫无关系**。
+          ⇒ 非卡片档左栏退到 9.5%（x≈137），留出 ~67px 的视觉分界；
+            卡片档标尺本就不显示（`body.card .bp-scale{display:none}`），保持 5% 不动。
+          ⚠️ 判据：**并置即语义** —— 两样无关的东西贴在一起，图上就会长出一个不存在的关系
+            （同 §8c 那条"指得准但指不出，与没指同价"：这里是"指错了对象"，更坏）。 */
+    if (n.side === 'right') el.style.right = '4.5%';
+    else el.style.left = CARD ? '5%' : '9.5%';
+    el.style.top = (n.y * 100).toFixed(1) + '%';
+    sheet.appendChild(el);
+    els.push(el);
+
+    var lead = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    lead.setAttribute('class', 'bp-lead');
+    svg.appendChild(lead);
+    var dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('class', 'bp-leadDot');
+    dot.setAttribute('r', '2.6');
+    svg.appendChild(dot);
+    n._lead = lead; n._dot = dot; n._el = el;
+  }
+
+  document.getElementById('bpTitle').innerHTML = bpBuildTitle();
+
+  bpLayer = { notes: notes, v: new T.Vector3() };
+  window.__blueprintLayer = {
+    notes: notes.length,
+    anchors: notes.filter(function (n) { return !!bpAnchorOf(ship, n.anchor); }).length
+  };
+}
+
+/** 每帧：把内端投影到屏幕，连一条 引出线 → 膝线 → 文字块 */
+function bpUpdate() {
+  if (!bpLayer) return;
+  var w = window.innerWidth, h = window.innerHeight;
+  var v = bpLayer.v;
+  var notes = bpLayer.notes;
+
+  /* ① 先算每条的目标 y（= 锚点投影高度），并夹进安全区 */
+  for (var i = 0; i < notes.length; i++) {
+    var n = notes[i];
+    var world = bpAnchorOf(ship, n.anchor);
+    if (!world) { n._ax = null; continue; }
+    v.copy(world).project(camera);
+    /* z>1 = 在相机后面 ⇒ 藏起来（否则会画出穿越画面的假线） */
+    if (v.z > 1) { n._ax = null; continue; }
+    n._ax = (v.x * 0.5 + 0.5) * w;
+    n._ay = (-v.y * 0.5 + 0.5) * h;
+    n._ty = Math.max(h * 0.13, Math.min(h * 0.87, n._ay));
+  }
+
+  /* ② 同侧**去重叠**：🔴 首读修正（2026-11-09）——
+     六条标注里有两对锚到了同一部件附近（HULL/L.O.A. 都取包围盒中心、
+     雷达/主推进都在船尾），写死的 y 又让它们贴在一起 ⇒ 文字叠印、读不成。
+     ⇒ 按 y 排序后强制最小行距，再整体夹回安全区。
+     ⚠️ 为什么必须做这一步而不是"调一下那几个 y"：锚点位置**随船动**，
+        任何手调的常量都会在某个相位上重新撞上 —— 去重叠必须是每帧算的。 */
+  var minGap = 34;
+  for (var side = 0; side < 2; side++) {
+    var want = side === 0 ? 'left' : 'right';
+    var group = notes.filter(function (m) { return m.side === want && m._ty !== undefined; });
+    if (group.length < 2) continue;
+    group.sort(function (a, b) { return a._ty - b._ty; });
+    for (var k = 1; k < group.length; k++) {
+      if (group[k]._ty - group[k - 1]._ty < minGap) group[k]._ty = group[k - 1]._ty + minGap;
+    }
+    /* 推出去之后可能越过下边界 ⇒ 从下往上回推一次 */
+    for (var k2 = group.length - 2; k2 >= 0; k2--) {
+      if (group[k2 + 1]._ty - group[k2]._ty < minGap) group[k2]._ty = group[k2 + 1]._ty - minGap;
+    }
+  }
+
+  /* ③ 阻尼跟随 + 画线 */
+  for (var j = 0; j < notes.length; j++) {
+    var m = notes[j];
+    if (m._ty === undefined) { m._lead.setAttribute('d', ''); m._dot.setAttribute('r', '0'); continue; }
+    var curY = m._y === undefined ? m._ty : m._y + (m._ty - m._y) * 0.14;
+    m._y = curY;
+    m._el.style.top = curY.toFixed(1) + 'px';
+
+    var r = m._el.getBoundingClientRect();
+    /* 膝点：从文字块**朝向船**的那条边出发，先水平走 26px，再斜着连到部件 —— 这就是
+       工程制图里 引出线+膝线 的画法，不是我凑的：它保证线不压在文字上。 */
+    var kneeX = m.side === 'right' ? r.left - 26 : r.right + 26;
+    var kneeY = r.top + r.height * 0.5;
+    m._lead.setAttribute('d', 'M' + kneeX.toFixed(1) + ' ' + kneeY.toFixed(1) +
+      ' L' + m._ax.toFixed(1) + ' ' + m._ay.toFixed(1));
+    m._dot.setAttribute('cx', m._ax.toFixed(1));
+    m._dot.setAttribute('cy', m._ay.toFixed(1));
+    m._dot.setAttribute('r', '2.6');
+  }
+}
+
+bpInit();
+
 // ───────────────────────── 9. 主循环 ─────────────────────────
 var slabs = [];
 scene.traverse(function (o) { if (o.userData && o.userData.rz !== undefined) slabs.push(o); });
@@ -3141,6 +3557,9 @@ function tick() {
   driveCamera(t);
 
   if (speedNum) speedNum.textContent = String(Math.round(SIM.speed));
+
+  // 蓝图档：标注层跟着船走（内端每帧投影，外端固定）
+  if (bpLayer) bpUpdate();
 
   // ── v4 光影：走后期管线（bloom + 暗角 + 色调分级 + 颗粒）──
   // 画面从"平"到"酷"的差别几乎全在这一步：材质决定表面，
