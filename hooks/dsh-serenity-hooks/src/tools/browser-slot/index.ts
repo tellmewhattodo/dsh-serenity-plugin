@@ -1,0 +1,215 @@
+/**
+ * tools/browser-slot/index.ts — browser_slot 工具（ACC 级浏览器槽位管理器）
+ *
+ * owner 2026-11-09 令（原话）：
+ *   「通过 msm 通道获得另外两个宁静号的浏览器操作完整实现，然后各取所长，开始实现 ACC 级的
+ *     浏览器操作，务必给我实现槽位管理，最多 20 个 chrome 槽位，每个独立 profile，固定分辨率，
+ *     每个槽位有状态，状态异常例如长时间不动作、cpu 占用过高，直接可以反过来向唤醒这个浏览器的
+ *     会话注入消息提醒它管好自己的浏览器，槽位是否已经被会话正在使用要有状态，每个会话用完要
+ *     自觉退出占用」
+ *
+ * 本工具接的就是这条令。它是 **ACC 级**（进插件本体、随 npm 发布），
+ * ⛔ 不是 CCC 的某个 skill —— 因为"浏览器进程属于谁"和"哪个会话忘了关"是**跨 CCC 的**问题。
+ */
+
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { Context } from 'cordis'
+import { cccRootForExec, NO_CCC_FROM_AGENT_CWD } from '../../kernel/ccc-roots.js'
+import { sendToCognitiveTrajectory } from '../../wake/scheduler.js'
+import {
+  SLOT_ACTIONS,
+  acquireSlot,
+  doctorSlots,
+  listSlots,
+  nudgeStaleSlots,
+  reapSlot,
+  releaseSlot,
+  slotStatus,
+  waitSlotReady,
+  type SlotAction,
+  type SlotView,
+} from '../../browser/service.js'
+import { MAX_SLOTS, slotLabel } from '../../browser/state.js'
+import { normalizeSlotId } from '../../browser/process.js'
+
+function renderText(value: unknown): ContentBlock[] {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  return [{ type: 'text', text }]
+}
+
+const STATE_GLYPH: Record<string, string> = {  free: '·',
+  leased: '✓',
+  stale: '!',
+  orphaned: '✗',
+}
+
+/**
+ * 从会话 cwd 反查轨迹目录名。
+ *
+ * 判据：**只在 cwd 落在 `<root>/AGENT_SESSIONS/<dir>` 内时才认**，否则返回空串。
+ * ⛔ 不做模糊匹配、⛔ 不回落到"最后修改的那个目录" —— 归属猜错会让**看守把提醒发给别人**，
+ * 那比不提醒更坏（收到的人无从判断自己是否真的占着槽位）。
+ */
+function trajectoryNameFromCwd(root: string, cwd: string): string {
+  if (!cwd) return ''
+  const marker = `${root.replace(/\/+$/, '')}/AGENT_SESSIONS/`
+  if (!cwd.startsWith(marker)) return ''
+  const rest = cwd.slice(marker.length)
+  const seg = rest.split('/')[0] ?? ''
+  return seg.startsWith('_') ? '' : seg
+}
+
+/** 一行渲染一个槽位（宽度克制：20 行要塞得进一屏） */
+function row(v: SlotView): string {
+  const g = STATE_GLYPH[v.state] ?? '?'
+  const who = v.state === 'free' ? '' : ` ${v.trajectory || v.sessionId || '(无归属)'}`
+  const extra = v.state === 'free' ? '' : ` 持${v.heldMin}m 闲${v.idleMin}m cpu${v.cpuPct}% 内存${v.rssMb}M`
+  const why = v.reasons.length > 0 ? `\n      ↳ ${v.reasons.join('；')}` : ''
+  return `  ${g} ${v.label.padEnd(3)} :${v.port} ${v.resolution.padEnd(9)} ${v.state.padEnd(8)}${who}${extra}${why}`
+}
+
+/** 动作实现 */
+async function run(
+  ctx: Context,
+  root: string,
+  sessionId: string,
+  trajectory: string,
+  action: SlotAction,
+  args: Record<string, unknown>,
+): Promise<string> {
+  switch (action) {
+    case 'acquire': {
+      const want = typeof args.slot === 'string' ? normalizeSlotId(args.slot) : 0
+      const res = await acquireSlot({ root, sessionId, trajectory, want })
+      if (!res.ok) return `⛔ 未租到槽位。\n${res.detail}`
+      // 要求同步等到可用（opt-in）：CDP 就绪才算真的能用
+      if (args.wait === true) {
+        const ready = await waitSlotReady(root, res.slot)
+        return `${res.detail}\n${ready.ok ? '✓ ' + ready.detail : '⚠️ ' + ready.detail}`
+      }
+      return res.detail
+    }
+    case 'release': {
+      const n = normalizeSlotId(String(args.slot ?? ''))
+      if (n === 0) return '⛔ 需要槽位号：release 需要 --slot <b1..b20>'
+      return releaseSlot(root, sessionId, n).detail
+    }
+    case 'reap': {
+      const n = normalizeSlotId(String(args.slot ?? ''))
+      if (n === 0) return '⛔ 需要槽位号：reap 需要 --slot <b1..b20>'
+      const reason = typeof args.reason === 'string' && args.reason ? args.reason : 'manual reaping'
+      return reapSlot(root, n, reason).detail
+    }
+    case 'status': {
+      const n = normalizeSlotId(String(args.slot ?? ''))
+      const v = n > 0 ? slotStatus(root, n) : null
+      if (!v) return `⛔ 槽位号非法（1..${MAX_SLOTS}）。`
+      return row(v).trimStart()
+    }
+    case 'list':
+    default: {
+      const { views, ledgerAgeMin } = listSlots(root)
+      const occupied = views.filter((v) => v.state !== 'free')
+      const bad = views.filter((v) => v.state === 'stale' || v.state === 'orphaned')
+      const lines: string[] = []
+      lines.push(
+        `浏览器槽位 ${views.length} 个（占用 ${occupied.length}，空闲 ${views.length - occupied.length}，异常 ${bad.length}）` +
+          (ledgerAgeMin > 0 ? `  台账 ${ledgerAgeMin} 分钟前更新` : ''),
+      )
+      lines.push('  · 空闲   ✓ 占用   ! 异常(需处理)   ✗ 进程已死')
+      if (occupied.length === 0) {
+        lines.push('  （全部空闲）')
+      } else {
+        for (const v of occupied) lines.push(row(v))
+      }
+      if (bad.length > 0) {
+        lines.push('')
+        lines.push('🔴 异常槽位会由看守向**占用它的会话**注入提醒；若占用者已经不在，用 reap 回收：')
+        for (const v of bad) lines.push(`  browser_slot reap --slot ${v.label}`)
+      }
+      lines.push('')
+      lines.push('用法：acquire（自动挑空槽，可 --slot 指定）· release（用完必须交还）· status --slot b1')
+      return lines.join('\n')
+    }
+    case 'doctor': {
+      return JSON.stringify(doctorSlots(root), null, 2)
+    }
+  }
+}
+
+export function createBrowserSlotTool(ctx: Context) {
+  return defineTool({
+    name: 'browser_slot',
+    description:
+      'Browser slot manager (ACC-level, max 20 Chrome slots). Each slot = one isolated Chrome process with its own profile dir, fixed resolution, and a CDP port (9301+). ' +
+      'Slots carry state: free / leased / stale (idle too long, CPU or memory over threshold, lease expired) / orphaned (process died). ' +
+      'Actions: acquire (lease a slot; reuses your existing lease instead of leasing a second one) / release (REQUIRED when done — a background watchman nudges you if you forget) / list (all slots + occupancy) / status --slot <bN> / reap --slot <bN> (force-reclaim an abandoned slot, records a reason) / doctor (self-check, read-only). ' +
+      '🔴 Lease before you drive a browser for evidence, and ALWAYS release when finished — an unreleased slot keeps a Chrome process alive and burns power.',
+    parameters: {
+      action: { type: 'string', enum: [...SLOT_ACTIONS], required: true, description: 'Subcommand' },
+      slot: { type: 'string', description: 'Slot label for status/release/reap (b1..b20, or 1..20); for acquire = request a specific slot (omit = auto-pick a free one)' },
+      wait: { type: 'boolean', description: 'acquire: wait until the CDP endpoint actually answers (2 consecutive probes) before returning. Default false (returns once the process is spawned).' },
+      reason: { type: 'string', description: 'reap: why this slot is being force-reclaimed (recorded).' },
+    },
+    output: {
+      schema: { type: 'json' },
+      render: (_args, value) => renderText(value),
+    },
+    async execute(args, exec) {
+      const root = cccRootForExec(exec)
+      if (!root) throw new Error(NO_CCC_FROM_AGENT_CWD)
+      const sessionId = (exec.agent?.session?.id ?? '') as string
+      // 🔴 归属用 `header.cwd` 反查 CCC 内的轨迹目录名。
+      //    ⛔ 不用 `session.title`（宿主 Session 类型上没有这个字段，typecheck 会红）；
+      //    ⛔ 也不新造"当前轨迹"环境变量（本仓已有判据：AGENT_SESSIONS/.current 是全局的、不可靠）。
+      const trajectory = trajectoryNameFromCwd(root, (exec.agent?.session?.header?.cwd ?? '') as string)
+      const action = args.action as SlotAction
+      return await run(ctx, root, sessionId, trajectory, action, args as Record<string, unknown>)
+    },
+  })
+}
+
+/**
+ * 槽位看守（后台）—— owner 要的「反过来向唤醒这个浏览器的会话注入消息」就是这里。
+ *
+ * 🔴 为什么放在 ACC 而不是某个轨迹：**忘了关浏览器的不止一条轨迹**，而看守必须比任何
+ *    单条轨迹活得久。它挂在宿主进程上，任何轨迹租的槽位都由它盯。
+ *
+ * ⚠️ 它**只提醒、不代为释放** —— 见 nudgeText 的判据：只有占用者知道那个浏览器还有没有用。
+ */
+export function registerSlotWatchman(ctx: Context, rootProvider: () => string | null): { dispose: () => void } {
+  let timer: ReturnType<typeof setInterval> | null = null
+
+  const tick = async (): Promise<void> => {
+    const root = rootProvider()
+    if (!root) return
+    try {
+      const res = await nudgeStaleSlots(root, async (r, target, message) => {
+        const out = await sendToCognitiveTrajectory(ctx, r, target, message, '浏览器槽位看守')
+        return { ok: out.ok, detail: out.detail }
+      })
+      for (const n of res.nudged) {
+        console.log(
+          `[serenity-hooks] 槽位看守：${slotLabel(n.slot)} (${n.state}) → ${n.trajectory || '(无归属)'} ` +
+            `${n.delivered ? '已注入' : '注入失败'}：${n.detail}`,
+        )
+      }
+    } catch (err) {
+      console.warn(`[serenity-hooks] ✗ 槽位看守异常: ${String((err as Error)?.message ?? err)}`)
+    }
+  }
+
+  // 5 分钟一拍：与 CRO 同节拍。⛔ 不必更快 —— 判定阈值本身是 15 分钟量级。
+  timer = setInterval(tick, 5 * 60_000)
+  timer.unref()
+
+  return {
+    dispose: () => {
+      if (timer) {
+        clearInterval(timer)
+        timer = null
+      }
+    },
+  }
+}

@@ -21,12 +21,23 @@ describe('invariant: 清单与注册工具一致性', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('REGISTERED_TOOLS：常驻 10 ＋ 条件 3（v1.121.0 加 reconstruct；数量由两个常量对账，⛔ 不写死总数）', () => {
+  it('REGISTERED_TOOLS：常驻段在前、条件段在后（数量由两个常量对账，⛔ 不写死总数）', () => {
     // 🔴 只钉**结构不变量**（常驻/条件两段的划分），不钉总数：
     //    总数每加一个工具就要改一次数字，而那个数字**不承载任何判据**（真正的判据是
     //    "与清单同集合"，由上面那条用例守）。写死它 ⇒ 每次加工具都制造一条必然过期的断言。
-    expect(REGISTERED_TOOLS.length - CONDITIONAL_TOOL_COUNT).toBe(10)
+    //
+    // 🔴 **2026-11-09 自纠（v1.128.0 加 browser_slot 时这条自己红了）**：
+    //    原文写着"⛔ 不写死总数"，而下一行就是 `toBe(10)` —— **它违反了它自己写下的判据**。
+    //    这是本仓反复付代价的那种形态：判据是对的，**生成它的那一行没照做**。
+    //    ⇒ 改成钉**结构**：常驻段（前 n-CONDITIONAL 项）一个条件工具都不许有；
+    //      条件段（末 CONDITIONAL 项）必须恰好是那三个。加工具时**不需要改本用例**。
+    const cond = (REGISTERED_TOOLS as readonly string[]).slice(-CONDITIONAL_TOOL_COUNT)
+    const pinned = (REGISTERED_TOOLS as readonly string[]).slice(0, REGISTERED_TOOLS.length - CONDITIONAL_TOOL_COUNT)
     expect(CONDITIONAL_TOOL_COUNT).toBe(3)
+    // 条件段 ⊆ 已知的条件工具集合；且常驻段与条件段不相交（顺序错了会在这里红）
+    const CONDITIONAL = ['im-bridge', 'diagram', 'reconstruct']
+    for (const n of cond) expect(CONDITIONAL).toContain(n)
+    for (const n of pinned) expect(CONDITIONAL).not.toContain(n)
     expect(REGISTERED_TOOLS).toContain('container_fs')
     expect(REGISTERED_TOOLS).toContain('container_admin')
     expect(REGISTERED_TOOLS).toContain('cognitive_trajectory')
@@ -36,8 +47,11 @@ describe('invariant: 清单与注册工具一致性', () => {
     expect(REGISTERED_TOOLS).toContain('localstore')
     expect(REGISTERED_TOOLS).toContain('im-bridge')
     expect(REGISTERED_TOOLS).toContain('serenity-skill-creator')
+    // v1.128.0：browser_slot 必须在**常驻段**（它的价值恰在"使用者没想到的时候"，
+    // 条件出现等于不存在）
+    expect(pinned).toContain('browser_slot')
     // v1.121.0：reconstruct 必须在**条件段**（末 CONDITIONAL_TOOL_COUNT 项）
-    expect((REGISTERED_TOOLS as readonly string[]).slice(-CONDITIONAL_TOOL_COUNT)).toContain('reconstruct')
+    expect(cond).toContain('reconstruct')
   })
 
   it('真实清单与 REGISTERED_TOOLS 一致（防双侧陈旧再次静默通过）', () => {

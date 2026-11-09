@@ -64,6 +64,10 @@ import { weixinChannel } from './im/weixin-channel.js'
 import { feishuChannel } from './im/feishu-channel.js'
 import { createImBridgeTool } from './tools/im-bridge.js'
 import { createDiagramTool } from './tools/diagram.js'
+// v1.128.0（owner 2026-11-09 令）：ACC 级浏览器槽位管理器。**放在 ACC 而不是某个 skill 里**，
+// 因为"浏览器进程属于谁 / 哪个会话忘了关"是跨 CCC 的问题 —— 而忘了关浏览器的代价
+// （整机功耗异常、风扇长转）是**容器级**的，不是某条轨迹的。
+import { createBrowserSlotTool, registerSlotWatchman } from './tools/browser-slot/index.js'
 // §0L（S142 2026-09-19）：绑定载体迁到宿主存储域——装载期开域 + 注入句柄 + 一次性迁移
 import { openBindingDomain, bindingStore } from './host/storage-domain.js'
 import { setBindingStore } from './trajectory/bound.js'
@@ -404,6 +408,8 @@ export function apply(ctx: Context, config: Config): void {
     ctx.tools.register(createContainerAdminTool(ctx))
     // v1.31.0：IM 消息发送（条件可见——本 CCC 未配置任何 IM 通道时由 guards 移除）
     ctx.tools.register(createImBridgeTool())
+    // v1.128.0：浏览器槽位管理器（owner 2026-11-09 令，见该文件头部原话）
+    ctx.tools.register(createBrowserSlotTool(ctx))
     // ⚠️ v1.106.0：原 `acc-diag`（专属工具）**已整体并入 `dashboard` 的 `diag` 动作**
     // （owner 2026-11-01 裁「方案 C」）——连 `exclusiveTools` 机制一起删除。
     // ⇒ 这里**不再注册**任何诊断工具；`dashboard` 是常驻的，诊断入口随之对所有轨迹可见。
@@ -522,6 +528,14 @@ export function apply(ctx: Context, config: Config): void {
   //    装配期只拿得到一个根 ⇒ 必然错。⇒ 每次事件按**该会话自己的 cwd** 解析根
   //    （注入 `rootForSession`，见下方 `defaultSubscriptionDeps`）。
   registerTrajectorySubscriptions(ctx, defaultSubscriptionDeps(ctx))
+  // 🆕 v1.128.0 浏览器槽位看守（owner 2026-11-09 令）：5min 一拍，找"长期不动 / CPU 过高 /
+  // 占用超时 / 进程已死"的槽位，**反向向占用它的轨迹注入一条提醒**。
+  // 🔴 它只提醒、**不代为释放** —— 只有占用者知道那个浏览器还有没有用。
+  // ⚠️ root 同样按**该会话自己的 cwd** 解析：一个宿主进程服务多个 CCC（实测 3 个），
+  //    装配期固定一个根必然是错的 ⇒ 用 `rootProvider` 惰性取。
+  // ⚠️ 与 `send-now` 共用同一条投递通路（`sendToCognitiveTrajectory`）⇒ 回执口径一致：
+  //    "已注入" ⛔ 不等于"对方已处理"。
+  registerSlotWatchman(ctx, () => cccRootForCwd(process.cwd()))
   // F4c-3 微信桥（v1.27.0 实验性）：CCC 级配置（serenity.json weixin + localstore 凭据）→
   // 多账号 iLink 轮询 + 消息路由到 轨迹约束 role。enabled=false 未配置 → 零资源占用。
   registerWeixinBridge(ctx)

@@ -184,6 +184,10 @@ export const REGISTERED_TOOLS = [
   //   条件加在末位），否则那条钉子会对**正确的文字**报假错。
   'container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'ontology',
   'serenity-skill-creator', 'localstore', 'container_admin',
+  // ⚠️ v1.128.0：新增 `browser_slot`（**常驻**，不按条件出现）⇒ 11 项常驻，条件仍 3 项。
+  //    为什么常驻：它的价值在"忘了关浏览器时有人兜底"，而那个场景**恰恰是使用者没想到的时候**
+  //    ⇒ 一个只在特定条件下才出现的工具，在这个场景里等于不存在。
+  'browser_slot',
   // ↓ 条件出现的三个（按注册期的条件钩子判可见性，见各自 `src/tools/*.ts`）
   //   ⚠️ v1.106.0：原第三个 `acc-diag` **已并入 `dashboard diag`** ⇒ 13 项，条件 2 项。
   //   ⚠️ v1.121.0：新增 `reconstruct`（条件 = **累计 token 达阈值**，走 `register(def,{when})`

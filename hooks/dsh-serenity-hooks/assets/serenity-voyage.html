@@ -1320,6 +1320,8 @@ var PostFX = (function () {
 var clock = new T.Clock();
 var uTime = { value: 0 };
 var SIM = { t: 0, speed: 26, frames: 0, ready: false };
+/* 🔴 §11 省电闸用：是否存在一个"在飞的" rAF 请求。见文件末尾 §11。 */
+var RAF_PENDING = false;
 
 // ───────────────────────── 2. 程序化贴图 ─────────────────────────
 function cv2d(w, h) {
@@ -3468,6 +3470,12 @@ var slabs = [];
 scene.traverse(function (o) { if (o.userData && o.userData.rz !== undefined) slabs.push(o); });
 
 function tick() {
+  /* 🔴🔴 §8d 省电闸（2026-11-09 事故后补，判据在文件末尾 §11）
+     页面不可见 ⇒ **立刻停止请求下一帧**，并且不渲染。
+     为什么不是"降帧"而是"停"：用户看不见的任何一帧都是纯代价。
+     事故：本页曾无条件 rAF 自循环，一个被遗忘的标签页 36 小时累计烧掉 12h57m CPU。 */
+  if (document.hidden) { RAF_PENDING = false; return; }
+  RAF_PENDING = true;
   var dt = Math.min(clock.getDelta(), 0.05);
   if (!reduce) SIM.t += dt;
   var t = SIM.t;
@@ -3579,6 +3587,41 @@ function tick() {
   }
   requestAnimationFrame(tick);
 }
+
+/* ── §11 省电闸（2026-11-09）─────────────────────────────────────────
+   🔴 **事故**：这个页面原先无条件 `requestAnimationFrame(tick)` 自循环，
+   全文没有一处 `visibilitychange`。一个被遗忘在后台的标签页因此连续 36 小时
+   以 60fps 跑 three.js + 后期管线，累计 CPU 12h57m —— 整机功耗异常、风扇长转，
+   owner 要睡了才发现。
+
+   🔴 **为什么"不可见就停"必须显式写**：浏览器对**后台标签页**本来会节流 rAF，
+   但节流 ≠ 停止（通常降到 1fps，且 `--disable-renderer-backgrounding` 之类
+   的开关会取消节流）。**节流到 1fps 仍然是 36 小时**。
+   ⇒ 判据：不可见 = **一帧都不该渲染**，而不是"少渲染"。
+
+   🔴 **恢复时必须重置 clock**：`clock.getDelta()` 在停摆期间会累积成一个巨大的 dt，
+   而我们只 `Math.min(dt, 0.05)` 截断它 —— 那会让"回来的第一帧"跳变。
+   重置时钟让恢复是连续的（观感上就是从原处继续）。 */
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) {
+    /* 已经不可见：下一次 tick 会自己停下并把 RAF_PENDING 置 false */
+    RAF_PENDING = false;
+  } else if (!RAF_PENDING) {
+    /* 回来了：先把时钟清零（吃掉停摆期累积的 delta），再重新起循环 */
+    if (clock && typeof clock.getDelta === 'function') clock.getDelta();
+    RAF_PENDING = true;
+    requestAnimationFrame(tick);
+  }
+});
+/* 页面被卸载/隐藏时也尽量停下：`pagehide` 覆盖 bfcache 与关闭标签页两种情形
+   （`visibilitychange` 在部分浏览器的 bfcache 路径上不触发） */
+window.addEventListener('pagehide', function () { RAF_PENDING = false; });
+
+/* ⚠️ **本闸的已知边界（如实登记，⛔ 不要当成已覆盖）**：
+   在 **headless** 模式下页面没有"可见性"概念 —— `document.hidden` 恒为 false，
+   `visibilitychange` 也可能永不触发。⇒ **头部无头槽位时，这道闸不生效。**
+   那种情形下唯一可靠的关停手段是 `browser_slot release`（把进程杀掉）。
+   判据：**本闸治"标签页被遗忘但仍可见"，槽位台账治"进程被遗忘"** —— 两者不可互相替代。 */
 
 // ───────────────────────── 10. 启动 ─────────────────────────
 // v4：后期管线必须在首帧之前就绪（否则第一帧走直出、第二帧才走管线，会闪一帧）
