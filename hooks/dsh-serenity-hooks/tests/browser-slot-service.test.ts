@@ -264,8 +264,27 @@ describe('🔴 测试自身的进程卫生（这条防的是本机制自己踩�
       return
     }
     const paths = slotPaths(root, res.slot)
-    // 正控：起来之后，按 profile 认领**必须**能抓到至少一个 pid（否则下面的空是"恒空"）
-    const before = findPidsByProfile(paths.profile)
+
+    /**
+     * 正控：起来之后按 profile 认领**必须**能抓到至少一个 pid。
+     *
+     * 🔴 这里原本是**一次性断言，会间歇假红**（2026-11-09 在 `coverage` 全量里实测：
+     *    `expected 0 to be greater than 0`）。成因不是实现坏了，而是**时序**：
+     *    `acquireSlot` 返回时只保证"spawn 已发起"，子进程的 `/proc/<pid>/cmdline`
+     *    可能还没写全（或 exec 还没完成）⇒ 那一瞬间按 cmdline 认领**本来就可能扫不到**。
+     *
+     *    判据（比修法值钱）：**"扫不到进程"有两种成因，处置方向相反** ——
+     *      · 还没启动（要等）  vs  · 已经死了（要清理）
+     *    一次性读数是分不开这两者的 ⇒ 必须**轮询到一个稳定窗口**再下结论。
+     *    ⚠️ 这恰好也是本机制对真实用户的同一条判据（`pid=0` 时不许判 orphaned）。
+     */
+    const deadline = Date.now() + 5_000
+    let before: number[] = []
+    while (Date.now() < deadline) {
+      before = findPidsByProfile(paths.profile)
+      if (before.length > 0) break
+      await new Promise((r) => setTimeout(r, 100))
+    }
     expect(before.length).toBeGreaterThan(0)
 
     destroySlot(root, res.slot)

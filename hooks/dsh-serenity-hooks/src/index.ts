@@ -531,11 +531,12 @@ export function apply(ctx: Context, config: Config): void {
   // 🆕 v1.128.0 浏览器槽位看守（owner 2026-11-09 令）：5min 一拍，找"长期不动 / CPU 过高 /
   // 占用超时 / 进程已死"的槽位，**反向向占用它的轨迹注入一条提醒**。
   // 🔴 它只提醒、**不代为释放** —— 只有占用者知道那个浏览器还有没有用。
-  // ⚠️ root 同样按**该会话自己的 cwd** 解析：一个宿主进程服务多个 CCC（实测 3 个），
-  //    装配期固定一个根必然是错的 ⇒ 用 `rootProvider` 惰性取。
-  // ⚠️ 与 `send-now` 共用同一条投递通路（`sendToCognitiveTrajectory`）⇒ 回执口径一致：
-  //    "已注入" ⛔ 不等于"对方已处理"。
-  registerSlotWatchman(ctx, () => cccRootForCwd(process.cwd()))
+  // 🔴🔴 **v1.128.2：这里原先是 `cccRootForCwd(process.cwd())`，那是个静默失效** ——
+  //    宿主进程 cwd 是**用户家目录**（不在任何 CCC 内）⇒ 恒返回 null ⇒ tick 第一行就 return
+  //    ⇒ **看守一次都没工作过**，且没有任何日志。现在改为由看守自己在每拍用
+  //    `listCccs(ctx)` 枚举全部 CCC 根（那是"本机有哪些 CCC"的唯一权威枚举）。
+  //    ⚠️ 不在这里固定根：一个宿主服务多个 CCC（实测 3 个），装配期定一个必然是错的。
+  registerSlotWatchman(ctx)
   // F4c-3 微信桥（v1.27.0 实验性）：CCC 级配置（serenity.json weixin + localstore 凭据）→
   // 多账号 iLink 轮询 + 消息路由到 轨迹约束 role。enabled=false 未配置 → 零资源占用。
   registerWeixinBridge(ctx)

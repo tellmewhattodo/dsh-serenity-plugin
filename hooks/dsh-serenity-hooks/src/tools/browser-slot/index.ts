@@ -15,7 +15,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { Context } from 'cordis'
-import { cccRootForExec, NO_CCC_FROM_AGENT_CWD } from '../../kernel/ccc-roots.js'
+import { cccRootForExec, listCccs, NO_CCC_FROM_AGENT_CWD } from '../../kernel/ccc-roots.js'
 import { sendToCognitiveTrajectory } from '../../wake/scheduler.js'
 import {
   SLOT_ACTIONS,
@@ -171,6 +171,37 @@ export function createBrowserSlotTool(ctx: Context) {
 }
 
 /**
+ * 找出**所有**该被看守盯的 CCC 根。
+ *
+ * 🔴🔴 **为什么不能再用 `cccRootForCwd(process.cwd())`**（2026-11-09 真机实测，一个静默失效）：
+ *    宿主进程的 cwd 是**用户家目录**（`dashboard diag` 明写「进程 CCC:（无）」）
+ *    ⇒ `cccRootForCwd(process.cwd())` **恒返回 `null`** ⇒ `tick()` 第一行 `if (!root) return`
+ *    ⇒ **看守每一拍都直接返回，一次都没工作过**，而它没有任何报错、没有任何日志、台账上
+ *    也看不出异常（`nudges` 一直是 0，与"没人在用槽位"读数相同）。
+ *
+ *    实测取证：把 b1 造成 `stale`（闲 55 分钟）、归属指向本轨迹、进程活着、
+ *    连等两拍（23:11:21 过了）⇒ 台账 `nudges` 仍为 **0**。
+ *
+ *    判据（这条比修法值钱）：**"装配了" ≠ "在工作"**。`registerSlotWatchman` 确实被调用、
+ *    `setInterval` 确实在跑、`tick` 确实被触发 —— 而它每次都在第一行静默返回。
+ *    一个**永远走不到第二行**的定时器，在"有没有装配"这个读数上与健康的一模一样。
+ *
+ *    修法：用 `listCccs(ctx)` —— 它是「本机有哪些 CCC 根」**唯一的权威枚举**
+ *    （并集语义；`dashboard diag` 也是走它那一族）。⛔ 不用进程 cwd（那是服务启动目录，
+ *    与会话无关）；⛔ 不猜目录（猜出来的根会去读别人的台账）。
+ *
+ *    ⚠️ 一个宿主进程服务多个 CCC（实测 3 个）⇒ 必须**逐个**看守，⛔ 不能只挑一个。
+ */
+export async function findWatchRoots(ctx: unknown): Promise<string[]> {
+  try {
+    const all = await listCccs(ctx)
+    return all.map((c) => c.root).filter((r): r is string => typeof r === 'string' && r.length > 0)
+  } catch {
+    return []
+  }
+}
+
+/**
  * 槽位看守（后台）—— owner 要的「反过来向唤醒这个浏览器的会话注入消息」就是这里。
  *
  * 🔴 为什么放在 ACC 而不是某个轨迹：**忘了关浏览器的不止一条轨迹**，而看守必须比任何
@@ -178,25 +209,34 @@ export function createBrowserSlotTool(ctx: Context) {
  *
  * ⚠️ 它**只提醒、不代为释放** —— 见 nudgeText 的判据：只有占用者知道那个浏览器还有没有用。
  */
-export function registerSlotWatchman(ctx: Context, rootProvider: () => string | null): { dispose: () => void } {
+export function registerSlotWatchman(ctx: Context): { dispose: () => void } {
   let timer: ReturnType<typeof setInterval> | null = null
 
   const tick = async (): Promise<void> => {
-    const root = rootProvider()
-    if (!root) return
-    try {
-      const res = await nudgeStaleSlots(root, async (r, target, message) => {
-        const out = await sendToCognitiveTrajectory(ctx, r, target, message, '浏览器槽位看守')
-        return { ok: out.ok, detail: out.detail }
-      })
-      for (const n of res.nudged) {
-        console.log(
-          `[serenity-hooks] 槽位看守：${slotLabel(n.slot)} (${n.state}) → ${n.trajectory || '(无归属)'} ` +
-            `${n.delivered ? '已注入' : '注入失败'}：${n.detail}`,
-        )
+    // 🔴 多根：一个宿主服务多个 CCC。旧实现的 `rootProvider()` 返回 null 时**直接 return**，
+    //    而那正是它在真机上的常态（进程 cwd 不在任何 CCC 内）⇒ 整个看守从未工作。
+    const roots = await findWatchRoots(ctx)
+    if (roots.length === 0) {
+      // ⚠️ 这一行是**必要的**：让"一次都没扫描"在日志里可见。
+      //    旧实现没有它 ⇒ "没有槽位要处理"与"根本没在扫"在读数上完全一样。
+      console.warn('[serenity-hooks] ⚠️ 槽位看守：未枚举到任何 CCC 根 ⇒ 本拍未扫描（不是"无异常"）')
+      return
+    }
+    for (const root of roots) {
+      try {
+        const res = await nudgeStaleSlots(root, async (r, target, message) => {
+          const out = await sendToCognitiveTrajectory(ctx, r, target, message, '浏览器槽位看守')
+          return { ok: out.ok, detail: out.detail }
+        })
+        for (const n of res.nudged) {
+          console.log(
+            `[serenity-hooks] 槽位看守：${slotLabel(n.slot)} (${n.state}) → ${n.trajectory || '(无归属)'} ` +
+              `${n.delivered ? '已注入' : '注入失败'}：${n.detail}`,
+          )
+        }
+      } catch (err) {
+        console.warn(`[serenity-hooks] ✗ 槽位看守异常（${root}）: ${String((err as Error)?.message ?? err)}`)
       }
-    } catch (err) {
-      console.warn(`[serenity-hooks] ✗ 槽位看守异常: ${String((err as Error)?.message ?? err)}`)
     }
   }
 
