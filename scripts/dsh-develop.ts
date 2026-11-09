@@ -66,6 +66,58 @@ const PNPM = ((): string => {
   return 'pnpm'
 })()
 
+/**
+ * 把 pnpm 所在目录垫到 `PATH` 最前 —— **给那些自己要去 spawn pnpm 的子进程用**。
+ *
+ * 🔴 **为什么需要**（2026-11-09 实测，与上面 {@link PNPM} 同根）：`dsh plugin add` 内部会
+ * `spawn('pnpm')`，于是**同一个缺口换了个地方发作** —— 报
+ * `Command failed with ENOENT: pnpm add '@shgroup/dsh-serenity-hooks@1.124.0'` /
+ * `dsh: pnpm was not found; install pnpm and make it available on PATH`。
+ * ⇒ 我们改不了 `dsh` 的查表方式，但**能给它一个含 pnpm 的 PATH**。
+ *
+ * 边界（诚实标注）：只在 `PNPM` 被**解析成绝对路径**时才垫（退化成裸名说明本机没有 pnpm，
+ * 此时垫一个猜出来的目录只会制造第二种假象）；用户的 `PATH` 原样保留在后面。
+ */
+function pathWithPnpm(basePath: string | undefined): string {
+  const sep = ':'
+  const base = basePath ?? ''
+  if (!PNPM.startsWith('/')) return base
+  const dir = dirname(PNPM)
+  const parts = base.split(sep).filter((p) => p !== '')
+  if (parts.includes(dir)) return base
+  return [dir, ...parts].join(sep)
+}
+
+/**
+ * 该 profile 的 `node_modules` **实际被链接自哪个 pnpm store**（读 `.modules.yaml` 的 `storeDir`）。
+ *
+ * 🔴 **为什么必须读它、不能猜**（2026-11-09 实测）：`dsh plugin add` 走 `pnpm add`，而 pnpm 会
+ * 拿**自己算出的默认 store** 与 `node_modules` 里记录的 store 对账，不一致就**直接拒绝**：
+ * ```
+ * [ERR_PNPM_UNEXPECTED_STORE] The dependencies at "…/profiles/web/node_modules" are currently
+ * linked from the store at "/home/…/.local/bin/store/v11".
+ * pnpm now wants to use the store at "/home/…/.local/share/pnpm/store/v11" …
+ * ```
+ * 这条错误里**没有任何"我们的包"的信息** —— 它与发布是否成功、版本对不对**完全无关**，
+ * 只是"这台机器的 pnpm 换了默认 store 落点"（pnpm 版本升级会这样）。
+ * ⇒ 处置：**把 `node_modules` 里记录的那个 store 显式传回去**（`npm_config_store_dir`），
+ * 而不是去 `pnpm install` 重装整个 profile —— 后者会动一整个 profile 的依赖图，
+ * 为一个"装一个包"的需求付不起那个代价，也不是我们该做的决定。
+ * 同族先例：本文件 `npm-install-dev` 早就用 `--store-dir hooks/.pnpm-store` 治过同一个错误码。
+ *
+ * @returns store 绝对路径；读不到 ⇒ `null`（调用方不传该变量，让 pnpm 用默认 —— 不猜）
+ */
+function storeDirForProfile(profile: string): string | null {
+  const modulesYaml = join(HOME_DIR, '.dsh', 'profiles', profile, 'node_modules', '.modules.yaml')
+  if (!existsSync(modulesYaml)) return null
+  try {
+    const m = readFileSync(modulesYaml, 'utf-8').match(/"storeDir":\s*"([^"]+)"/)
+    return m === null ? null : m[1]!
+  } catch {
+    return null
+  }
+}
+
 // ── 工具 ──
 
 function run(cmd: string, args: string[], opts: { cwd?: string; env?: Record<string, string>; quiet?: boolean } = {}): { status: number; stdout: string; stderr: string } {
@@ -1866,6 +1918,23 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
     `[dsh-develop] npm 安装 ${pkgSpec} 到 profile '${profile}'（官方 dsh plugin add 路径）` +
       (registry ? `｜源覆盖: ${registry}` : ''),
   )
+  // 🔴 store 位置必须与 `node_modules` 里记录的一致（2026-11-09 实测 ERR_PNPM_UNEXPECTED_STORE）。
+  //    同一条错误码本文件在 `npm-install-dev` 里早已遇到过（那里用 `--store-dir` 治）；
+  //    这里 pnpm 由 `dsh plugin add` 内部起，我们只能经环境变量传。
+  const storeDir = storeDirForProfile(profile)
+  if (storeDir === null) {
+    console.log(`[dsh-develop] ⚠️ 读不到 profile '${profile}' 的 node_modules/.modules.yaml ⇒ 不指定 store（用 pnpm 默认）`)
+  } else {
+    console.log(`[dsh-develop] store = ${storeDir}（取自该 profile 的 .modules.yaml，⛔ 不猜）`)
+  }
+  // 🔴 **变量名是 `pnpm_config_store_dir`，⛔ 不是 `npm_config_store_dir`** —— 2026-11-09 实测：
+  //    同一个值喂两个名字，`pnpm store path` 逐字给出
+  //      · 无 env             ⇒ `~/.local/share/pnpm/store/v11`（pnpm 默认）
+  //      · `npm_config_…`     ⇒ `~/.local/share/pnpm/store/v11`（**没被采纳**：pnpm 不读 npm_ 前缀的 store）
+  //      · `pnpm_config_…`    ⇒ `~/.local/bin/store/v11`（**到位**）
+  //    ⇒ 这条正是 D144「参数传对了 ≠ 效果达成了」的落点：env **传进去了**、pnpm **照旧报同一个错**，
+  //      若不去读 `pnpm store path` 就会以为"传了没用 ⇒ 这条路走不通"，而真相是**名字不对**。
+  const storeEnv: Record<string, string> = storeDir === null ? {} : { pnpm_config_store_dir: storeDir }
   // 🔴 tarball 传播重试（2026-10-11 v1.51.6 实测）：publish 成功后 packument **立刻**含该版本，
   //   但 tarball 的 404 会被**边缘负缓存** ⇒ 紧跟发布的 npm-install 会吃到 ERR_PNPM_FETCH_404
   //   （实测：发布后约 5 分钟 pnpm 仍报 ERR_PNPM_FETCH_404，而版本记录与 integrity 都已齐）。
@@ -1878,7 +1947,16 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
     r = run(bin, ['plugin', '--profile', profile, 'add', pkgSpec], {
       cwd: process.cwd(),
       quiet: true,
-      env: { npm_config_cache: cache, NPM_CONFIG_CACHE: cache, ...registryEnv },
+      // 🔴 `PATH` 必须含 pnpm（2026-11-09 实测）：`dsh plugin add` 内部 `spawn('pnpm')`，
+      //    而宿主进程的 PATH 里没有 pnpm ⇒ 报 `Command failed with ENOENT: pnpm add …`，
+      //    与"包没上去"在阅读面上**完全无关**（同 D252：读数器/环境坏了 ≠ 被测对象坏了）。
+      env: {
+        npm_config_cache: cache,
+        NPM_CONFIG_CACHE: cache,
+        PATH: pathWithPnpm(process.env.PATH),
+        ...storeEnv,
+        ...registryEnv,
+      },
     })
     if (r.status === 0) break
     const out = r.stdout + r.stderr
