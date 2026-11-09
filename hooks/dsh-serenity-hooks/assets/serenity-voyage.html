@@ -146,6 +146,22 @@
   body.card .ui, body.card #load, body.card #err{display:none !important}
   body.card .veil{opacity:.45}
   body.card .grain{opacity:.26}
+
+  /* ---------- 蓝图档（?theme=blueprint，2026-11-09 S142）----------
+     浅色主题下的「白纸 → 蓝图」语汇：纸底 + 淡网格 + 船体线稿（材质在 JS 里换）。
+     这里只管**页面级**底色/网格/暗角，船体与天穹由 JS 改。 */
+  body.blueprint{ background:#f7fafd; }
+  body.blueprint #gl{ opacity:1; }
+  /* 网格：24px 一格，**再淡一档**（第一版 .055 在提白后的底上显得重，改成 .038） */
+  body.blueprint .veil{
+    opacity:1;
+    background-image:
+      linear-gradient(to right, rgba(15,17,21,.038) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(15,17,21,.038) 1px, transparent 1px);
+    background-size:24px 24px;
+    background-position:center center;
+  }
+  body.blueprint .grain{ opacity:0; }
 </style>
 </head>
 <body>
@@ -899,6 +915,26 @@ var PAL = {
 // 星野调暗，留出负空间。判据来自实测：全屏构图直接缩到 340px 会「满、挤、抢戏」。
 var CARD = /[?&]card(=|&|$)/.test(location.search);
 if (CARD) document.body.classList.add('card');
+
+/* ───────────────────────── 主题：blueprint（2026-11-09 S142）─────────────────────────
+   owner 2026-11-09 裁决：浅色主题下动画「很突兀」⇒ 走**档 3 蓝图线稿**，
+   即「深色=写实电影质感 / 浅色=工程蓝图」两套**完整语汇**，⛔ 不是"把深色调亮"。
+
+   🔴 谁来带这个参数：**客户端**（`SafeModePanel.tsx` 的卡片 iframe）按宿主
+      合成后的主题输出（`document.body[data-ds-dark-theme]`）决定要不要带
+      `&theme=blueprint`。⛔ 不用 `prefers-color-scheme` —— 那是宿主的**输入**，
+      不是结果（「设置浅色 + 系统深色」这一档会判反，见 D297）。
+      ⇒ 本文件只**消费**参数，不自己嗅探主题。
+
+   🔴 为什么要 traverse 换材质而不是换一套素材：
+     船的材质是 `wornMat()`/`plainMat()`/`litMat()` **逐处内联**调用（无材质表可整体换肤）
+     ⇒ 唯一不改 `ship2.js` 的换肤方式 = 建完组之后**遍历替换**。型线与做旧逻辑一行不动，
+     它们仍服务于深色档。
+
+   ⛔ 边界（必须同句说出）：这是**换观感**，不是微调 —— 蓝图档下"写实金属"整体消失。
+      如果本意只是"别那么突兀"，该退到只换天穹那一档。 */
+var BLUEPRINT = /[?&]theme=blueprint/.test(location.search);
+if (BLUEPRINT) document.body.classList.add('blueprint');
 
 var canvas = document.getElementById('gl');
 var renderer;
@@ -2894,6 +2930,118 @@ scene.traverse(function (o) {
 // 把引用挂到 window 后，自动化验收可以做到**机械测量**：
 //   · 射线求交：从相机朝每个舷窗中心投射，断言首个命中是它自己（K10 的回归测试）
 //   · 差分像素法：render → gl.readPixels 求均值 → 隐藏嫌疑对象 → 再 render 再读（K7）
+/* ═════════════════ 8b. 蓝图档：整体换观感（2026-11-09 S142）═════════════════
+   owner 2026-11-09 裁决：浅色主题下动画「很突兀」⇒ 走**档 3 蓝图线稿**，
+   即「深色=写实电影质感 ／ 浅色=工程蓝图」两套**完整语汇**，⛔ 不是"把深色调亮"。
+
+   🔴 为什么放在这里（而不是 `buildSerenity()` 之后紧接）：
+     前面几节（天穹/星野/星云/词元/尾迹/铭牌）都是**在这一节之前建的**。
+     若在船建完就换观感，后面建出来的星野与词元仍按深色档的参数生成 ⇒ 换了一半。
+     ⇒ **换肤点必须在全部场景对象建完之后**，才能一处管全部。
+
+   🔴 为什么是「遍历换材质」而不是「换一套素材」：
+     船的材质由 `wornMat()`/`plainMat()`/`litMat()` **逐处内联**给出，没有材质表可整体换肤；
+     而型线与做旧逻辑必须原样保留（它们服务深色档）⇒ 唯一不改 `ship2.js` 的换肤点
+     就是**建组之后遍历替换**。这决定了本档的代价：**写实金属整体消失**（不是淡化）。
+
+   为什么用 `MeshLambertMaterial` + `EdgesGeometry` 而不是 `wireframe:true`：
+     wireframe 会把**每个三角形的对角线**都画出来，读起来像网格损坏；
+     EdgesGeometry 只留折角 ≥ 阈值的真实轮廓线，那才是"工程图"的语汇。
+   ⚠️ EdgesGeometry 要逐 mesh 建，数量上百 ⇒ 对**顶点数超上限**的几何跳过（保护，
+     不是设计取舍；`window.__blueprint.skipped` 就是为看清这件事而留的读数）。
+
+   🔴 后期管线在蓝图档必须关（见 §10 的 `&& !BLUEPRINT`）：
+     PostFX = bloom + 暗角 + 色调分级 + 颗粒，全部为「深色星空 + 发光引擎」设计。
+     压在纸白底上，bloom 会把线稿糊成一片、暗角会在四角压出灰色脏边
+     ⇒ **平涂语汇与电影感后期互斥**，不是参数没调好。 */
+function applyBlueprint(root) {
+  /* 纸面：**蒙一层极淡的蓝**，靠 Lambert 长出体量。
+     🔴 三版实测的取舍（原型期改了两轮，读数都在）：
+        · v1 `MeshBasicMaterial(0xfbfdff)` 纯平涂 ⇒ 「只有轮廓、没有体量」，船读成贴纸
+        · v2 `MeshLambert(white + emissive 0xdde8f4 ×1)` ⇒ emissive 亮度地板太高，
+             再叠主光 5.2 直接**过曝成一片白**，比 v1 还平
+        ⇒ v3：**压低 emissive 地板**（0x9db9d8 × 0.5）——它只负责"暗面不脏"，
+          亮暗关系交回 Lambert。这样暗面偏蓝灰、亮面近白，**体积自己长出来**，
+          而整体仍在纸白色域内（不抢"工程图"的语汇）。 */
+  var paper = new T.MeshLambertMaterial({
+    color: 0xffffff,
+    emissive: 0x9db9d8,
+    emissiveIntensity: 0.5
+  });
+  var inkLine = new T.LineBasicMaterial({ color: 0x1c4a86, transparent: true, opacity: 0.62 });
+  var meshes = 0, edges = 0, skipped = 0;
+  /* 🔴 `lit` 必须在**换材质之前**收集：换完之后每个 mesh 都是 Lambert（它也有 `emissive` 属性），
+     再按 `material.emissive` 去找"发光件"会把**整船**都判成发光 ⇒ 全船变蓝块。
+     （这是把 Basic 换成 Lambert 时引入的回归，第一版 Basic 没有 emissive 所以侥幸对。） */
+  var lit = [];
+  root.traverse(function (o) {
+    if (o.isMesh && o.material && o.material.emissive && o.material.emissive.getHex() !== 0x000000) lit.push(o);
+  });
+  root.traverse(function (o) {
+    if (!o.isMesh) return;
+    o.material = paper;
+    o.castShadow = false; o.receiveShadow = false;
+    meshes++;
+    var g = o.geometry;
+    if (!g || !g.attributes || !g.attributes.position) { skipped++; return; }
+    if (g.attributes.position.count > 6000) { skipped++; return; }
+    try {
+      // 阈值 34 → **38**：34 会把安装缝、面板拼缝都画出来，1440 宽下读成"毛刺"；
+      // 38 只留真正折角，卡片尺寸下更干净（两档截图对比后定的）。
+      var eg = new T.EdgesGeometry(g, 38);
+      if (eg.attributes.position && eg.attributes.position.count > 0) {
+        o.add(new T.LineSegments(eg, inkLine));
+        edges++;
+      } else skipped++;
+    } catch (e) { skipped++; }
+  });
+  window.__blueprint = { meshes: meshes, edges: edges, skipped: skipped, lit: lit.length };
+  return lit;
+}
+
+if (BLUEPRINT) {
+  var litParts = applyBlueprint(ship);
+
+  // ① 天穹：同一个 shader，只换三个 uniform ⇒ 深空 → **真纸白**（不是灰蓝）
+  //    第一版用 #f4f8fd/#e9f0f9 实测「比面板底色脏」⇒ 提白到 #fdfefe/#f7fafd/#eef4fb，
+  //    让**卡片底色**成为画面里唯一略深的那一层，层次才成立。
+  skyMat.uniforms.uTop.value.set(0xfdfefe);
+  skyMat.uniforms.uMid.value.set(0xf7fafd);
+  skyMat.uniforms.uLow.value.set(0xeef4fb);
+  scene.fog = new T.FogExp2(0xf6fafd, 0.00030);
+  renderer.toneMappingExposure = 1; // 平涂不需要 ACES 的曝光补偿
+
+  /* ② 深色档的"内容层"整类不要 —— 判据：它们承载的是**星空语汇**，在白纸上读成噪点。
+       · 星野三层（layerFar/Mid/Near）与词元场：那是"认知星空"里的词，蓝图档没有星空
+       · 螺旋（helixes）：装饰性流动结构，同上
+       · 尾迹（trail）：语义是"引擎喷出的光"，图画上一条白色虚线不成立
+       · 星野 Points 与星云 sprite：同上
+     🔴 **本处踩过一个坑（保留记录）**：`makeGlyphField` / `makeWordField` / `makeHelix`
+        返回的是 **`{ mesh, mat }` 包装对象**，⛔ 不是 `Object3D`。直接写 `f.visible = false`
+        只是在包装对象上加了个没人读的字段 —— 屏幕上**一个字都没少**，而读数 `visiblePoints`
+        仍是 1（真凶是另一处）。⇒ 判据：**关可见性必须作用在 `f.mesh` 上**，且改完要回读
+        `scene.traverse` 的 `visible` 计数，⛔ 不能只看自己写了什么。
+     ⚠️ 这不是"调淡"，是**整类移除** —— 语义不成立的元素调多淡都不成立。 */
+  ;[layerFar, layerMid, layerNear, wordField].forEach(function (f) {
+    if (f && f.mesh) f.mesh.visible = false;
+  });
+  helixes.forEach(function (h) { if (h && h.mesh) h.mesh.visible = false; });
+  trail.points.visible = false;
+  scene.traverse(function (o) {
+    if (o.isSprite) o.visible = false;
+    if (o.isPoints) o.visible = false; // 星野本体（它建在 §3 的 IIFE 里，没留句柄 ⇒ 按类型关）
+  });
+
+  /* ③ 船上的**发光件**（舷窗 / 喷口 / 尾焰）在蓝图里要留，但必须换色：
+      深色档它们是"发光的橙 / 蓝"，在纸白底上那几个高饱和色最跳。
+      ⇒ 统一压成墨蓝（与线稿同一色系），靠透明度区分层次，而不是靠色相。
+      ⚠️ 用 applyBlueprint 返回的 `litParts`（**换材质之前**收集的那份），
+         ⛔ 不能在这里再 `material.emissive` 去筛（那时全船都是 Lambert，会全中）。 */
+  litParts.forEach(function (o) {
+    o.material = new T.MeshBasicMaterial({ color: 0x2f5f9e, transparent: true, opacity: 0.5 });
+  });
+}
+
 window.SERENITY = {
   T: T, scene: scene, camera: camera, renderer: renderer, ship: ship,
   uTime: uTime, SIM: SIM
@@ -3015,7 +3163,9 @@ function tick() {
 
 // ───────────────────────── 10. 启动 ─────────────────────────
 // v4：后期管线必须在首帧之前就绪（否则第一帧走直出、第二帧才走管线，会闪一帧）
-POSTFX_ENABLED = !!PostFX;
+// 🔴 蓝图档不启用后期：`&& !BLUEPRINT` 是**必须**的 —— 更早那句 `POSTFX_ENABLED`
+//    的初值会被这一行**覆盖掉**（赋值顺序），漏了它蓝图档照样走 bloom。
+POSTFX_ENABLED = !!PostFX && !BLUEPRINT;
 if (POSTFX_ENABLED) {
   var pr = Math.min(window.devicePixelRatio || 1, 1.75);
   PostFX.init(renderer, Math.floor(window.innerWidth * pr), Math.floor(window.innerHeight * pr));

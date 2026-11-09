@@ -14,6 +14,84 @@
 
 ---
 
+## v1.126.0 — 2026-11-09（浅色主题下的航行页改「工程蓝图」语汇 ＋ 主题接线进机械门禁）
+
+### 判据从哪来（owner 2026-11-09 原话，两条）
+
+> ① 「浅色主题下这个动画很突兀」（v1.125.0 只修了卡片底色，动画本身仍是深空）
+> ② 面对「深色写实 ／ 浅色改哪一档」的三选一，owner 答 **「B 比较好，因为我们也不会放弃黑色主题支持的」**
+> ③ 动笔前问视觉取舍 ⇒ **「我没啥想法，相信你的审美」** ⇒ 他不做视觉裁决，实现按我的判断落地
+
+### 核心决定：两套**完整语汇**，⛔ 不是"把深色调亮"
+
+| 主题 | 语汇 |
+|---|---|
+| 深色 | 写实电影质感（原样，**零变化**） |
+| 浅色 | **工程蓝图**：纸白底 ＋ 24px 网格 ＋ `EdgesGeometry` 线稿 ＋ 墨蓝发光件 |
+
+⚠️ **代价如实登记**：蓝图档下「写实金属」**整体消失**（不是淡化）。若本意只是"别那么突兀"，
+应退到「只换天穹」那一档 —— 这条边界写在 `assets/serenity-voyage.html` §8b 的注释里。
+
+### 资产侧（`assets/serenity-voyage.html`）
+
+| 面 | 做法 | 关键读数（原型期真机） |
+|---|---|---|
+| 纸面材质 | `MeshLambertMaterial({color:0xffffff, emissive:0x9db9d8, emissiveIntensity:0.5})` | `__blueprint.meshes=188 / lit=18 / edges=185 / skipped=3` |
+| 线稿 | 每 mesh `LineSegments(EdgesGeometry(g, 38), LineBasicMaterial(0x1c4a86, .62))` | 阈值 34→38 是"毛刺 → 干净"的分界 |
+| 天穹 | `uTop #fdfefe / uMid #f7fafd / uLow #eef4fb`，`FogExp2(0xf6fafd, .00030)` | 第一版 `#f4f8fd/#e9f0f9` 实测「比面板底色脏」 |
+| 页面 | `body.blueprint{background:#f7fafd}` ＋ 24px 网格 `rgba(15,17,21,.038)` | 网格 `.055 → .038`（提白后第一版显重） |
+| 移除 | 星野三层 ／ 词元场 ／ 螺旋 ／ 尾迹 ／ 星云 ／ Points **整类** | `visiblePoints=0 / visibleSprites=0` |
+| 后期 | **关**：`POSTFX_ENABLED = !!PostFX && !BLUEPRINT` | 平涂语汇与电影感后期互斥 |
+| 发光件 | 18 个 emissive mesh 压成 `MeshBasic(0x2f5f9e, .5)` | ⚠️ 必须在**换材质之前**收集 `litParts` |
+
+🔴 **三版材质取舍（⛔ 别重走）**：① `MeshBasic(0xfbfdff)` 纯平涂 ⇒ 只有轮廓没有体量，船读成贴纸；
+② `Lambert + emissive 0xdde8f4 ×1` ⇒ 亮度地板太高，再叠主光 5.2 直接**过曝成一片白**，比①更平；
+③ 当前 `emissive 0x9db9d8 ×0.5` ⇒ 暗面蓝灰、亮面近白，体积自己长出来，仍在纸白色域内。
+
+### 客户端接线（`src/client/`）
+
+| 面 | 变更 |
+|---|---|
+| 🆕 **`voyage-theme.ts`**（纯函数） | `HOST_DARK_ATTR` ／ `themeParamFor(isDark)` → 深色 `''` ／ 浅色 `'&theme=blueprint'` ／ `themeKeyPart(isDark)` |
+| **`SafeModePanel.tsx`** | 新增 `useHostDarkTheme()`：读 `body.hasAttribute(HOST_DARK_ATTR)` ＋ **`MutationObserver`** 跟随后续切换；iframe `src` 拼 `themeParamFor(hostDark)`，`key` 拼 `themeKeyPart(hostDark)` |
+
+🔴🔴 **判据源必须是宿主的输出（D297 同一根）**：主题 = 「设置项 ∥ 系统跟随」两路合成，
+落成 `body[data-ds-dark-theme]`；`prefers-color-scheme` 只是**一个输入** ⇒ 拿它在
+「设置浅色 + 系统深色」这一档**判反**，且只在部分用户机器上错。
+
+🔴 **为什么主题要进 `key`**：`src` 变了浏览器**不一定**重载 iframe ⇒ 面板打开期间切主题，
+画面会停在旧语汇上，而那种状态与「参数没传」在观感上**不可分**。
+⇒ 进 `key` = 切一次主题重建一次（代价 = 一次 WebGL 重建；面板关闭本来就卸载）。
+
+### 新增机械门禁 `tests/voyage-theme-wiring.test.ts`（14 例，四组）
+
+| 组 | 钉住什么 |
+|---|---|
+| ① 纯函数映射 | 深色 `''` ／ 浅色 `'&theme=blueprint'`（**逐字**，含 `&` 而非 `?`）／ 两个 key 分格必须不同 |
+| ② iframe 接线 | `src` 拼的是 `themeParamFor(…)`（⛔ 不是写死串）、`key` 含 `themeKeyPart(…)`、值来自 `useHostDarkTheme()` |
+| ③ 判据源 | 客户端代码不得出现 `prefers-color-scheme` / `matchMedia`（**剥注释后判**），配**正控**：注释里出现不算、真代码出现必须被抓 |
+| ④ 资产侧在位 | `?theme=blueprint` 解析 ／ `body.blueprint` 三条样式 ／ `applyBlueprint` ／ `&& !BLUEPRINT`（含负控：不得退回漏掉它的旧写法）／ `window.__blueprint` 读数句柄 |
+
+🔴 **为什么 ② 那条要钉字面量而不是钉"能命中"**：若 `themeParamFor` 返回 `?theme=blueprint`，
+拼出来是 `?…?theme=`，而资产的 `/\[?&\]theme=blueprint/` **仍然命中** ⇒ 缺陷会**静默生效**。
+
+### 变异检验（真跑，5 组，每组精确红 1 条）
+
+| 变异体 | 结果 |
+|---|---|
+| `&theme=blueprint` → `?theme=blueprint` | ① 红 1 |
+| 删掉 `src` 里的 `themeParamFor(hostDark)` | ② 红 1 |
+| 删掉 `key` 里的 `themeKeyPart(hostDark)` | ② 红 1 |
+| 往 `voyage-theme.ts` 插一句真 `matchMedia('(prefers-color-scheme: dark)')` | ③ 红 1 |
+| 资产改回 `POSTFX_ENABLED = !!PostFX` | ④ 红 1 |
+
+### 门禁
+
+typecheck ✅ ／ typecheck-host 0.2.2-rc.1 ✅（node 100 ／ client 193）／ test **215 files / 3374 tests** ✅ ／
+coverage **95.01%** ✅ ／ build ✅ ／ pack-check ✅（175 文件）
+
+---
+
 ## v1.125.0 — 2026-11-09（白色主题适配：`.sp-popVoyage` 写死深色压黑整张面板 ＋ 新增主题门禁）
 
 > 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
@@ -80,6 +158,12 @@
 typecheck ✅ ／ typecheck-host 0.2.2-rc.1 ✅（node 100 ／ client 193）／ test **214 files / 3359 tests** ✅ ／
 coverage **95.01%** ✅ ／ build ✅ ／ pack-check ⬜（见状态段）
 
+
+## v1.124.0 — 2026-11-09（注入面瘦身：删工具清单 ＋ 工作语域加第 7 条「一次最多问 5 个」）
+
+> ⚠️ **本标题行是 2026-11-09 v1.126.0 那轮补的**：v1.124.0 发布时正文写完了、**标题行漏了**
+> （`git show 73d4846` 可核）。后果是这一版按 `## v<版本号>` **检索不到** —— 而本文件头注、
+> `CHANGELOG-archive.md` 的检索方式、以及本仓自己的惯例全依赖那行。零信号，故补上。
 
 > 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
 > 必须是**两个井号 ＋ 空格 ＋ v<semver>**。⛔ 不要为了排版改成 `###`／`#`（会报「CHANGELOG 无条目」）。
@@ -375,10 +459,20 @@ test **212 files / 3330** ✅ ／ coverage **95.33%** ✅ ／ build ✅ ／ pack
 > **粒度说明**：v1.100.0 起逐版列出（当前活跃期）；更早按**系列**归并。
 > 每行都能在 `CHANGELOG-archive.md` 里按版本号检索到完整条目。
 
-### 2.1 当前活跃期（v1.100.0 ~ v1.119.0，2026-10-24 ~ 2026-11-05）
+### 2.1 当前活跃期（v1.100.0 ~ v1.126.0，2026-10-24 ~ 2026-11-09）
+
+> ⚠️ **2026-11-09 补**：本表原停在 v1.119.0，而正文早已写到 v1.125.0 ⇒ 有五版**正文有条目、索引没有行**。
+> "索引是完整的"这件事**没有机械信号**，只能靠人发现。补 v1.120.0~v1.126.0 七行。
 
 | 版本 | 日期 | 一句话 |
 |---|---|---|
+| v1.126.0 | 2026-11-09 | 浅色主题下航行页改「工程蓝图」语汇 ＋ 主题接线进机械门禁 |
+| v1.125.0 | 2026-11-09 | 白色主题适配：`.sp-popVoyage` 写死深色压黑面板（定因＝文字走 token、底色不走） |
+| v1.124.0 | 2026-11-09 | 注入面瘦身：删工具清单 ＋ 工作语域加第 7 条「一次最多问 5 个」 |
+| v1.123.0 | 2026-11-06 | 工具屏蔽重整：三张表各归各位 ＋ 退役 `safeMode.hiddenTools` |
+| v1.122.0 | 2026-11-06 | 🔴 P0 回归修复：`reconstruct` 换代后 IM 入站投给已归档的旧载体 |
+| v1.121.0 | 2026-11-06 | 新工具 `reconstruct` ＋ 宿主 0.2.2 下状态面板点不开的修复 |
+| v1.120.0 | 2026-11-06 | 宿主 0.2.2-rc.1 适配：定时器工具改名后的屏蔽补全 ＋ 构建链 Node 24 兼容 |
 | v1.119.0 | 2026-11-05 | 工作语域块 ＋ 网关只认 TOTP ＋ 会话跨重启持久化 |
 | v1.118.0 | 2026-11-04 | 脱口秀片段：会话／rebuild 时随机注入一段到系统提示词 |
 | v1.117.0 | 2026-11-04 | 用户手工停止的轮次不再被自动续跑 |

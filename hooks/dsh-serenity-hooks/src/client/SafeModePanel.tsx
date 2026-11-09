@@ -27,6 +27,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useLayoutEffect, useState, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
+import { HOST_DARK_ATTR, themeKeyPart, themeParamFor } from './voyage-theme.js'
 import './SafeModePanel.css'
 
 /** 会话头部操作区（list 槽）props */
@@ -183,6 +184,37 @@ function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ')
 }
 
+/**
+ * 宿主当前是否深色（读**宿主的输出**，v1.126.0）。
+ *
+ * 🔴 为什么不是 `matchMedia('(prefers-color-scheme: dark)')`：那是宿主的**输入**之一。
+ *   宿主的真实主题 = 「设置项 ∥ 系统跟随」两路合成，落成 `body[data-ds-dark-theme]`
+ *   （`dsh-client-ui-theme` 的 bootThemeBodyScript）⇒ 拿输入当结果会在
+ *   「设置浅色 + 系统深色」这一档上判反（D297，同一条已进 CSS 门禁）。
+ *
+ * 🔴 为什么要 `MutationObserver` 而不是只在打开时读一次：主题可在面板打开期间被切换，
+ *   而 `src` 变了浏览器**不一定**重载 iframe ⇒ 画面会停在旧语汇上，且这个状态
+ *   与「参数没传」在观感上不可分。观察 body 的属性变化 ⇒ 值变了就重渲染 ⇒
+ *   配合 iframe `key` 重建一次（与 `accVersion` 同一套办法）。
+ *
+ * ⚠️ SSR / 无 DOM 环境下 `document` 不存在 ⇒ 退化为 `false`（浅色），不抛。
+ */
+function useHostDarkTheme(): boolean {
+  const read = (): boolean =>
+    typeof document !== 'undefined' && document.body?.hasAttribute(HOST_DARK_ATTR) === true
+  const [dark, setDark] = useState<boolean>(read)
+  useEffect(() => {
+    if (typeof document === 'undefined' || !document.body) return
+    const body = document.body
+    // 先同步一次：首次 mount 与「打开面板」之间主题可能已经变过
+    setDark(body.hasAttribute(HOST_DARK_ATTR))
+    const mo = new MutationObserver(() => setDark(body.hasAttribute(HOST_DARK_ATTR)))
+    mo.observe(body, { attributes: true, attributeFilter: [HOST_DARK_ATTR] })
+    return () => mo.disconnect()
+  }, [])
+  return dark
+}
+
 /** 会话头部：Serenity 状态胶囊（点击 → 自绘 popover，纯状态展示） */
 export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
   const [status, setStatus] = useState<SerenityStatus | null>(null)
@@ -199,6 +231,8 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
   const popRef = useRef<HTMLDivElement>(null)
   // v1.39.1：popover 改 `position:fixed` 后的视口坐标（null = 尚未测量，此时渲染在屏外）
   const [popPos, setPopPos] = useState<PopPlacement | null>(null)
+  /** 宿主当前是否深色（v1.126.0；判据源 = `body[data-ds-dark-theme]`，见 `useHostDarkTheme`） */
+  const hostDark = useHostDarkTheme()
 
   const sessionId = props.sessionId
   // 活跃轨迹（后端已排除归档区）。🔴 用 `?? []` 而非可选链散落各处：
@@ -594,14 +628,20 @@ export function SafeModePanel(props: SafeModePanelProps): React.JSX.Element {
                 而多 CCC 共存时它的兜底第③步**故意不猜**（见 api.ts `resolveWorkspaceCore`）
                 ⇒ 不注入 ⇒ 退回资产里写死的词表 ⇒ 缺陷原样复现。两条修法是**互为前提**的。
                 取值 = `status.root`（本面板正在显示的那个 CCC，与轨迹/技能同源）。
+              🔴 ?theme=blueprint → **浅色主题**下的工程蓝图语汇（v1.126.0，owner 2026-11-09：
+                「浅色主题下这个动画很突兀」）。判据源 = `body[data-ds-dark-theme]`（宿主的**输出**），
+                ⛔ 不是 `prefers-color-scheme`（那是宿主的输入，会在「设置浅色 + 系统深色」上判反，
+                见 D297）。深色 ⇒ **不带**该参数（资产默认档就是深色写实电影质感）。
+                主题进 `key` ⇒ 面板打开期间切主题会重建 iframe 一次（否则画面停在旧语汇上，
+                而「切了主题没变」与「参数没传」在观感上不可分）。
               · aria-hidden + 无 tabindex：纯装饰，不进无障碍树、不可聚焦
               · DOM 顺序放正文之后 ⇒ 单栏（窄屏）时动画自然落在信息**下方** */}
           <div className={cx('sp-voyage')} aria-hidden="true">
             <iframe
-              key={`${status.accVersion}|${status.root ?? ''}`}
+              key={`${status.accVersion}|${status.root ?? ''}|${themeKeyPart(hostDark)}`}
               src={`/serenity/voyage?card=1&v=${encodeURIComponent(status.accVersion)}${
                 status.root ? `&workspace=${encodeURIComponent(status.root)}` : ''
-              }`}
+              }${themeParamFor(hostDark)}`}
               title=""
               loading="lazy"
               tabIndex={-1}
