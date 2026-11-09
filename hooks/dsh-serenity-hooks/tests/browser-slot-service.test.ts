@@ -7,11 +7,12 @@
  *      ① 该提醒的槽位**都**被提醒了；② 不该提醒的**一条都没**；③ 提醒文本带具体动作；
  *      ④ 提醒后记账（冷却生效，不会每 tick 刷屏）。
  *
- * ⛔ 不起真 Chrome：`acquire` 在找不到浏览器时会失败并**回滚台账**，那本身也是一条要验的行为。
+ * ⚠️ **本文件会真起 Chrome**（`acquireSlot` 不 mock）—— 旧注释写的是"⛔ 不起真 Chrome"，
+ * 那是**假的**，而正是这条错注释让 `afterEach` 只删目录不杀进程（详见下方 afterEach 的判据）。
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -24,6 +25,7 @@ import {
   slotStatus,
   touchSlot,
 } from '../src/browser/service.js'
+import { destroySlot, findPidsByProfile, slotPaths } from '../src/browser/process.js'
 import { readLedger, withLedger } from '../src/browser/ledger.js'
 import { DEFAULT_POLICY, type SlotLease, type SlotPolicy } from '../src/browser/state.js'
 
@@ -31,10 +33,29 @@ let root = ''
 const SESS = 'sess-me'
 const TRAJ = '2026-01-01--S999--demo'
 
+/**
+ * 🔴🔴 **本文件的 `afterEach` 曾经只删目录、不回收进程** —— 而那正是本机制要防的事。
+ *
+ * 2026-11-09 实测取证：跑完测试后 `ss -ltnp` 上留着一个 `chrome --user-data-dir=/tmp/slot-svc-xxx/…`
+ * 监听 9304 达 3 分 27 秒。成因 = `acquireSlot` 是**真** spawn（本文件不 mock），
+ * 而 `rmSync(root)` 只抹掉了台账和 profile 目录，**进程照样在跑**。
+ *
+ * 判据（这正是本次事故的核心）：**删掉记录 ≠ 杀掉进程**。归属消失之后，
+ * 那个进程就再也没有任何东西能指向它 —— 于是无人能回收，也无人知道该回收。
+ * ⇒ 收尾必须**先按 profile 认领真进程并杀掉，再删目录**；顺序反了就永久泄漏。
+ *
+ * ⚠️ 这条自身也必须能证伪：`⑳` 用一条"故意不回收"的对照，确认认领器真能抓到它。
+ */
+const created: number[] = []
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'slot-svc-'))
 })
 afterEach(() => {
+  // ① 先杀进程（按临时 root 下每个槽位的 profile 认领；实测 root 已被删时 findPidsByProfile 仍可按 cmdline 命中）
+  for (const n of created.splice(0)) {
+    destroySlot(root, n)
+  }
+  // ② 再删目录
   rmSync(root, { recursive: true, force: true })
 })
 
@@ -59,6 +80,8 @@ describe('acquire：同会话复用，⛔ 不租第二个', () => {
   it('① 已有占用 ⇒ reused=true 且槽位号不变（这条防的是"租了忘退"的静默泄漏）', async () => {
     seed(4, { sessionId: SESS })
     const res = await acquireSlot({ root, sessionId: SESS, trajectory: TRAJ })
+    // 🔴 复用路径也会 ensureRunning（真 spawn / 或复用已在跑的）⇒ 必须登记进回收清单
+    if (res.ok) created.push(res.slot)
     expect(res.reused).toBe(true)
     expect(res.slot).toBe(4)
     // 负控：台账里仍然只有这一个槽位（没有新增第二个）
@@ -215,5 +238,44 @@ describe('touchSlot 与 doctor', () => {
     expect(JSON.stringify(readLedger(root).leases)).toBe(before)
     expect(['clean', 'drift']).toContain(d.verdict as string)
     expect(d.ledger).toBeTruthy()
+  })
+})
+
+/**
+ * 🔴🔴 `⑯` 是本文件**唯一一条专门防"测试自己泄漏浏览器"**的判据。
+ *
+ * 为什么必须单独立一条：2026-11-09 实测，跑完本文件后 `ss -ltnp` 上留着一个
+ * `chrome --user-data-dir=/tmp/slot-svc-xxx/…` 监听 9304 达 **3 分 27 秒**。
+ * 成因不是"忘记写 afterEach"，而是 afterEach **写错了**——它只 `rmSync(root)` 删目录。
+ *
+ * 判据（本次事故的核心一句）：**删掉记录 ≠ 杀掉进程**。
+ * 归属一消失，那个进程就再没有任何东西指向它 ⇒ 无人能回收、也无人知道该回收。
+ * 这正是 owner 报的那件事的**同一个形状**，只是发生在测试里。
+ *
+ * ⚠️ 这条若写成"afterEach 里有 destroySlot 字样"就是**假绿**（D254：目录里有字 ≠ 它真的跑）。
+ * 因此这里钉的是**副作用**：真起一个 → 真销毁 → **真去 `/proc` 查它不在了**。
+ */
+describe('🔴 测试自身的进程卫生（这条防的是本机制自己踩过的坑）', () => {
+  it('⑯ destroySlot 之后，按 profile 认领**必须**一个 pid 都找不到（删记录 ≠ 杀进程）', async () => {
+    const res = await acquireSlot({ root, sessionId: SESS, trajectory: TRAJ })
+    // 没起得来（环境无 Chrome）⇒ 这一格无从验，如实跳过而非假装通过
+    if (!res.ok) {
+      expect(res.detail.length).toBeGreaterThan(0)
+      return
+    }
+    const paths = slotPaths(root, res.slot)
+    // 正控：起来之后，按 profile 认领**必须**能抓到至少一个 pid（否则下面的空是"恒空"）
+    const before = findPidsByProfile(paths.profile)
+    expect(before.length).toBeGreaterThan(0)
+
+    destroySlot(root, res.slot)
+
+    // 判据 = 副作用（⛔ 不看返回值）：去 /proc 真查
+    const after = findPidsByProfile(paths.profile)
+    expect(after).toEqual([])
+    // 且 pid 文件也清了（否则下一个 acquire 会拿一个死 pid 去判"已经死了"）
+    expect(existsSync(paths.pidFile)).toBe(false)
+    // profile 目录**保留**（登录态是槽位的资产，回收不丢登录态）
+    expect(existsSync(paths.profile)).toBe(true)
   })
 })

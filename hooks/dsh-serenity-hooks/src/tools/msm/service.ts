@@ -671,14 +671,69 @@ export function checkRegistryQuality(root: string): RegistryQualityReport {
       if (!hasGuard) issues.push({ name: e.name, check: 'M2', detail: 'no main() guard' })
     }
     // DC-M4：路径型 flag 必须标记 type:"path"（对齐 osp）
+    //
+    // 🔴🔴 **2026-11-09 修一处判据假阳（这条判据原来按子串匹配，恒误伤一类名字）**：
+    //    旧实现 `/path|file|dir/i.test(f.name)` ⇒ **`--profile` 里含 `file`** 就被判成路径型。
+    //    实测：`msm check` 的 M4 **唯一一项**就是这个 `browser` 的 `--profile`，
+    //    而那个 flag 根本不是路径（它是 profile 的**名字**，目录由工具自己在 STATE_DIR 下生成）。
+    //
+    //    危害是**双向的**：
+    //      ① 假阳性 ⇒ 逼人把 `--profile` 声明成 `type:"path"`。而 `type:"path"` 会开启**逃逸守卫**，
+    //         于是这个 flag 被当成路径处理 —— 正好把**没有逃逸面的东西**加上逃逸面（方向反了）。
+    //      ② 它同时是**零信号**的：M4 常年挂着一条，看久了就没人再读这一项，
+    //         真的少标 path 时也一起被忽略。
+    //
+    //    判据：**flag 名里的 "file" 是不是一个独立的词**。按 `-`/`_`/`.` 切段，
+    //    任一段**整段等于** path/file/dir/folder（或整名以这些词结尾）才算路径型。
+    //    ⇒ `--out` `--report-file` `--test-path` `--key-path` 照旧命中；
+    //      `--profile` `--filled` `--directory-listing-mode` 不再误伤。
+    const isPathLikeFlagName = (name: string): boolean => {
+      const segs = name
+        .replace(/([a-z0-9])([A-Z])/g, '$1-$2') // camelCase → 分词
+        .toLowerCase()
+        .split(/[-_.]+/)
+        .filter(Boolean)
+      // ① 独立段命中（`--report-file` / `--test-path` / `--out.file`）
+      if (segs.some((s) => PATH_LIKE_SEGMENTS.has(s))) return true
+      // ② 连写命中（`--outfile` / `--indir` / `--outpath`）—— 这类名字真实存在，
+      //    且它们**确实是路径**；⛔ 不能因为"没分词符"就放过。
+      //    ⚠️ 边界：只认**词尾**连写，⛔ 不认任意位置（否则 `--filed` 之类又会误伤）。
+      //
+      // 🔴 `--profile` 是这条规则的**唯一已知反例**，必须显式排除：
+      //    它以 `file` 结尾，但它是 profile 的**名字**（目录由工具自己生成），
+      //    把它判成路径型会开启逃逸守卫 ⇒ 给**没有逃逸面的东西**加上逃逸面（方向反了）。
+      //    ⇒ 例外要**点名**，⛔ 不要为此放宽整条规则（那会让 outfile/indir 一起漏掉）。
+      if (EXEMPT_FROM_PATH_SUFFIX.has(name.toLowerCase())) return false
+      return PATH_LIKE_SUFFIXES.some((suf) => name.toLowerCase().endsWith(suf))
+    }
     for (const f of e.flags ?? []) {
-      if ('name' in f && /path|file|dir/i.test(f.name) && f.type !== 'path') {
+      if ('name' in f && isPathLikeFlagName(String(f.name)) && f.type !== 'path') {
         issues.push({ name: e.name, check: 'M4', detail: `flag --${f.name} should be type:"path"` })
       }
     }
   }
   return { checked: entries.length, issues }
 }
+
+/**
+ * 构成"路径型"的**整段**词。
+ * ⛔ 不要往里加 `profile` / `file` 之外的模糊词 —— 这份集合的每一次扩写都必须能说出
+ * "哪个 flag 因为它被正确识别了"，否则它就只是在制造假阳。
+ */
+const PATH_LIKE_SEGMENTS = new Set(['path', 'file', 'dir', 'folder', 'directory'])
+
+/**
+ * 连写形式（`outfile` / `indir` / `outpath`）的判据 = **词尾**。
+ * ⛔ 不加 `profile`：它以 `file` 结尾，但那个 flag 是**名字**不是路径。
+ *    ⇒ 这一条正是本判据此前的假阳来源；把它排除在此，而不是把 profile 硬标成 path。
+ */
+const PATH_LIKE_SUFFIXES = ['file', 'path', 'dir'] as const
+
+/**
+ * 名字以路径词结尾、但**语义上不是路径**的 flag（点名例外）。
+ * 每加一项都要能说出"为什么它不是路径"，否则就是拿例外掩盖假阳。
+ */
+const EXEMPT_FROM_PATH_SUFFIX = new Set(['profile'])
 
 function registryPathFor(root: string, _skill?: string): string {
   const cccName = readCccName(root) ?? 'unknown'
