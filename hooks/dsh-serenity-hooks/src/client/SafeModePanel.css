@@ -240,6 +240,13 @@
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 14px;
   background: var(--dsw-alias-bg-overlay);
+  /* 🔴 2026-11-09：投影也必须主题感知。旧值 `rgba(0,0,0,0.5)` 是**深色主题时代**的取舍——
+     深底上 50% 黑只算"影子"；浅底上同一个 50% 会在白卡四周压出一圈**浓黑光晕**，
+     看起来像卡片脏了（这是"写死色"的第二类后果：不是不可读，而是脏）。
+     ⇒ 默认（浅色）走轻投影，深色由下一档补回原强度。 */
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.14);
+}
+body[data-ds-dark-theme] .sp-pop {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 
@@ -252,8 +259,15 @@
 .sp-popVoyage {
   overflow: hidden; /* 裁掉 iframe 在 14px 圆角外的溢出 */
   /* 分段后不再需要 0.75 的重压暗：压到 0.9 只压整体观感，不与正文争对比度。
-     若所有者觉得动画太亮/太暗，这仍是主旋钮（次旋钮 = iframe 的 blur）。 */
-  background: rgba(6, 11, 14, 0.9);
+     若所有者觉得动画太亮/太暗，这仍是主旋钮（次旋钮 = iframe 的 blur）。
+     🔴🔴 2026-11-09 白色主题缺陷修复：这里的 `rgba(6,11,14,.9)` 曾**无分档地写死**，
+     而它是 `.sp-pop` 的**内层**、包住整个左栏正文 ⇒ 浅色主题下把整张卡片又压回深色，
+     而文字色全部走语义 token（浅色 = 深字）⇒ **深底 + 深字，面板不可读**。
+     ⚠️ 判据（为什么这不是"token 用错"）：`.sp-pop` 自己用的 `var(--dsw-alias-bg-overlay)`
+     在浅色下算出来是 #e9ecf2（正确），**是这一层把它盖掉的** —— 缺陷形态是
+     「有一处没走 token」，不是「token 选错了」（后者才是 2026-09-04 那次自造 token 的病）。
+     ⇒ 默认（浅色）跟着卡片走同一个 token；深色档原样保留旧值 ⇒ **深色观感零变化**。 */
+  background: var(--dsw-alias-bg-overlay);
   display: flex;
   flex-direction: row;
   /* 两栏都从**同一行高**分配（row 轴 cross = 高度）：左栏按内容、右栏吃满行高。
@@ -265,6 +279,13 @@
      上限贴着视口走，把能给的垂直空间尽量给出去；真正超长时由**内部两栏各自滚动**消化
      （左栏 `.sp-popBody` 有 overflow-y:auto，右栏动画吃满行高）——卡片本身仍不溢出视口。 */
   max-height: calc(100vh - 80px);
+}
+/* 深色档：原样回落到本仓一直以来的深色底（旧值），视觉与改动前逐字一致。
+   ⚠️ 命中判据是 `body[data-ds-dark-theme]`（宿主合成后的真实开关：设置项 ∥ 系统跟随），
+   ⛔ 不用 `@media (prefers-color-scheme: dark)` —— 它只是宿主的两个输入之一，
+   拿输入当结果会在「设置浅色 + 系统深色」这类组合上判反。 */
+body[data-ds-dark-theme] .sp-popVoyage {
+  background: rgba(6, 11, 14, 0.9);
 }
 /* 左栏：内容区（**主体**）—— owner 2026-10-18：「内容区作为主体，用多 panel 模式」
    旧形态：固定 340px 的信息栏 ＋ 吃掉剩余宽度的动画栏（动画占了大半张卡片）。
@@ -294,6 +315,13 @@
   pointer-events: none; /* 纯展示：不挡点击、不抢焦点 */
   overflow: hidden;
   border-radius: 10px;
+  /* 🔴 2026-11-09（白色主题适配）：动画是**星空深色作品**（`assets/serenity-voyage.html` 里
+     `background:#02050a` 写死）—— 它**不该跟着主题走**：一块舷窗/显示器本来就该是暗的，
+     把它刷成浅灰会毁掉作品本身。但**它的边框必须跟着卡片走**：浅色卡片里嵌一块无缝的
+     纯黑方块，读起来是"卡片破了个洞"，而不是"这里有一块屏幕"。
+     ⇒ 修法是给外框一圈语义 token 描边（深色主题下 `border-l1` 是 6% 白，几乎不显形；
+       浅色主题下是 6% 黑，正好收边）。⛔ 不是改 iframe 里的底色。 */
+  border: 1px solid var(--dsw-alias-border-l1);
   /* 卡片加高后动画也随之变长，避免"加高只换来留白" */
   min-height: 360px;
 }
@@ -391,9 +419,14 @@
   white-space: nowrap;
 }
 .sp-safeBadgeOn {
-  color: #6ee7b7;
+  /* 🔴 2026-11-09：`#6ee7b7` 是**深底上的薄荷绿**（浅色主题下载体时代没换过）——
+     它压在白卡上的对比度约 1.4:1，等于看不见。⇒ 默认给浅色可读的 emerald-700，深色档回旧值。 */
+  color: #047857;
   background: rgba(16, 185, 129, 0.12);
   border-color: rgba(16, 185, 129, 0.35);
+}
+body[data-ds-dark-theme] .sp-safeBadgeOn {
+  color: #6ee7b7;
 }
 .sp-safeBadgeOff {
   color: var(--dsw-alias-label-secondary);
@@ -1035,8 +1068,14 @@
   border-radius: 4px;
 }
 .sp-subsDlvOk {
-  color: #10b981;
+  /* 🔴 2026-11-09：`#10b981` 当**文字色**用在浅色底上只有 ~2.3:1（10px 小字，远不够读）。
+     它是"深底上的绿" —— 与 .sp-safeBadgeOn 同一形态 ⇒ 同样分档：浅色给深的，深色回旧值。
+     注意这里**分的是文字色，不是底色**：底色用 color-mix 从同一个绿派生，两档都成立。 */
+  color: #047857;
   background: color-mix(in srgb, #10b981 14%, transparent);
+}
+body[data-ds-dark-theme] .sp-subsDlvOk {
+  color: #10b981;
 }
 .sp-subsDlvBad {
   color: var(--dsw-alias-state-error-primary);

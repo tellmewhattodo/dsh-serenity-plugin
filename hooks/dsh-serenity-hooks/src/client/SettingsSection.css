@@ -158,9 +158,13 @@
   white-space: nowrap;
 }
 
-@media (prefers-color-scheme: dark) {
-  .ss-channelTag { color: #3ddc9a; }
-}
+/* 🔴 2026-11-09：原为 `@media (prefers-color-scheme: dark)` —— **判错了对象**。
+   宿主的主题是「设置项 ∥ 系统跟随」两路合成后的结果，`prefers-color-scheme` 只是其中**一个输入**
+   （`dsh-client-ui-theme` 的 bootThemeBodyScript：`preference==='dark' || systemDark`）。
+   拿输入当结果 ⇒ 在「设置浅色 + 系统深色」这类组合上判反。
+   ⇒ 一律钉 `body[data-ds-dark-theme]`（合成后的**输出**）。这条已进机械门禁
+   （`tests/client-css-theme-gate.test.ts` 禁 client CSS 出现 prefers-color-scheme）。 */
+body[data-ds-dark-theme] .ss-channelTag { color: #3ddc9a; }
 
 /* 行卡说明（12px/18 tertiary；v1.27.5 紧凑化：默认单行截断，hover title 看全文） */
 .ss-rowDesc {

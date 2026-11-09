@@ -14,7 +14,72 @@
 
 ---
 
-## v1.124.0 — 2026-11-09（注入面瘦身：删工具清单 ＋ 工作语域加第 7 条「一次最多问 5 个」）
+## v1.125.0 — 2026-11-09（白色主题适配：`.sp-popVoyage` 写死深色压黑整张面板 ＋ 新增主题门禁）
+
+> 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
+> 必须是**两个井号 ＋ 空格 ＋ v<semver>**。⛔ 不要为了排版改成 `###`／`#`（会报「CHANGELOG 无条目」）。
+
+### 判据从哪来（owner 2026-11-09 原话，附截图）
+
+> 「这个页面没适配白色主题，想办法适配下」
+
+### 定因（真机取证：MSM `browser` CDP ＋ 计算样式逐项对读）
+
+| 选择器 | 浅色下算出的 `background` | 浅色下算出的 `color` |
+|---|---|---|
+| `.sp-pop` | `rgba(6,11,14,.9)` ← **被内层盖住** | `rgb(15,17,21)`（深字） |
+| `.sp-popVoyage` | **`rgba(6, 11, 14, 0.9)`** ← 写死、主题盲 | 透明（继承深字） |
+| `.sp-itemName` / `.sp-tab` | 透明 | `var(--dsw-alias-label-primary)` = `#0f1115`（深） |
+
+同时 `document.body.hasAttribute('data-ds-dark-theme')` = **false**、`color-scheme: light`，
+且 `--dsw-alias-bg-overlay` = `#e9ecf2`、`--dsw-alias-label-primary` = `#0f1115` —— **token 侧完全正确**。
+
+🔴🔴 **根因一句话：文字色全部走语义 token（主题感知 ✔），而卡片底色 `.sp-popVoyage` 写死深色（主题盲 ✘）**
+⇒ 浅色主题下「深底 + 深字」= 不可读。**不是 token 用错，是"有一处没走 token"。**
+
+📌 **它与既有门禁是互补的反面**：`tests/client-css-tokens.test.ts`（2026-09-04）守的是
+「**自造 token** ⇒ var() 解析不了 ⇒ 浅色黑块」；本次缺陷恰好相反 —— token **用对了**，
+但**有一处没用 token**。⇒ 旧门禁抓不到，必须补一条新的（见下）。
+
+### 改动
+
+| 面 | 变更 |
+|---|---|
+| 🔴 **`.sp-popVoyage` 底色** | `rgba(6,11,14,.9)` → **`var(--dsw-alias-bg-overlay)`**；深色由 `body[data-ds-dark-theme] .sp-popVoyage` **原样回旧值** ⇒ 深色观感**零变化** |
+| **`.sp-pop` 投影** | `rgba(0,0,0,.5)` → 浅色 `0.14`，深色档补回 `0.5`。旧值在浅底上会压出一圈**浓黑光晕**（不是不可读，是脏） |
+| **`.sp-voyage` 外框** | 新增 `border: 1px solid var(--dsw-alias-border-l1)`。动画本身是**星空深色作品**（`assets/serenity-voyage.html` 写死 `#02050a`），它**不该跟主题走**（一块舷窗本来就该暗）；但外框不跟卡片走会读成"卡片破了个洞" |
+| **`.sp-safeBadgeOn` 文字色** | `#6ee7b7`（深底薄荷绿）→ 浅色 `#047857`，深色档回旧值。原色压白卡对比度 ≈ 1.4:1 = 看不见 |
+| **`.sp-subsDlvOk` 文字色** | `#10b981` → 浅色 `#047857`，深色档回旧值（10px 小字，原色 ≈ 2.3:1） |
+| 🔴 **`SettingsSection.css` 主题判据** | `@media (prefers-color-scheme: dark)` → `body[data-ds-dark-theme]`。**拿宿主的输入当输出**在「设置浅色 + 系统深色」上会判反 |
+
+⚠️ **刻意留死、不跟主题走的色（显式登记理由，⛔ 不是"忘了改"）**：
+`#f2f4f6` 滑块 thumb（Mac 灰白，两主题通用）／ `#10b981` 作**底色**（品牌绿，两主题一致）／
+`#c2410c` 告警底 ＋ `#fff` 告警字（橙底白字，两主题都要那个对比）／
+`#fff` 二维码底（扫码需要白底，物理约束）。
+
+### 新增机械门禁 `tests/client-css-theme-gate.test.ts`
+
+① 任何「深色写死」的 `background/background-color/fill`（亮度 ≤ 60 且 alpha > 0.5），
+   必须存在**落在同一元素上**的 `body[data-ds-dark-theme]` 分档；
+② client CSS 禁用 `prefers-color-scheme`（宿主的输入 ≠ 宿主的输出）；
+③ 分档属性名必须是宿主真实名（防 `data-dark-theme` 手误），并配「至少存在一条正确分档」的正向断言。
+
+🔴🔴 **①-control 是这条门禁能活着的前提**：`isDarkLiteral` / `coversSameElement` 任一退化，
+① 会变成**恒绿且无信号**。本文件第一版就是这样 —— 详见下方变异检验。
+
+### 变异检验（真跑，且它抓到了我自己的假绿）
+
+| 变异体 | 结果 |
+|---|---|
+| 把 `.sp-popVoyage` 底色改回 `rgba(6,11,14,.9)`（保留分档） | 期望 ① 精确红 1 条 |
+| **删掉真分档、只留 `body[data-ds-dark-theme] .sp-popVoyageZZ`** | 🔴 **第一版判据全绿** —— 因为它按"剥空白后 startsWith"比选择器，`ZZ` 后缀被判成"已分档"。**这是判据没有判别力**（D254 同族），不是被测对象没问题 |
+| 修法 | 按**组合器边界**比（`t === sel` 或 `t` 以「空白/>/+ /~ + sel」结尾），并补 ①-control 用内联 CSS 做正控/负控/边界对照 |
+
+### 门禁
+
+typecheck ✅ ／ typecheck-host 0.2.2-rc.1 ✅（node 100 ／ client 193）／ test **214 files / 3359 tests** ✅ ／
+coverage **95.01%** ✅ ／ build ✅ ／ pack-check ⬜（见状态段）
+
 
 > 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
 > 必须是**两个井号 ＋ 空格 ＋ v<semver>**。⛔ 不要为了排版改成 `###`／`#`（会报「CHANGELOG 无条目」）。
