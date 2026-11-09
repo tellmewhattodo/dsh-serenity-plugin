@@ -86,10 +86,13 @@ if (hasPromptFile) {
 const iAcc = withTraj.indexOf('=== Serenity ACC ===')
 const iEap = withTraj.indexOf('=== Serenity EAP ===')
 const iTraj = withTraj.indexOf('=== Serenity Trajectory Prompt ===')
-const iTools = withTraj.indexOf('=== Serenity Tools ===')
-check('J3 顺序 ACC → EAP → Trajectory Prompt → Tools',
-  iAcc >= 0 && iAcc < iEap && (iTraj < 0 || iEap < iTraj) && iEap < iTools,
-  `acc=${iAcc} eap=${iEap} traj=${iTraj} tools=${iTools}`)
+// 🔴 v1.124.0：工具清单块已删（owner 令"省点空间"），该位置只剩 MSM 调用示例 ⇒ 标题改 `Serenity MSM`。
+//    ⚠️ 漏改这里的后果：`indexOf` 恒 -1 ⇒ 断言 `iEap < iTools` 变成 `iEap < -1` 恒假，探针**恒红**；
+//    反之若哪个断言写成 `> iTools`，会变成**恒绿**（-1 小于一切）。两种都失去判别力。
+const iMsm = withTraj.indexOf('=== Serenity MSM ===')
+check('J3 顺序 ACC → EAP → Trajectory Prompt → MSM',
+  iMsm > 0 && iAcc >= 0 && iAcc < iEap && (iTraj < 0 || iEap < iTraj) && iEap < iMsm,
+  `acc=${iAcc} eap=${iEap} traj=${iTraj} msm=${iMsm}`)
 
 // ── 反向控制：不给轨迹 ⇒ 第 ⑧ 段消失 ──
 const noTraj = build(root, 'probe-scope', undefined)

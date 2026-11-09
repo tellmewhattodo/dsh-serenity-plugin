@@ -14,6 +14,77 @@
 
 ---
 
+## v1.124.0 — 2026-11-09（注入面瘦身：删工具清单 ＋ 工作语域加第 7 条「一次最多问 5 个」）
+
+> 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒
+> 必须是**两个井号 ＋ 空格 ＋ v<semver>**。⛔ 不要为了排版改成 `###`／`#`（会报「CHANGELOG 无条目」）。
+
+### 判据从哪来（owner 2026-11-09 原话）
+
+> 「我希望在宁静号的提示词做些事情；1. dsh 自身的提示词能不能不要注入了，省点空间
+>   2. 约束里面调整下，避免一次向用户确认超过 5 个问题」
+
+追问「dsh 自身」是否指宿主 harness identity ⇒ owner 答 **「我说的是 ACC」**
+⇒ 两条都在 ACC 的注入面（`src/seams/system-prompt.ts` / `src/seams/work-register.ts`），⛔ 未动任何宿主配置。
+
+### 面 A —— 删掉与宿主 schema 重复的工具面叙述（实测 −3,808 chars）
+
+| 面 | 变更 |
+|---|---|
+| 🔴 **`identityBlock` 删两句** | ① `The DSH platform tools remain available too (read/write/…/goal and more) — …`：宿主自己注入这些工具的 schema，**点名它们零新增信息**，而这份名单**没人会在工具增减时同步**。② `…under the "Serenity Tools" heading — read it before using any ACC tool.`：它指向的那块清单**同批被删** ⇒ 留着就是**指向空处的指针**（模型会去找一个不存在的标题，比没有更坏）。 |
+| 🔴 **`toolsBlock` 删 10 行工具清单** | 判据三条：**① 它是第二真相源**——工具面已有两份权威（宿主注入的工具 schema ／ `kernel/invariant.ts` 的 `REGISTERED_TOOLS`），清单是第三份抄本 ⇒ 工具改名/退役时**没人会记得改这里**，于是对模型**静默撒谎**（D151 同族）。**② 它提供不了 schema 提供不了的信息**（子命令 / flag / 返回形态都在 schema 与 `--help` 里，那里才是可执行的真身）。**③ 实测体量**：该块原 3,451 chars。 |
+| 🆕 **标题 `Serenity Tools` → `Serenity MSM`** | 块里已无工具清单，仍叫 "Tools" 会让模型按"工具总表"来读这段（E↑：标题是这段文字的唯一预告）。**MSM 那 4 行调用示例保留** —— 它是**另一层**（CCC 注册、宿主 schema 里没有），且当年是真机踩出来的。 |
+| 📌 **如实登记的代价（D255）** | 模型失去"一眼看到全部 ACC 工具名"的入口。但那个入口**本来就长期滞后**（`ontology` / `serenity-skill-creator` / `reconstruct` 三者的增减史里，本块都曾落后于 `REGISTERED_TOOLS`）。可靠替代 = 宿主工具 schema（每轮都在）＋ `msm()` 无参目录。 |
+
+**体量读数**（本机称重，改前 → 改后）：`identityBlock` 1,039 → **705**；`toolsBlock` 3,451 → **572**；
+两块合计 **4,490 → 1,277**（−3,213）。若把身份块里那句平台工具说明单算，合计 −3,808（含标题行等）。
+
+### 面 B —— 工作语域块加第 7 条
+
+```
+7. Ask at most five questions in one turn, numbered, each with the default you
+   would otherwise take. More than five at once is a questionnaire, not a
+   decision — split it or take the defaults and say which ones you took.
+```
+
+🔴 **这条约束的形态必须说清，否则下一个维护者会去找一个不存在的工具参数**：
+`ask_user_question` 已被 `seams/guards.ts` 的 `ALWAYS_DENY_TOOLS` **恒隐** ⇒ 模型手上**没有**那个工具
+⇒ 本条约束的是**正文里一次提出多少个待裁决问题**，⛔ **不是任何工具的入参上限**。
+⇒ 为什么给"默认值"而不只给上限：只说"少问"会退化成"该问的也不敢问"；要求每条附默认值，
+等于让"不问"成为一个**可执行选项**。这条已写进 `work-register.ts` 头注并由用例钉住。
+
+### 测试
+
+- `tests/system-prompt.test.ts` / `tests/osp-alignment.test.ts`：两处旧钉**方向反转**（`toContain('DSH platform tools remain available')` ⇒ `not.toContain`），
+  并新增**形态判据**：清单行以 `^ {2}<工具名>\s+—` 判，⛔ 不用"block 里出现了某工具名"——因为 MSM 的 Manage 行合法地提到 `container_admin`。
+- 块序断言同批改（`indexOf('=== Serenity MSM ===')`），并**先断言 `> 0` 再比大小**：
+  `-1` **小于一切**，把它当"块在此处"会让整串不等式变成假绿。
+- `tests/work-register.test.ts` 新增三条：① 从**编号序列**取出第 7 条整段再断言（⛔ 全文搜数字 '5'——那会被任何无关的 5 满足）；② 必须给"默认值"这个可执行替代；③ 源码注释里必须写明"不是工具入参上限"。
+
+**变异检验（两组，各精确红）**：
+- 往 `toolsBlock` 里插回一行 `  container_fs — …` ⇒ `--filter system-prompt` **精确红 1 条**（正是新增的形态判据）；还原后 31/31 绿。
+- 把第 7 条的 `five` 改成 `THREE` ⇒ `--filter work-register` **精确红 1 条**；还原后 9/9 绿。
+
+### 同批修掉的读数器缺陷（不是被测对象坏了）
+
+`tests/trajectory/interrupted-cross-check.test.ts` 用 `spawnSync('bun', …)` —— **裸名依赖 `PATH`**，
+而 vitest 子进程的 `PATH` 里**没有 `~/.bun/bin`**（实测 `spawnSync bun ENOENT`）
+⇒ 6 条用例全红、报「CRO 没有产出可解析的决策」，而**同一份程序**用 `run-trajectory-test` 跑 22/23 绿。
+⇒ 改为与 `scripts/dsh-develop.ts` **同口径**的解析路径（`SERENITY_BUN` 可覆盖，缺省 `~/.bun/bin/bun`）。
+🔴 **判据**：**"读数器坏了"与"被测对象坏了"必须分开判**（D252 同族）——把本机 `PATH` 长什么样偷渡成判据的一部分，
+是本仓已登记过的形态。
+
+### 门禁
+
+typecheck ✅ ／ typecheck-host 0.2.2-rc.1 ✅（node 100 ／ client 193）／ test **213 files / 3356 tests** ✅ ／
+coverage **95.01%** ✅ ／ build ✅ ／ pack-check ✅
+
+> 🔴 **可外推的判据**：**提示词里不要放"第二真相源"**。工具面已经有两份权威（宿主 schema ＋ `REGISTERED_TOOLS`），
+> 再抄一份清单进去，只会在工具退役时**静默撒谎**——而它撒谎的方式是"模型按旧清单去找一个不存在的工具"，
+> **零告警、零信号**。
+
+---
+
 ## v1.123.0 — 2026-11-06（工具屏蔽重整：三张表各归各位 ＋ 退役 `safeMode.hiddenTools`）
 
 > 🔴 标题行格式是**机器契约**：`dsh-develop version` 用 `/^## v([\d.]+)/m` 取版本号 ⇒

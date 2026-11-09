@@ -40,6 +40,20 @@
  * ### ③ 不改任何既有块的语义
  * 它自成一块（`=== Serenity Work Register ===`），不替换 EAP / Principles / CCE，
  * 也不与它们冲突：EAP 管**质量**，本块管**开场与声明**。
+ *
+ * ## 🔴 第 7 条（v1.124.0，owner 2026-11-09 令）
+ *
+ * > 「约束里面调整下，避免一次向用户确认超过 5 个问题」
+ *
+ * **这条约束的实际形态必须写清，否则下一个人会去找一个不存在的工具参数**：
+ * `ask_user_question` 已被 `seams/guards.ts` 的 `ALWAYS_DENY_TOOLS` **恒隐**
+ * ⇒ 模型手上**没有**那个工具，也就不存在"调用时参数 ≤ 5"这回事。
+ * ⇒ 本条约束的是**正文里一次提出多少个待裁决问题**（"你要选哪个？"这类写在回答里的话），
+ *    ⛔ 不是任何工具的入参上限。
+ * ⇒ 为什么需要它：`SESSION.md` 的 `## 待 owner 裁决` 段曾一次堆十几条；而一次问 >5 个
+ *    实际是把**决策负担**整体推回给用户（与第 4 条"不要重复要许可"同一根：都在减少他付的成本）。
+ * ⇒ 为什么给"默认值"而不是只给上限：只说"少问"会变成"该问的也不敢问"；要求每条附默认值，
+ *    等于让"不问"成为一个**可执行选项**（缺省走哪个已经是明说的）。
  */
 
 /**
@@ -70,6 +84,9 @@ export function workRegisterText(): string {
     '   Take another path and report what changed.',
     '6. When a detail is missing and a reasonable default exists, proceed with the',
     '   default and mark it. Ask only when the answer actually changes the outcome.',
+    '7. Ask at most five questions in one turn, numbered, each with the default you',
+    '   would otherwise take. More than five at once is a questionnaire, not a',
+    '   decision — split it or take the defaults and say which ones you took.',
     '',
   ].join('\n')
 }

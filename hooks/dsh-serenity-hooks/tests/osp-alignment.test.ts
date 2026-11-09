@@ -219,7 +219,7 @@ describe('osp 对齐：SKILL 全文原文直推 + 装配结构', () => {
     expect(text).toBe('---\nname: other-serenity\ndescription: 系统入口\n---\n顶层入口原文内容')
   })
 
-  it('serenitySystemPrompt() 块序 ACC→Metaphor→Principles→CCE→EAP→SKILL→Tools→Session，无 --- 分隔线（需求③ Tools 放 SKILL 后 Session 前）', () => {
+  it('serenitySystemPrompt() 块序 ACC→Metaphor→Principles→CCE→EAP→SKILL→MSM→Session，无 --- 分隔线（v1.124.0：Tools→MSM）', () => {
     setupCccWithSkill('other-serenity')
     const dirName = '2026-08-13--S126--dsh-serenity-public-beta-adapt'
     mkdirSync(join(dir, 'AGENT_SESSIONS', dirName), { recursive: true })
@@ -233,24 +233,28 @@ describe('osp 对齐：SKILL 全文原文直推 + 装配结构', () => {
     const cceIdx = text.indexOf('=== Serenity CCE ===')
     const eapIdx = text.indexOf('=== Serenity EAP ===')
     const skillIdx = text.indexOf('顶层入口原文内容')
-    const toolsIdx = text.indexOf('=== Serenity Tools ===')
+    // 🔴 v1.124.0：工具清单块已删，标题随之改为 `Serenity MSM`（块里只剩 MSM 调用示例）。
+    //    ⚠️ 见 system-prompt.test.ts 同处注释：`-1` 会让不等式比较失去意义 ⇒ 先断言 > 0。
+    const msmIdx = text.indexOf('=== Serenity MSM ===')
     const sesIdx = text.indexOf('=== Serenity Session ===')
+    expect(msmIdx).toBeGreaterThan(0)
+    expect(text.indexOf('=== Serenity Tools ===')).toBe(-1)
     expect(accIdx).toBeGreaterThanOrEqual(0)
     expect(metaIdx).toBeGreaterThan(accIdx)
     expect(priIdx).toBeGreaterThan(metaIdx)
     expect(cceIdx).toBeGreaterThan(priIdx)
     expect(eapIdx).toBeGreaterThan(cceIdx)
     expect(skillIdx).toBeGreaterThan(eapIdx)
-    // 需求③：Tools 块在 SKILL 后、Session 前
-    expect(toolsIdx).toBeGreaterThan(skillIdx)
-    expect(sesIdx).toBeGreaterThan(toolsIdx)
+    // MSM 块在 SKILL 后、Session 前
+    expect(msmIdx).toBeGreaterThan(skillIdx)
+    expect(sesIdx).toBeGreaterThan(msmIdx)
     expect(text).not.toContain('---\n\n')
     expect(text).not.toContain('# CCC 入口技能')
   })
 })
 
-describe('osp 对齐：身份块 + Tools 块结构（工具清单独立成块，需求③）', () => {
-  it('identityBlock() 含身份行/CCC/MSM 发现行，不含工具清单（Root 边界归 Constraints 块，v1.19.6 去重）', () => {
+describe('osp 对齐：身份块 + MSM 块结构（v1.124.0：工具清单已删）', () => {
+  it('identityBlock() 含身份行/CCC/MSM 发现行，不含平台工具句与工具清单（v1.124.0 删两处）', () => {
     const block = identityBlock(dir)
     expect(block).toContain(`ACC: dsh-serenity-hooks v${ACC_VERSION}`)
     expect(block).toContain(`CCC: ${dir.split('/').pop()}`)
@@ -259,24 +263,28 @@ describe('osp 对齐：身份块 + Tools 块结构（工具清单独立成块，
     // 身份块不再内嵌工具清单（需求③移出 toolsBlock）
     expect(block).not.toContain('container_fs     —')
     expect(block).not.toContain('cheap-worker  —')
+    // 🔴 v1.124.0（owner 2026-11-09 令）：**平台工具句 + 指向工具清单的指引句都删了**。
+    //    判据 = 宿主自己注入那些工具的 schema（点名零新增信息），而那份名单没人会同步。
+    expect(block).not.toContain('DSH platform tools remain available')
+    expect(block).not.toContain('"Serenity Tools" heading')
     // 2026-09-16（S142 §0e-C，所有者裁「同意修正」）：MSM 指引改指 msm() 无参目录。
     // 旧文 `call msm("<name>") to execute or discover them (see the "Serenity Tools" heading below)`
     // 把 **MSM**（CCC 注册的另一层）指到 **ACC 内置工具清单**标题下 ⇒ 指错对象，属干扰。
     expect(block).toContain('call msm() with no arguments to list them')
     expect(block).not.toContain('(see the "Serenity Tools" heading below)')
-    // 指引指向文末 Tools 块（heading 短语，非完整头——避免干扰块序 indexOf 定位）
-    expect(block).toContain('"Serenity Tools" heading')
   })
 
-  it('toolsBlock() 含工具清单 + msm 单入口示例（v1.33：logbook 并入 cognitive trajectory）', () => {
+  it('toolsBlock() 只剩 MSM 单入口示例，⛔ 无工具清单（v1.124.0：清单是第二真相源）', () => {
     const block = toolsBlock()
-    expect(block).toContain('=== Serenity Tools ===')
-    for (const tool of ['container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'localstore', 'container_admin']) {
-      expect(block).toContain(tool)
+    expect(block).toContain('=== Serenity MSM ===')
+    expect(block).not.toContain('=== Serenity Tools ===')
+    // 形态判据：行首两空格 + 工具名 + `—` 的**清单行**必须一条不剩。
+    // ⛔ 不要用"block 提到 container_admin"来判 —— MSM 的 Manage 行合法地提到它。
+    for (const tool of ['container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'ontology', 'serenity-skill-creator', 'localstore']) {
+      expect(block, `工具清单行仍在：${tool}`).not.toMatch(new RegExp(`^ {2}${tool}\\s+—`, 'm'))
     }
-    // 🔴 2026-10-28 回归钉：cheap-worker 整条下线 ⇒ 它不得再出现在给模型的工具清单里
     expect(block).not.toContain('cheap-worker')
-    // msm 单入口调用（替代旧 3 步协议）
+    // msm 单入口调用留存（替代旧 3 步协议）
     expect(block).toContain('msm("')
     expect(block).toContain('inspect=true')
     expect(block).toContain('container_admin msm register|deregister|check')

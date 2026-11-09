@@ -8,13 +8,14 @@
  *
  * **完全对齐 opencode-serenity-plugin 的 system.transform 注入内容**（compacting.ts）：
  * 结构（v1.19.8 精简，S142 重建视角 R↓）：
- *   1. `=== Serenity ACC ===`        — 身份（ACC/CCC 模型 + 工具清单）
+ *   1. `=== Serenity ACC ===`        — 身份（ACC/CCC 模型 ＋ 路径约定；**v1.124.0 起不含工具清单**）
  *   2. `=== Serenity Metaphor ===`   — 世界模型（三层隐喻域：船/航行/船员）
  *   3. `=== Serenity Principles ===` — 信念/边界（认知容器本体论 + 操作边界，v1.19.8 合并原 Constraints）
  *   4. `=== Serenity CCE ===`        — 时间约束（5 行为约束 + H_op，逐字对齐 osp）
  *   5. `=== Serenity EAP ===`        — 质量（E↑ R↓ S↑ 自检）
  *   6. 状态块（条件）                — Safe Mode / Localstore
  *   7. SKILL.md 全文                 — 该 CCC 顶层入口 skill 全量原文（不截断）
+ *   7b. `=== Serenity Tools ===`     — **只剩 MSM 调用示例**（v1.124.0：工具清单已删，见 toolsBlock 注释）
  *   8. `=== Serenity Session ===`    — 活跃会话（id + dirName + mdPath + todowrite 首位约定）
  *
  * 注册：**全局** ctx `systemPrompt.section`（对齐 plan-mode 官方惯例），text 回调按
@@ -96,7 +97,18 @@ function sanitizeSkillContent(content: string): string {
 
 // ── Induction 装配块（8 块骨架五层 + Metaphor 渲染层；逐字对齐 opencode-serenity-plugin compacting.ts system.transform）──
 
-/** 1) 身份块：ACC 身份 + CCC 名 + 平台工具说明（需求③ S142：工具清单移出为独立 toolsBlock 放装配末尾——身份先行、工具参考殿后） */
+/**
+ * 1) 身份块：ACC 身份 + CCC 名（需求③ S142：工具清单移出为独立 toolsBlock 放装配末尾——身份先行、工具参考殿后）
+ *
+ * 🔴 **v1.124.0（owner 2026-11-09 令）��「删掉与宿主重复的工具面叙述」** —— 两处删除，判据同一条：
+ * **工具面在宿主 schema 与 `REGISTERED_TOOLS` 里各有一份权威，提示词里再抄一份 → 工具退役时会静默撒谎**（D151 同族）。
+ *  - 删 `The DSH platform tools remain available too (read/write/…/goal and more) — …` 整句：
+ *    宿主自己注入这些工具的 schema，点名它们**零新增信息**；且这份名单**没人会在工具增减时同步**。
+ *  - 删 `The complete built-in tool list is at the end of this prompt under the "Serenity Tools" heading — read it before using any ACC tool.`
+ *    指向的那块清单已同批删除 ⇒ 留着就是**指向空处的指针**（比没有更坏：模型会去找）。
+ * ⛔ **保留**：ACC/CCC 两行（身份）、CCC 名与路径约定行、`Additional MSMs registered by this CCC …` 一行
+ * （MSM 是 CCC 注册的**另一层**，宿主 schema 里没有它，故它不重复）。
+ */
 export function identityBlock(root: string): string {
   const cccName = basename(root)
   return [
@@ -109,12 +121,8 @@ export function identityBlock(root: string): string {
     'the runtime instance of an Abstract Cognitive Container (ACC).',
     'The ACC (this plugin) is a cognitive container harness: it provides',
     'deterministic tools, mechanical constraints, and session continuity.',
-    'The complete built-in tool list is at the end of this prompt under the',
-    '"Serenity Tools" heading — read it before using any ACC tool.',
     '',
     '  ℹ️ Use relative paths from the CCC root for CCC-internal file operations (read/write/edit/glob/grep etc.), e.g. AGENT_SESSIONS/2026-08-14--S134--x/SESSION.md; Root / absolute SESSION.md paths are identifiers only, not tool arguments',
-    '',
-    'The DSH platform tools remain available too (read/write/edit/glob/grep/web_search/ask_user_question/subagent/workflow/goal and more) — the ACC tools are the serenity-native layer, not the only tools.',
     '',
     'Additional MSMs registered by this CCC are available — call msm() with no arguments to list them, or msm("<name>") to execute one.',
     '',
@@ -122,30 +130,34 @@ export function identityBlock(root: string): string {
 }
 
 /**
- * 工具清单块（需求③ S142 用户拍板：工具列表移装配末尾 + MSM 调用示例）：
+ * 工具块（需求③ S142 用户拍板：工具列表移装配末尾 + MSM 调用示例）：
  * 原 accBlock 内嵌 13 行工具清单 → 独立成块放装配末尾（SKILL 后、Session 前）。
- * 身份先行（认知轨迹开头不被 13 行清单干扰）、工具参考殿后（需要时再看）。
- * 附带 MSM 调用示例（用户拍板：顶层提示词加调用方式说明，避免偶发调用错误——
- * 模型对 msm 参数面/协议 flag 理解不稳）。
+ * 身份先行（认知轨迹开头不被清单干扰）、工具参考殿后（需要时再看）。
+ *
+ * 🔴🔴 **v1.124.0（owner 2026-11-09 令「dsh 自身的提示词能不能不要注入了，省点空间」）：
+ * 10 行工具清单整块删除，只留 MSM 调用示例。** 判据三条，都是可复算的：
+ *  1. **它是第二真相源**：工具面已有两份权威 —— 宿主注入的工具 schema、`kernel/invariant.ts`
+ *     的 `REGISTERED_TOOLS`。清单是第三份抄本 ⇒ 工具改名/退役时**没人会记得改这里**，
+ *     于是它对模型**静默撒谎**（D151 同族：错的指引比没有指引更坏）。
+ *  2. **它提供不了 schema 提供不了的信息**：`msm`、`container_fs` 等每一行的内容
+ *     （子命令、flag、返回形态）都在 schema 与 `--help` 里，且那里才是可执行的真身。
+ *  3. **实测体量**：本块 3,451 chars（2026-11-09 本机称重，含 10 行清单）。
+ * 📌 **如实登记代价（D255：条件与保证同句说）**：删掉清单后，模型失去"一眼看到全部 ACC 工具名"的入口。
+ * 但那个入口**本来就不可靠**（清单长期滞后：`ontology` / `serenity-skill-creator` / `reconstruct`
+ * 三者的增减史里，本块都曾落后于 `REGISTERED_TOOLS`）。可靠的替代路径 = 宿主工具 schema（每轮都在），
+ * 且 `msm()` 无参仍给出 CCC 层目录。
+ *
+ * ⚠️ **标题从 `=== Serenity Tools ===` 改为 `=== Serenity MSM ===`**：块里已经没有工具清单了，
+ * 仍叫 "Tools" 会让模型按"工具总表"来读这段（E↑：标题是这段文字的唯一预告）。
+ * 牵连的读数器（`tests/system-prompt.test.ts` / `tests/osp-alignment.test.ts` /
+ * `tests/trajectory-prompt-injection.test.ts` / `bench/trajectory-prompt-probe.mjs`）**同批改** ——
+ * 漏改一个就会得到一个**永远找不到该标题**的探针（`indexOf === -1`）。
  */
 export function toolsBlock(): string {
   return [
     '',
-    '=== Serenity Tools ===',
-    'The ACC (this plugin) provides the following built-in tools:',
-    '',
-    '  container_fs — container filesystem operations (14 subcommands: root/resolve/exists/list/tree/relative/mkdir/rm/mv/cp/touch/reveal/info/find)',
-    '  cognitive_trajectory — one cognitive trajectory: its persistent body (SESSION.md) + its timeline. Lifecycle: list (inventory + stats) / show / create / use (activate; inline integrity check — silent when fine) / rebuild (clear-and-rebuild this conversation in place, Ship of Theseus); delivery: send-now (deliver one message RIGHT NOW; live target injected immediately, non-live cold-resumed like a direct wake — returns a synchronous receipt) / send-later (one future instant + one message to any cognitive trajectory; fire-and-forget — no receipt, no recall) / cro-guide (the CRO programming guide: how to give THIS cognitive trajectory its own program that decides when it should be woken)',
-    '  dashboard    — always-on container instruments: health (CCC three-principle check + registry integrity) / time (now) / diag (runtime diagnosis)',
-    '  container_git— git operations (status/commit/push/log/pull/diff)',
-    '  msm          — execute a registered CCC MSM: msm(name, args); partial name returns candidates; inspect=true shows usage',
-    '  praxis       — actionable theory injection: praxis (index) / praxis eap / praxis neat / praxis cce / praxis ontology',
-    '  ontology     — ontology engineering ENGINE (executable): init (write template) / check (M1-M10 structural; level=strict adds L1-L5 hints) / explain (summary) / verify (V1-V4 runtime compliance) / review (semantic-review prompt) / compliance (axiom-vs-skill checklist). Sibling of `praxis ontology` — that one is the METHOD TEXT, this one RUNS it. path must stay inside the container; the receipt carries the engine exit code (0/1/2/4) and the engine text verbatim, so read it rather than assuming success',
-    '  serenity-skill-creator — creator for serenity-skills (this container\'s enhanced skill standard): guide (authoring/optimization method — read first) / create <name> (scaffold SKILL.md + skill.ttl + references/, base-chain import path computed) / check <name> (A1 structural + A2 base-chain; three states: modeled-ok / plain-skill / modeled-but-check-could-not-run) / review <name> (C tier: axiom-vs-text compliance question list, half-mechanical) / index <name> (preview the second-layer resource list the model will see) / status (which skills are modeled). A skill is "modeled" iff it has a file named exactly skill.ttl next to SKILL.md; a plain skill is NOT an anomaly. Only `create` writes, and it refuses an existing directory',
-    '  localstore   — ACC local credential/config storage (CCC-root localstore.json; git policy localstore.gitTrack default deny)',
-    '  container_admin — container administration (the maintenance bay): role (轨迹约束 roles: guide/validate/apply/list) / msm (register/deregister/check/guide/catalog/ccc-config) / config (view)',
-    '',
-    'MSM call (registered CCC MSMs, deterministic Mech & Semi-Mech):',
+    '=== Serenity MSM ===',
+    'MSM call (registered CCC MSMs — a layer of their own, not covered by the platform tool schema):',
     '  Execute:       msm("<name>", ["<arg1>", "<arg2>"])   — run a registered MSM directly (partial name returns matching candidates)',
     '  Inspect:       msm("<name>", [], inspect=true)       — view that MSM\'s usage/flags without running',
     '  Index:         msm()                                 — summary of registered MSMs by skill',
@@ -531,7 +543,9 @@ export function sessionBlock(root: string, scope: string = DEFAULT_SESSION_SCOPE
  * 认知展开顺序：我是谁 → 我所在的世界 → 为什么 → 如何一致 → 产物标准 → 当前状态 → 上下文 → 工具参考 → 会话。
  *
  * 需求③（S142 用户拍板）：工具清单从 accBlock 移出为独立 toolsBlock，
- * 放 SKILL 后 Session 前（工具参考殿后，身份先行不被 13 行清单干扰）。
+ * 放 SKILL 后 Session 前（工具参考殿后，身份先行不被清单干扰）。
+ * 🔴 **v1.124.0**：那块清单**已被 owner 令删掉**（判据见 `toolsBlock` 头部），
+ * 现在该位置只剩 MSM 调用示例（标题也改成 `=== Serenity MSM ===`）。
  *
  * v1.23.1 persona（彩蛋）：persona.mode 配置 → EAP 块替换为 Persona 块（输出约束），
  * Principles 剥离 MSM 原则段（指令遵循约束）——用户文本承接两处风格；本体论/关系段/

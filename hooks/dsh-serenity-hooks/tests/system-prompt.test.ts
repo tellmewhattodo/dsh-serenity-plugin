@@ -76,7 +76,7 @@ describe('system-prompt: 结构注入（需求③：ACC身份→Metaphor→Princ
     expect(text).not.toContain('=== Serenity Constraints ===')
   })
 
-  it('身份块：CCC 名/版本 + 平台工具说明，不含工具清单（需求③：工具清单移出 toolsBlock）', () => {
+  it('身份块：只有 ACC/CCC 身份 + 路径约定 + MSM 指引（v1.124.0：删掉与宿主 schema 重复的平台工具句）', () => {
     const block = identityBlock(dir)
     expect(block).toContain(`ACC: dsh-serenity-hooks v${ACC_VERSION}`)
     expect(block).toContain(`CCC: sp-`)
@@ -85,11 +85,16 @@ describe('system-prompt: 结构注入（需求③：ACC身份→Metaphor→Princ
     for (const tool of ['container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'localstore', 'container_admin']) {
       expect(block).not.toMatch(new RegExp(`^  ${tool} `, 'm'))
     }
-    // EAP 优化 #2：说明平台工具仍可用（关系方向明确）
-    expect(block).toContain('DSH platform tools remain available')
-    expect(block).toContain('read/write/edit/glob/grep')
-    // 指引指向文末 Tools 块（heading 短语，非完整头——避免干扰块序 indexOf 定位）
-    expect(block).toContain('"Serenity Tools" heading')
+    // 🔴 v1.124.0（owner 2026-11-09 令「省点空间」）：**平台工具那句整句删除**。
+    //    判据 = 宿主自己注入这些工具的 schema ⇒ 点名它们零新增信息，且这份名单
+    //    没人会在工具增减时同步（D151 同族：错的指引比没有指引更坏）。
+    //    ⚠️ 这条钉的是"删掉了"，故必须是 not.toContain —— 与旧钉方向**相反**，
+    //    旧钉（`toContain('DSH platform tools remain available')`）随本次改动作废。
+    expect(block).not.toContain('DSH platform tools remain available')
+    expect(block).not.toContain('read/write/edit/glob/grep)')
+    // 🔴 同上：指向文末工具清单的指引句也删了 —— 那块清单已不存在，
+    //    留着就是**指向空处的指针**（模型会去找一个不存在的标题）。
+    expect(block).not.toContain('"Serenity Tools" heading')
     // 2026-09-16（S142 §0e-C，所有者裁「同意修正」）：MSM 一行的指引**不得**再指向
     // "Serenity Tools" 标题——那里列的是 **ACC 内置工具**，而 MSM 是 CCC 注册的**另一层**
     // （两者不是一回事）；指错对象 = 对 LLM 的干扰。改指 msm() 无参目录。
@@ -97,15 +102,20 @@ describe('system-prompt: 结构注入（需求③：ACC身份→Metaphor→Princ
     expect(block).toContain('call msm() with no arguments to list them')
   })
 
-  it('toolsBlock：工具清单 + msm 单入口示例（v1.33：logbook 并入 cognitive trajectory，im-bridge 条件可见不入块）', () => {
+  it('toolsBlock：只剩 MSM 调用示例，⛔ 不含工具清单（v1.124.0：清单是第二真相源，已删）', () => {
     const block = toolsBlock()
-    expect(block).toContain('=== Serenity Tools ===')
-    for (const tool of ['container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'localstore', 'container_admin']) {
-      expect(block).toContain(tool)
+    // 标题随内容改（块里已无工具清单，仍叫 Tools 会让模型按"工具总表"来读）
+    expect(block).toContain('=== Serenity MSM ===')
+    expect(block).not.toContain('=== Serenity Tools ===')
+    expect(block).not.toContain('The ACC (this plugin) provides the following built-in tools')
+    // 🔴 判据本体：**逐行清单形态**必须消失。用"行首两个空格 + 工具名 + 空格/破折号"
+    // 这个形态判，⛔ 不用"block 里出现了 container_fs 这个词"——因为 MSM 那几行
+    // 合法地提到 `container_admin`（Manage 行）。形态判据才是"清单走了"的证据。
+    for (const tool of ['container_fs', 'cognitive_trajectory', 'dashboard', 'container_git', 'msm', 'praxis', 'ontology', 'serenity-skill-creator', 'localstore']) {
+      expect(block, `工具清单行仍在：${tool}`).not.toMatch(new RegExp(`^ {2}${tool}\\s+—`, 'm'))
     }
-    // 🔴 2026-10-28 回归钉：cheap-worker 整条下线 ⇒ 它不得再出现在给模型的工具清单里
     expect(block).not.toContain('cheap-worker')
-    // msm 单入口调用（替代旧 3 步协议：list 发现 / --schema 查用法 / exec 执行）
+    // MSM 单入口调用留存（当年真机踩出来的，不是清单的一部分）
     expect(block).toContain('msm("')
     expect(block).toContain('inspect=true')
     expect(block).toContain('container_admin msm register|deregister|check')
@@ -338,7 +348,7 @@ describe('system-prompt: EAP 块（S131 P1-6 扩展）', () => {
     expect(block).toContain('external reconstructability')
   })
 
-  it('serenitySystemPrompt 块序 ACC→Metaphor→Principles→CCE→EAP→SKILL→Tools→Session（需求③）', () => {
+  it('serenitySystemPrompt 块序 ACC→Metaphor→Principles→CCE→EAP→SKILL→MSM→Session（v1.124.0：Tools→MSM）', () => {
     setupCccWithSkill('other-serenity')
     const text = serenitySystemPrompt(dir)
     const acc = text.indexOf('=== Serenity ACC ===')
@@ -347,15 +357,21 @@ describe('system-prompt: EAP 块（S131 P1-6 扩展）', () => {
     const cce = text.indexOf('=== Serenity CCE ===')
     const eap = text.indexOf('=== Serenity EAP ===')
     const skill = text.indexOf('顶层入口原文内容')
-    const tools = text.indexOf('=== Serenity Tools ===')
+    // 🔴 v1.124.0：该块标题从 `Serenity Tools` 改为 `Serenity MSM`（块里已无工具清单）。
+    //    ⚠️ 这里必须断言 **> 0** 而不是只比大小：`indexOf === -1` 会让后面所有
+    //    `toBeLessThan/toBeGreaterThan` 的**不等式比较意义**——旧标题的 -1 恰好"小于一切"
+    //    （若它被当成"块在此处"就会得到一串假绿）。
+    const msmIdx = text.indexOf('=== Serenity MSM ===')
+    expect(msmIdx).toBeGreaterThan(0)
+    expect(text.indexOf('=== Serenity Tools ===')).toBe(-1)
     expect(acc).toBeGreaterThanOrEqual(0)
     expect(acc).toBeLessThan(meta)
     expect(meta).toBeLessThan(pri)
     expect(pri).toBeLessThan(cce)
     expect(cce).toBeLessThan(eap)
     expect(eap).toBeLessThan(skill)
-    // 需求③：Tools 块在 SKILL 后（无 Session 时它接近文末）
-    expect(tools).toBeGreaterThan(skill)
+    // 需求③：MSM 块在 SKILL 后（无 Session 时它接近文末）
+    expect(msmIdx).toBeGreaterThan(skill)
   })
 })
 

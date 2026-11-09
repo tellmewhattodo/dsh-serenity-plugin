@@ -46,7 +46,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import * as nodeZlib from 'node:zlib'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -76,6 +76,22 @@ const GUARD_CRO =
   process.env.GUARD_CRO_PATH ??
   join(CCC_ROOT, 'AGENT_SESSIONS', '2026-10-22--guard--中断守护', 'continuous-re-occurrence.ts')
 
+/**
+ * 🔴 **bun 的可执行路径必须是「解析出来的绝对路径」，不能是裸名 `'bun'`**（2026-11-09 实测）。
+ *
+ * **症状**：`dsh-develop test` 跑本文件时，6 条用例全红，报
+ * `CRO 没有产出可解析的决策（bun 不可用？程序报错？）: expected '' not to be ''`——
+ * 而**同一份程序**用 `run-trajectory-test`（它自己解析 `/home/<user>/.bun/bin/bun`）跑**22/23 绿**。
+ *
+ * **成因**：`spawnSync('bun', …)` 依赖 `PATH`，而 **vitest 子进程的 PATH 里没有 `~/.bun/bin`**
+ * （实测：`PATH` 只含 `node_modules/.bin` 一族加系统目录 ⇒ `spawnSync bun ENOENT`）。
+ * ⇒ 那不是"被测程序坏了"，是**读数器找不到解释器**（D252 同族：读数器坏了 ≠ 被测对象坏了）。
+ *
+ * **口径与 `scripts/dsh-develop.ts` 的 `run-trajectory-test` 一致**：`SERENITY_BUN` 可覆盖，
+ * 缺省 `~/.bun/bin/bun`。⛔ 不要退回裸名——那会把"本机 PATH 长什么样"偷偷变成判据的一部分。
+ */
+const BUN = process.env.SERENITY_BUN ?? join(homedir(), '.bun', 'bin', 'bun')
+
 const zstd = (nodeZlib as unknown as { zstdCompressSync?: (b: Buffer) => Buffer }).zstdCompressSync
 
 /**
@@ -103,7 +119,7 @@ function stageLog(events: Array<Record<string, unknown>>): { dshHome: string; cc
 
 /** 一次 CRO 调用的**原始输出**（保持原文，供"逐字相同"断言） */
 function croRaw(staged: { dshHome: string; cccRoot: string }, snapshot: Record<string, unknown>): string {
-  const res = spawnSync('bun', [GUARD_CRO], {
+  const res = spawnSync(BUN, [GUARD_CRO], {
     input: JSON.stringify({
       identity: { dirName: 'guard', code: 'guard', cccRoot: staged.cccRoot },
       time: { nowMs: Date.now() },

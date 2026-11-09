@@ -30,7 +30,11 @@ const H = {
   cce: '=== Serenity CCE ===',
   eap: '=== Serenity EAP ===',
   traj: '=== Serenity Trajectory Prompt ===',
-  tools: '=== Serenity Tools ===',
+  // 🔴 v1.124.0：原 `tools: '=== Serenity Tools ==='`（工具清单块）已随 owner 令删除，
+  //    该位置只剩 MSM 调用示例，标题随之改为 `Serenity MSM`。
+  //    ⚠️ 本常量在这里的作用是**块尾锚点**（"轨迹提示词排在它之前"）——
+  //    换成 MSM 标题后语义不变：轨迹提示词仍在工具/协议层之前。
+  tools: '=== Serenity MSM ===',
 }
 const CONSTRAINT_HEADERS = [H.metaphor, H.principles, H.cce, H.eap]
 
