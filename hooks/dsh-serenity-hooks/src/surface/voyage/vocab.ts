@@ -76,11 +76,13 @@ function scanSkillDirs(root: string, marker: string): string[] {
 }
 
 /**
- * MSM 名：读 `mech-registry.json` 的 `msms[].name`。
+ * MSM 名：读注册表的**条目名**。
  *
  * 🔴 **为什么不扫 `scripts/`**：注册表是 MSM 的**唯一真相源**；扫目录会把共享库
  * （`dev-kit/`、`lib/*`）也算成 MSM —— 本仓对"入口判据"已翻车多次。
  * ⚠️ 注册表若换了位置 ⇒ **静默降级为空**（装饰页不该因此打不开）。
+ *
+ * 顶层键 **必须认 `entries`**（v1 包装形），详见下面的实测缺陷注释。
  */
 function scanMsmNames(root: string): string[] {
   const candidates = [
@@ -90,10 +92,21 @@ function scanMsmNames(root: string): string[] {
   for (const p of candidates) {
     try {
       if (!existsSync(p)) continue
-      const raw = JSON.parse(readFileSync(p, 'utf-8')) as { msms?: Array<{ name?: unknown }> }
-      const names = (raw.msms ?? [])
-        .map((m) => (typeof m?.name === 'string' ? m.name : ''))
-        .filter((n) => n !== '')
+      const raw = JSON.parse(readFileSync(p, 'utf-8')) as {
+        entries?: Array<{ name?: unknown }>
+        msms?: Array<{ name?: unknown }>
+      }
+      // 🔴🔴 2026-11-09 实测缺陷（v1.127.0 真机首读抓到）：这里原本只读 `raw.msms`，
+      // 而**真实文件的顶层键是 `entries`**（`{version, description, entries:[…]}`，
+      // 见 `tools/msm/service.ts` 的 `parseRegistry`）⇒ `raw.msms` 恒 `undefined`
+      // ⇒ `msms` 恒空、`counts.msm` 恒 **0**。
+      // 后果不是崩溃，是**图上写了个假数字**：真机蓝图标题栏显示 `SN-42-00` /
+      // `42 技能 / 0 工具`，而同一份资产 `file://` 直开（走构建期常量）显示 `SN-38-100`。
+      // ⇒ 正是本层最怕的形态：**标注层的每个数字都必须是真的**，而它是 0 也不报错。
+      // ⚠️ 同一仓库里**已经犯过一次**（`ontology/engine.ts` 的 `readMechRegistry`，
+      // 那里注释写着「顶层键找错 ⇒ entries = raw」）⇒ 抄同一判据，两个键都认。
+      const list = Array.isArray(raw.entries) ? raw.entries : Array.isArray(raw.msms) ? raw.msms : []
+      const names = list.map((m) => (typeof m?.name === 'string' ? m.name : '')).filter((n) => n !== '')
       if (names.length > 0) return [...new Set(names)].sort()
     } catch {
       /* 坏 JSON / 读不到 ⇒ 试下一个候选，最后空 */

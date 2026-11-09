@@ -40,7 +40,19 @@ function makeCcc(skills: string[], modeled: string[], msms: string[], trajectori
   }
   const ref = join(sk, 'home-serenity', 'references')
   mkdirSync(ref, { recursive: true })
-  writeFileSync(join(ref, 'mech-registry.json'), JSON.stringify({ msms: msms.map((name) => ({ name })) }))
+  // 🔴🔴 **必须用真实注册表形态**（`{version, description, entries:[…]}`）。
+  // 2026-11-09 的教训：夹具原本写的是 `{msms:[…]}` —— 一个**真实世界里不存在**的形态，
+  // 于是"只读 raw.msms"的实现全绿，而真机上 `counts.msm` 恒 0（图上写「0 工具」）。
+  // ⇒ 夹具与真身同形，是这条判据有判别力的**前提**（D274：改钉本意，不放宽到能过）。
+  // ⚠️ 真身形态见 `src/tools/msm/service.ts` 的 `parseRegistry` / `writeRegistry`。
+  writeFileSync(
+    join(ref, 'mech-registry.json'),
+    JSON.stringify({
+      version: 1,
+      description: 'MSM registry (managed by acc-msm / dsh-serenity-hooks)',
+      entries: msms.map((name) => ({ name, path: `.opencode/skills/x/scripts/${name}.ts` })),
+    }),
+  )
   for (const t of trajectories) mkdirSync(join(root, 'AGENT_SESSIONS', t), { recursive: true })
   // 归档区与日志区不是轨迹（与轨迹层同判据）
   mkdirSync(join(root, 'AGENT_SESSIONS', '_archived'), { recursive: true })
@@ -87,6 +99,39 @@ describe('scanVoyageLiveVocab：从 CCC 实况读词表', () => {
     const v = scanVoyageLiveVocab(root)
     expect(v.skills).toEqual(['a']) // 不受牵连
     expect(v.msms).toEqual([])
+  })
+
+  /**
+   * 🔴🔴 2026-11-09 真机首读抓到的缺陷（v1.127.1 回归）。
+   *
+   * 现象：真机蓝图标题栏显示 `SN-42-00` / `42 技能 / 0 工具`，而同一份资产 `file://`
+   * 直开（走构建期常量）显示 `SN-38-100`。**不是崩溃，是图上写了个假数字** ——
+   * 而这正是标注层最怕的形态（`§8c` 的硬约束是"每个数字都必须是真的"）。
+   *
+   * 根因：`scanMsmNames` 只读 `raw.msms`，真实注册表的顶层键却是 `entries`。
+   * ⚠️ 同一仓库里**已经犯过一次**（`ontology/engine.ts` 的 `readMechRegistry`，
+   * 注释写着「顶层键找错 ⇒ entries = raw」）⇒ 这是**漏修的第二处**。
+   *
+   * 🔴 为什么原来的夹具抓不到：它写 `{msms:[…]}` —— 真实世界里不存在的形态。
+   * ⇒ 本组**专门钉真实形态**，并做两个方向的检查（下面那条变异正控）。
+   */
+  it('🔴 真实注册表形态（`entries` 顶层键）下 MSM 数必须读得出来', () => {
+    makeCcc(['a'], [], ['msm-x', 'msm-y', 'msm-z'], [])
+    const v = scanVoyageLiveVocab(root)
+    expect(v.msms).toEqual(['msm-x', 'msm-y', 'msm-z'])
+    expect(v.counts.msm).toBe(3)
+    // 反向：绝不能是"读不到就静默 0" —— 那个 0 会原样写进图上
+    expect(v.counts.msm).not.toBe(0)
+  })
+
+  it('兼容旧/外部形态（顶层 `msms`）—— 两个键都认，且 entries 优先', () => {
+    makeCcc(['a'], [], [], [])
+    const p = join(root, '.opencode', 'skills', 'home-serenity', 'references', 'mech-registry.json')
+    writeFileSync(p, JSON.stringify({ msms: [{ name: 'legacy-only' }] }))
+    expect(scanVoyageLiveVocab(root).msms).toEqual(['legacy-only'])
+    // 两者都在 ⇒ entries 赢（v1 包装形是当前真身）
+    writeFileSync(p, JSON.stringify({ entries: [{ name: 'from-entries' }], msms: [{ name: 'from-msms' }] }))
+    expect(scanVoyageLiveVocab(root).msms).toEqual(['from-entries'])
   })
 })
 
