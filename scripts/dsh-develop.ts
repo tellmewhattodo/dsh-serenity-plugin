@@ -41,6 +41,31 @@ const GIT_SSH = process.env.GIT_SSH_COMMAND
 const GIT_SSH_GITHUB = process.env.GIT_SSH_COMMAND_GITHUB
   ?? `ssh -F /dev/null -i ${process.env.SERENITY_GITHUB_KEY ?? join(HOME_DIR, '.ssh', 'id_rsa_github')} -o IdentitiesOnly=yes -o HostName=ssh.github.com -o Port=443 -o StrictHostKeyChecking=accept-new`
 
+/**
+ * `pnpm` 的可执行路径 —— **解析成绝对路径，不用裸名**（2026-11-09 实测）。
+ *
+ * 🔴 **症状与成因**：`dsh-develop publish` 报「锁文件与 package.json 不一致 → 先跑 lockfile」，
+ * 而紧接着 `dsh-develop lockfile` 又只印一行 `pnpm install --lockfile-only` 就失败。
+ * 真相是 **`spawnSync('pnpm')` 拿到 `ENOENT`** —— 宿主进程的 `PATH` 里**没有 pnpm**
+ * （本机 pnpm 装在 `~/.local/bin/bin/pnpm`，而 `PATH` 只含 `~/.local/bin` 本级）。
+ * ⇒ **不是锁文件的问题，是解释器找不到**（D252 同族：读数器坏了 ≠ 被测对象坏了）。
+ *
+ * 口径与 `run-trajectory-test` 的 bun 一致：`SERENITY_PNPM` 可覆盖，否则按常见落点探测，
+ * 都没有才退回裸名（让 `run()` 如实抛 ENOENT，而不是静默走一条看似相关的失败路径）。
+ */
+const PNPM = ((): string => {
+  const override = process.env.SERENITY_PNPM
+  if (override !== undefined && override !== '') return override
+  for (const candidate of [
+    process.env.PNPM_HOME ? join(process.env.PNPM_HOME, 'pnpm') : '',
+    join(HOME_DIR, '.local', 'bin', 'bin', 'pnpm'),
+    join(HOME_DIR, '.local', 'share', 'pnpm', 'pnpm'),
+  ]) {
+    if (candidate !== '' && existsSync(candidate)) return candidate
+  }
+  return 'pnpm'
+})()
+
 // ── 工具 ──
 
 function run(cmd: string, args: string[], opts: { cwd?: string; env?: Record<string, string>; quiet?: boolean } = {}): { status: number; stdout: string; stderr: string } {
@@ -3200,7 +3225,7 @@ function cmdNpmInstallDev(argv: string[]): void {
   const args = ['install', '--store-dir', storeDir, '--save-dev']
   if (registry) args.push('--registry', registry)
   args.push(...pkgs)
-  const r = run('pnpm', args, {
+  const r = run(PNPM, args, {
     cwd: HOOKS_DIR,
     quiet: true,
   })
@@ -3228,7 +3253,7 @@ function cmdNpmInstallDev(argv: string[]): void {
  */
 function verifyLockfile(): void {
   const storeDir = join(HOOKS_DIR, '.pnpm-store')
-  const r = run('pnpm', ['install', '--lockfile-only', '--frozen-lockfile', '--store-dir', storeDir], { cwd: HOOKS_DIR, quiet: true })
+  const r = run(PNPM, ['install', '--lockfile-only', '--frozen-lockfile', '--store-dir', storeDir], { cwd: HOOKS_DIR, quiet: true })
   if (r.status !== 0) {
     console.error(r.stdout + r.stderr)
     fail('锁文件与 package.json 不一致 → 先跑 `dsh-develop lockfile` 并提交锁文件（否则安装/CI 会失败）', 2)
@@ -3259,7 +3284,7 @@ function cmdLockfile(): void {
   // 全局 store 与 hooks/.pnpm-store 冲突会 ERR_PNPM_UNEXPECTED_STORE）
   const storeDir = join(HOOKS_DIR, '.pnpm-store')
   console.log('[dsh-develop] ① pnpm install --lockfile-only（hooks，不动 node_modules）')
-  const r = run('pnpm', ['install', '--lockfile-only', '--store-dir', storeDir], { cwd: HOOKS_DIR, quiet: true })
+  const r = run(PNPM, ['install', '--lockfile-only', '--store-dir', storeDir], { cwd: HOOKS_DIR, quiet: true })
   if (r.status !== 0) {
     console.error(r.stdout + r.stderr)
     fail(`pnpm install --lockfile-only 失败 (exit ${r.status})`, 2)
