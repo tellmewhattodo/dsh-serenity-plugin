@@ -690,9 +690,17 @@ export function destroySlot(n: number, pidHint = 0): { killed: number[]; detail:
   }
   // 🔴 「我杀掉了」与「它本来就不在」必须分两行说 —— 否则台账清掉的是一次**不存在的回收**
   if (absent.length > 0) {
+    // ⚠️ 两种成因**不能合并成一句**（2026-11-10 真机实测当场抓出）：
+    //    · 「台账陈旧/被污染」= 那个 pid 本来就不存在（幽灵租约）
+    //    · 「连带退出」= Chrome 的子进程在我杀父进程的那几百毫秒里一起死了
+    //    第一版把 7 个子进程（父进程刚被杀）也写成"台账里那条是陈旧的"——
+    //    而那次台账**一点都不陈旧**，它记的是真租约。⇒ 判据：**归因要与读数相称**。
+    const hintAbsent = rejectedHint === 0 && absent.length === 1 && pidHint > 0 && absent[0] === pidHint
     parts.push(
-      `  ℹ️ 另有 ${absent.length} 个 pid（${absent.join(', ')}）**动手前就已不存在** ⇒ 未计入"已回收"` +
-        `（台账里那条是陈旧的）。`,
+      hintAbsent
+        ? `  ℹ️ 台账记的 pid ${absent[0]} **动手前就已不存在** ⇒ 未计入"已回收"（那条租约是陈旧的或被污染）。`
+        : `  ℹ️ 另有 ${absent.length} 个 pid（${absent.join(', ')}）在我逐个处置时**已经退出** ⇒ 未计入"已回收"。` +
+          `\n     成因多半是**连带退出**：它们与本槽位同一条进程树，先处置的那个已经带走了它们（⛔ 不是台账陈旧）。`,
     )
   }
   if (denied.length > 0) {

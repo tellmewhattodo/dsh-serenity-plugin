@@ -308,6 +308,23 @@ describe('🔴 按 profile 认领（认错就会杀掉 user 自己的浏览器�
     }
   })
 
+  it('㉝ 🔴 `absent` 的**归因**要分两档：台账陈旧 vs 连带退出（⛔ 合并成一句会归错因）', () => {
+    // 判据来源 = 2026-11-10 真机实测：`release b1` 回执写
+    //   「另有 7 个 pid…**动手前就已不存在**（台账里那条是陈旧的）」——
+    //   而那 7 个是 Chrome 的**子进程**，在父进程被杀时一起退出；台账**一点都不陈旧**。
+    // ⇒ 判据：**归因必须与读数相称**。同一个 `absent` 桶里有两个成因，措辞不能只有一个。
+    //
+    // 档一：pidHint 自己就不存在（幽灵租约）⇒ 说"陈旧/被污染"
+    const phantom = destroySlot(6, 999_999_999)
+    expect(phantom.detail).toContain('陈旧')
+    expect(phantom.detail).not.toContain('连带退出')
+
+    // 档二：pidHint 是本进程（存在、但不属于这个 profile）⇒ 说"未被杀死"而不是"陈旧"
+    const rejected = destroySlot(7, process.pid)
+    expect(rejected.detail).toContain('未被杀死')
+    expect(existsSync(`/proc/${process.pid}`)).toBe(true) // 副作用：我们没被杀
+  })
+
   it('㉜ 🔴 「`/proc/<pid>` 存在」与「进程活着」不是同一件事（僵尸档）', async () => {
     // 判据来源：本文件 ㉛ 第一次跑就红在 `expected 'denied' to be 'killed'`。
     //   真因 = 我们杀掉的子进程成了僵尸（父进程还没 wait），`/proc/<pid>` **仍存在**
