@@ -225,6 +225,29 @@ export async function closeTab(slot: number, targetId: string, all = false): Pro
   }
 }
 
+/**
+ * 真实鼠标点击（CDP `Input.dispatchMouseEvent`）。
+ *
+ * 🔴 **为什么不用 `el.click()`**：它只派发一次合成 `click`，**不产生 pointerdown/mousedown/mouseup**，
+ *    也不做命中测试。React/Vue 之外的大量组件库（含 `choerodon-ui`、多数下拉/浮层）
+ *    监听的是 `pointerdown`/`mousedown` ⇒ 用 `el.click()` 会得到"脚本执行成功、界面毫无反应"，
+ *    而那正是最难查的一种——**没报错，也没发生**。
+ *
+ * 🔴 顺序与坐标：`mouseMoved` → `mousePressed` → `mouseReleased`，三次同一坐标。
+ *    ⛔ 不发 `mousePressed` 就发 `mouseReleased` 会被 Chrome 丢弃（且**不报错**）。
+ */
+export async function clickAt(slot: number, targetId: string, x: number, y: number): Promise<void> {
+  const conn = attach(await wsConnect(await pageWsUrl(slot, targetId)))
+  try {
+    const base = { x, y, button: 'left' as const, clickCount: 1 }
+    await cdpRaw(conn, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
+    await cdpRaw(conn, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
+    await cdpRaw(conn, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
+  } finally {
+    conn.ws.close()
+  }
+}
+
 /** 正文（`document.body.innerText`） */
 export async function pageText(slot: number, targetId: string): Promise<string> {
   const v = await evalInPage(slot, targetId, "document.body ? document.body.innerText : ''")

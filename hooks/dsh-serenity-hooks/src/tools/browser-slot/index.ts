@@ -36,6 +36,8 @@ import {
   slotShot,
   slotStatus,
   slotTargets,
+  resolveTarget,
+  slotClick,
   slotText,
   waitSlotReady,
   type SlotAction,
@@ -97,6 +99,39 @@ function needSlot(args: Record<string, unknown>): number {
     )
   }
   return n
+}
+
+/**
+ * 解析「要操作哪个 target」——`--target`（身份）或 `--match`（子串线索）二选一。
+ *
+ * 🔴 判据在 `browser/target-pick.ts`（0 命中不猜 / 多命中不猜 / 身份优先于线索）。
+ *    这里只负责**把拒绝翻成人话**：多命中时把候选列全，让调用方一次就能改对。
+ */
+async function needTarget(
+  root: string,
+  n: number,
+  sessionId: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  const target = str(args.target)
+  const match = str(args.match)
+  if (!target && !match) {
+    throw new Error(
+      `⛔ 需要 --target=<targetId> 或 --match=<URL/标题子串>（先跑 targets 看清有什么）。\n` +
+        `  ⇒ --match 是子串匹配，命中唯一才动手；命中多个会拒绝并列全候选。`,
+    )
+  }
+  return resolveTarget(root, n, sessionId, { target, match })
+}
+
+/** 解析 `--xy=x,y`（也接受 `x y`）。⛔ 非有限数、负数一律当没给 —— 越界坐标会让点击落到别处。 */
+function parseXY(raw: string | undefined): { x: number; y: number } | undefined {
+  if (!raw) return undefined
+  const parts = raw.split(/[,\s]+/).filter(Boolean)
+  if (parts.length !== 2) return undefined
+  const x = Number(parts[0])
+  const y = Number(parts[1])
+  return Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 ? { x, y } : undefined
 }
 
 /** 取字符串参数（空串当没给） */
@@ -219,53 +254,63 @@ async function run(
     }
     case 'goto': {
       const n = needSlot(args)
-      const target = str(args.target)
       const url = str(args.url)
-      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
       if (!url) return '⛔ 需要 --url=<地址>'
+      const target = await needTarget(root, n, sessionId, args)
       await slotGoto(root, n, sessionId, target, url)
       return `[browser_slot] navigate ${target} → ${url}`
     }
     case 'eval': {
       const n = needSlot(args)
-      const target = str(args.target)
       const js = str(args.js)
-      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      const target = await needTarget(root, n, sessionId, args)
       if (!js) return '⛔ 需要 --js=<表达式>（例如 document.title）'
       const v = await slotEval(root, n, sessionId, target, js, num(args.timeout))
       return typeof v === 'string' ? v : JSON.stringify(v, null, 2)
     }
     case 'text': {
       const n = needSlot(args)
-      const target = str(args.target)
-      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      const target = await needTarget(root, n, sessionId, args)
       return await slotText(root, n, sessionId, target)
     }
     case 'html': {
       const n = needSlot(args)
-      const target = str(args.target)
-      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      const target = await needTarget(root, n, sessionId, args)
       return await slotHtml(root, n, sessionId, target, num(args.max))
     }
     case 'shot': {
       const n = needSlot(args)
-      const target = str(args.target)
-      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      const target = await needTarget(root, n, sessionId, args)
       const out = str(args.out) ?? `_tmp/browser-shots/shot-${target.slice(0, 8)}-${Date.now()}.png`
       const rel = await slotShot(root, n, sessionId, target, out)
       return `[browser_slot] shot → ${rel}`
     }
     case 'reload': {
       const n = needSlot(args)
-      const target = str(args.target)
-      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      const target = await needTarget(root, n, sessionId, args)
       const state = await slotReload(root, n, sessionId, target, str(args.script))
       return `[browser_slot] reload 完成（readyState=${state || '?'}）`
+    }
+    case 'click': {
+      const n = needSlot(args)
+      const target = await needTarget(root, n, sessionId, args)
+      const text = str(args.text)
+      const xy = parseXY(str(args.xy))
+      if (!text && !xy) {
+        return '⛔ 需要 --text=<按钮可见文字> 或 --xy=<x,y>（例如 --text=登录 ／ --xy=320,48）'
+      }
+      const { picked } = await slotClick(root, n, sessionId, target, { text, xy })
+      // ⚠️ 回执只说"点了什么"，⛔ 不说"点成功了" —— 界面该变成什么样由调用方判断
+      return xy
+        ? `[browser_slot] clicked @${xy.x},${xy.y}（坐标直给；未做命中校验）`
+        : `[browser_slot] clicked <${picked.tag}> "${picked.text.slice(0, 60)}" @${picked.x},${picked.y}`
     }
     case 'close': {
       const n = needSlot(args)
       const all = args.all === true
-      const closed = await slotClose(root, n, sessionId, str(args.target) ?? '', all)
+      // --all 时不需要点名 target（全关）；否则按同一套 --target/--match 规则解析
+      const target = all ? '' : await needTarget(root, n, sessionId, args)
+      const closed = await slotClose(root, n, sessionId, target, all)
       return `[browser_slot] closed ${closed.join(', ')}`
     }
     // ── ③ 扩展层 ─────────────────────────────────────────────────
@@ -321,7 +366,8 @@ export function createBrowserSlotTool(ctx: Context) {
       //    不由 execute 里的 `args.x` 决定 —— 后者只有读过源码的人才知道。
       //    ⛔ 不靠"文档里写了"补这一格：文档是给人看的，schema 是给调用方看的。
       url: { type: 'string', description: 'open / goto: the address to open or navigate to (http(s)://…)' },
-      target: { type: 'string', description: 'goto / eval / text / html / shot / reload / close: the targetId from `targets` (⛔ not a slot number)' },
+      target: { type: 'string', description: 'goto / eval / text / html / shot / reload / close: the targetId from `targets` (⛔ not a slot number). Identity — beats `match` when both given' },
+      match: { type: 'string', description: 'goto / eval / text / html / shot / reload / close: URL or title SUBSTRING (case-insensitive) instead of a targetId — saves the `targets` round-trip. Refuses unless exactly ONE page matches; on ambiguity it lists the candidates instead of guessing' },
       js: { type: 'string', description: 'eval: a JavaScript expression to evaluate in the page (e.g. document.title); uses Runtime.evaluate' },
       out: { type: 'string', description: 'shot: output path for the PNG, relative to the CCC root. Omit = auto-named under _tmp/browser-shots/' },
       max: { type: 'number', description: 'html: truncate the returned HTML after this many characters' },
@@ -331,6 +377,8 @@ export function createBrowserSlotTool(ctx: Context) {
       // 若声明成 object 会诱导调用方传 {"k":"true"}，然后在扩展里静默变成字符串 "true"。
       earg: { type: 'array', items: { type: 'string' }, description: 'ext: repeatable key=value pairs passed to the extension as strings (e.g. ["city=Suzhou"])' },
       timeout: { type: 'number', description: 'eval: evaluate timeout in milliseconds' },
+      text: { type: 'string', description: 'click: visible-text SUBSTRING of the element to click (matched against rendered text + value + aria-label + title). Refuses when 0 or >1 elements match, or the single hit is disabled/zero-size/pointer-events:none — never guesses, because a wrong click has already happened' },
+      xy: { type: 'string', description: 'click: "x,y" viewport coordinates to click instead of --text (no hit-testing; the receipt says so). ⛔ Omit both text and xy = refused' },
       script: { type: 'string', description: 'reload: a script to run after the reload completes' },
     },
     output: {

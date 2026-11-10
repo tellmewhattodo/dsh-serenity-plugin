@@ -42,6 +42,7 @@ import {
   type ProcSample,
 } from './process.js'
 import {
+  clickAt,
   closeTab,
   evalInPage,
   listTargets,
@@ -63,6 +64,8 @@ import {
   type ExtEntry,
   type ExtRunResult,
 } from './extend.js'
+import { pickTarget, renderHits } from './target-pick.js'
+import { COLLECT_CLICKABLE, pickClickable, renderClickables, type Clickable } from './click-target.js'
 
 /**
  * 动作枚举（对外暴露的唯一清单）
@@ -95,6 +98,7 @@ export const SLOT_ACTIONS = [
   'shot',
   'reload',
   'close',
+  'click',
   // ③ 扩展层
   'ext-list',
   'ext',
@@ -112,6 +116,7 @@ export const ACTIONS_NEED_SLOT: ReadonlySet<SlotAction> = new Set<SlotAction>([
   'shot',
   'reload',
   'close',
+  'click',
   'ext',
 ])
 
@@ -659,6 +664,109 @@ export function assertSlotOwned(root: string, slot: number, sessionId: string): 
 /** 把页面上一次成功的操作推进 lastActionAt（这就是"长期不动作"判据的来源） */
 function pageTouched(root: string, slot: number): void {
   touchSlot(root, slot)
+}
+
+/**
+ * 解析「要操作哪个 target」——`--target`（身份）或 `--match`（子串线索）二选一。
+ *
+ * 🔴 **为什么必须有这一层**：`--match` 之前，用户要先跑 `targets` 抄一个 32 位 id 再回来
+ *    （owner 2026-11-10 反馈：`msm cdp shot --match` 少一步，`browser_slot` 非要先取 targetId）。
+ *    但"少一步"的代价必须由**判定**承担，不能由"猜"承担 —— 见 `target-pick.ts` 的四条判据。
+ *
+ * 🔴 **判据优先级**：`--target` 在则不读 `--match`（身份 > 线索）。
+ *    ⛔ 不做"给了 target 找不到就回落到 match" —— 那会把打错的 id 变成"恰好相符的另一个页面"。
+ *
+ * @returns 解析好的 targetId（**唯一**），或抛出可读错误（0 命中 / 多命中都把候选列全）
+ */
+export async function resolveTarget(
+  root: string,
+  slot: number,
+  sessionId: string,
+  opts: { target?: string; match?: string },
+): Promise<string> {
+  if (!opts.target && !opts.match) {
+    throw new Error(
+      `⛔ 需要 --target=<targetId> 或 --match=<URL 或标题子串>。\n` +
+        `  ⇒ 先 \`browser_slot targets --slot b1\` 看有什么，或直接给 --match=example.com`,
+    )
+  }
+  // 身份直通：⛔ 不去列 targets（少一次 CDP 往返，也避免"列的时候恰好变了"）
+  if (opts.target) return opts.target
+
+  const list = await slotTargets(root, slot, sessionId)
+  const res = pickTarget(list, { match: opts.match })
+  if (res.ok) return res.target.id
+  const pages = list.filter((t) => t.type === 'page')
+  if (res.reason === 'not-found') {
+    throw new Error(
+      `⛔ 没有页面匹配「${opts.match}」（匹配 url 或 title，大小写不敏感）。\n` +
+        `  ⇒ 当前 ${pages.length} 个页面：\n${renderHits(pages)}`,
+    )
+  }
+  // ambiguous
+  throw new Error(
+    `⛔ 「${opts.match}」匹配到 ${res.hits.length} 个页面 —— 拒绝替你选一个（选错会产出一张"看起来对、内容却属于别人"的图）。\n` +
+      `  ⇒ 换个更长的子串，或用 --target=<id> 点名：\n${renderHits(res.hits)}`,
+  )
+}
+
+/**
+ * 语义化点击：`--text` 子串或 `--xy` 坐标。
+ *
+ * 🔴 判定在 `click-target.ts`（0 命中/多命中/不可点 **全部拒绝**）。
+ *    这一层只做两件它必须做的事：**采集**（跑一次 `COLLECT_CLICKABLE`）与**执行**（真鼠标事件）。
+ *
+ * ⚠️ **返回的是"点了什么"**，不是"点成功了"。⛔ 不在这里等界面变化 ——
+ *    等多久、等什么，属于调用方的判断（本工具不知道这个按钮应该产生什么后果）。
+ */
+export async function slotClick(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  opts: { text?: string; xy?: { x: number; y: number } },
+): Promise<{ picked: Clickable; total: number }> {
+  assertSlotOwned(root, slot, sessionId)
+  if (!opts.text && !opts.xy) {
+    throw new Error('⛔ 需要 --text=<按钮可见文字> 或 --xy=<x,y>（先 targets 拿 targetId）')
+  }
+
+  // 坐标直通：不必采集整页（省一次大对象往返），直接点
+  if (opts.xy) {
+    await clickAt(slot, targetId, opts.xy.x, opts.xy.y)
+    pageTouched(root, slot)
+    return {
+      picked: { tag: '', type: '', text: '', role: '', ...opts.xy, w: 0, h: 0, disabled: false, pointerNone: false, download: false },
+      total: 0,
+    }
+  }
+
+  const raw = await evalInPage(slot, targetId, COLLECT_CLICKABLE, 15_000)
+  const list = Array.isArray(raw) ? (raw as Clickable[]) : []
+  const res = pickClickable(list, { text: opts.text })
+  if (!res.ok) {
+    const visible = list.filter((e) => e.w > 0 && e.h > 0)
+    if (res.reason === 'ambiguous') {
+      throw new Error(
+        `⛔ 「${opts.text}」匹配到 ${res.hits.length} 个可点元素 —— 拒绝替你选（点错是已经发生的事，不会自己撤销）。\n` +
+          `  ⇒ 换个更长的文字，或用 --xy=<x,y> 点名：\n${renderClickables(res.hits)}`,
+      )
+    }
+    if (res.reason === 'not-clickable') {
+      throw new Error(
+        `⛔ 「${opts.text}」找到了，但${res.why}。\n` +
+          `  ⇒ 这不是"尽力点一下"的场合：点了没反应与没点，在读数上一样。\n${renderClickables(res.hits)}`,
+      )
+    }
+    throw new Error(
+      `⛔ 页面上没有可点元素匹配「${opts.text}」（匹配渲染后的可见文本，含 value/aria-label/title）。\n` +
+        `  ⇒ 当前 ${visible.length} 个可见可点元素：\n${renderClickables(visible)}`,
+    )
+  }
+
+  await clickAt(slot, targetId, res.el.x, res.el.y)
+  pageTouched(root, slot)
+  return { picked: res.el, total: list.length }
 }
 
 /** 列当前槽位上的 targets */
