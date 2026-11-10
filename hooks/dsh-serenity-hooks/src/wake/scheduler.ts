@@ -596,7 +596,29 @@ export async function createAndBindTarget(
    * ⚠️ `reconstruct` 与 `rebuild` 是**唯二**该传 `true` 的调用方：它们都是"载体换代"这个
    * 显式声明的动作。静默换代正是"一条轨迹长出两个载体"的成因（见 `bind-file.ts` 头注）。
    */
-  opts: { takeover?: boolean } = {},
+  opts: {
+    takeover?: boolean
+    /**
+     * 🆕 **2026-11-10（owner 报障「这个东西不应当排队，应当直接进」）：把手上的继续锚点插在
+     * 开场白**之前**。**
+     *
+     * 🔴 **缺陷现场**（platform-9047，真日志）：换代时先投开场白（`followup` ⇒ `next-turn`），
+     * 再投继续锚点（也是 `followup` ⇒ `next-turn`）—— 而宿主 `inbox.claim('next-turn', …)`
+     * **每个 turn 只认领 1 条**（`core/agent/src/inbox.ts`）。⇒ 新载体的**第 1 轮只拿到开场白**，
+     * 而开场白的正文就是「接着它 SESSION.md 里的工作往下做」⇒ 模型**在读到锚点之前就开始干活**，
+     * 锚点则在排队区里等到第 2 轮才被认领（owner 截图里那条被红框圈住的就是它）。
+     *
+     * ⇒ 顺序必须是「锚点进 `next-step` → 再投开场白（`next-turn`）」：`claim` 的返回顺序是
+     *   **`next-step` 全部在前、`next-turn` 取 1 条在后** ⇒ 第 1 轮第 1 步同时拿到
+     *   `[锚点, 开场白]`，**锚点在前**。这才叫"直接进"。
+     *
+     * ⚠️ 回调里做什么由换代方决定（它才知道自己那条 `Injection` 怎么声明）——
+     * 本函数**不引入 Injection 的知识**（否则两个模块会互相依赖）。
+     * ⚠️ 回调抛错**不阻断**建会话：锚点没插上是大问题，但"会话建了却没投递"更坏；
+     * 失败原因写进回执，不静默。
+     */
+    beforeOpening?: (agent: Agent) => void
+  } = {},
 ): Promise<{ agent: Agent; how: string } | { error: string; notReady?: boolean }> {
   const sc = hostService<HostSessionController>(ctx, 'sessionController')
   const create = sc?.create
@@ -651,6 +673,23 @@ export async function createAndBindTarget(
       alive: hostAliveProbe(ctx),
     },
   )
+  // ③b′ 🔴 **先插继续锚点（`next-step`），再投开场白（`next-turn`）** —— owner 2026-11-10 报障。
+  //    ⚠️ **顺序不可换**：宿主 `claim()` 先整批取 `next-step`、再取 1 条 `next-turn`
+  //    ⇒ 这样第 1 轮第 1 步拿到的是 `[锚点, 开场白]`，**锚点在前**。
+  //    反过来（先开场白）时，`next-turn` 每轮只认领 1 条 ⇒ 第 1 轮只拿到开场白，
+  //    而开场白正文本身就是"接着往下干" ⇒ 模型在**读到锚点之前**就开工，锚点排队到第 2 轮。
+  //    真机读数：platform-9047 换代后 seq 12（next-turn）是开场白、seq 76（next-step）才是锚点，
+  //    owner 截图里被红框圈住的那条"排队中的 REBUILD"就是它。
+  let preOpeningNote = ''
+  if (opts.beforeOpening !== undefined) {
+    try {
+      opts.beforeOpening(agent)
+      preOpeningNote = ', anchor-first'
+    } catch (err) {
+      // 不阻断：锚点没插上是真问题，但"会话建了却没投递"更坏 ⇒ 出声，不静默。
+      preOpeningNote = `, ⚠️ 锚点前置失败（${String((err as Error)?.message ?? err)}）`
+    }
+  }
   // ③b 🔴 **投一条"用户形态"开场白**（D171 / owner 裁 B）。
   //
   // 为什么必须做：宿主的自动命名与 `titleInput` 投影只认 `source.kind === 'user'`。
@@ -703,7 +742,7 @@ export async function createAndBindTarget(
   //    走 `workspaceId` 分支时宿主已经挂好了（= 用户那条路），这里只是幂等确认、不产生写。
   const wsNote = workspaceId !== undefined ? '' : await attachToWorkspace(ctx, root, sessionId)
   const viaNote = workspaceId !== undefined ? ', via-workspaceId(=用户同一形态)' : ', via-cwd+attach'
-  const how = `auto-create(${sessionId}${bound.ok ? ', bound' : `, ⚠️ 绑定写入失败（${bound.code}）`}${viaNote}${openingNote}${titleNote}${wsNote})`
+  const how = `auto-create(${sessionId}${bound.ok ? ', bound' : `, ⚠️ 绑定写入失败（${bound.code}）`}${viaNote}${preOpeningNote}${openingNote}${titleNote}${wsNote})`
   return { agent, how }
 }
 

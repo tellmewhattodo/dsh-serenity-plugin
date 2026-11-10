@@ -84,7 +84,7 @@ import { basename, dirname, join } from 'node:path'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { hostService } from '../host/access.js'
 import { agentCwdFor, cccRootForCwd } from '../kernel/ccc-roots.js'
-import { makeInjection, deliver } from '../kernel/injection.js'
+import { makeInjection, toMessage } from '../kernel/injection.js'
 import { isoLocal } from '../kernel/time.js'
 import { compareSemver } from '../host/contract.js'
 import { readDshVersion } from '../surface/status.js'
@@ -405,7 +405,44 @@ export async function performReconstruct(
   pending: PendingReconstruct,
 ): Promise<string> {
   const dirName = basename(dirname(pending.mdPath))
-  const created = await createAndBindTarget(ctx, root, dirName, { takeover: true })
+  /**
+   * 🔴 **2026-11-10（owner 报障「这个东西不应当排队，应当直接进」）：锚点必须在开场白之前入队。**
+   *
+   * 真机缺陷（platform-9047 换代日志，逐字）：`seq 12` 是**开场白**落在 `next-turn`，
+   * `seq 76` 才是**继续锚点**（也是 `next-turn`）⇒ 宿主 `inbox.claim('next-turn', …)`
+   * **每轮只认领 1 条** ⇒ 第 1 轮只拿到开场白，而开场白正文写的就是"接着它 SESSION.md 里的
+   * 工作往下做" ⇒ **模型在读到锚点之前就开始干活**，锚点在排队区等到第 2 轮。
+   *
+   * ⇒ 修法：锚点走 `agent.inject()`（`next-step`，**不唤醒**），开场白仍走 `followup`。
+   * `claim()` **先整批取 `next-step` 再取 1 条 `next-turn`** ⇒ 第 1 轮第 1 步拿到
+   * `[锚点, 开场白]`，锚点在前 —— 这才叫"直接进"。
+   *
+   * ⚠️ **`inject` 不是 `steer`**：`inject` = `send(msg,'next-step',false)`（不唤醒），
+   * 正是我们要的（唤醒由开场白那条 `followup` 负责，一条消息只唤醒一次）。
+   * 用 `steer` 会多唤一次，且语义上"插进正在跑的轮"在这里不成立（新 agent 没有在跑的轮）。
+   */
+  const created = await createAndBindTarget(ctx, root, dirName, {
+    takeover: true,
+    beforeOpening: (a) => {
+      /**
+       * ⚠️ **必须用 `toMessage` ＋ `agent.inject`，⛔ 不能用 `deliver(…, 'this-step')`** ——
+       * `deliver()` 对 `this-step` 是**显式抛错**的（那一档走 `additionalContexts` 返回，
+       * 不是调 agent 方法；见 `kernel/injection.ts` 的 `deliver` 头注）。这里要的正是
+       * 调 agent 方法，故走 `toMessage` 那一半（它同样过 `assertInjection` ＋ `sourceOf`）。
+       */
+      (a as unknown as { inject?: (msg: unknown) => void }).inject?.(
+        toMessage(
+          makeInjection({
+            origin: 'acc',
+            form: 'instructions',
+            summary: 'reconstruct 后继续',
+            text: pending.anchor,
+            delivery: 'this-step',
+          }),
+        ),
+      )
+    },
+  })
   if ('error' in created) {
     throw new Error(`创建新载体失败：${created.error}`)
   }
@@ -425,18 +462,9 @@ export async function performReconstruct(
   } catch {
     /* 标题是观感，失败不阻断换代（与 rebuild 同口径） */
   }
-  // ③ 继续锚点投给**新**会话。`next-turn`（followup）而不是 `wake-now`（steer）：
-  //    新 agent 刚被开场白排上队，steer 的语义前提（"目标在跑，把话插进当前轮"）在这里不成立。
-  deliver(
-    makeInjection({
-      origin: 'acc',
-      form: 'instructions',
-      summary: 'reconstruct 后继续',
-      text: pending.anchor,
-      delivery: 'next-turn',
-    }),
-    agent as unknown as { followup?: (msg: unknown) => void },
-  )
+  // ③ 继续锚点**已经在 ③b′ 投过了**（`beforeOpening` 回调里，走 `next-step`）。
+  //    ⛔ **不要在这里再投一次** —— 那会让同一个锚点在 `next-step` 与 `next-turn` 各有一份，
+  //    模型连续两轮收到同一份"继续"指令（实测代价见 `beforeOpening` 的注释）。
   writeReconstructDiag(root, {
     sessionId: newSessionId,
     event: 'rebuilt',
