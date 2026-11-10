@@ -28,27 +28,99 @@ import {
   type SlotPolicy,
   type SlotState,
 } from './state.js'
-import { listLeases, withLedger, readLedger, type Ledger } from './ledger.js'
+import { listLeases, withLedger, readLedger, ledgerPath, type Ledger } from './ledger.js'
 import {
+  clearSlotIdentity,
   destroySlot,
   launchSlot,
   findPidsByProfile,
+  readSlotIdentity,
   sampleProcTree,
   slotPaths,
   waitCdp,
+  writeSlotIdentity,
   type ProcSample,
 } from './process.js'
+import {
+  closeTab,
+  evalInPage,
+  listTargets,
+  navigate,
+  openTab,
+  pageHtml,
+  pageText,
+  reloadPage,
+  resolveShotPath,
+  screenshot,
+  type CdpTarget,
+} from './cdp.js'
+import {
+  EXT_DIR_REL,
+  buildExtPayload,
+  findExtension,
+  listExtensions,
+  runExtension,
+  type ExtEntry,
+  type ExtRunResult,
+} from './extend.js'
 
-/** 动作枚举（对外暴露的唯一清单） */
-export const SLOT_ACTIONS = ['acquire', 'release', 'list', 'status', 'reap', 'doctor'] as const
+/**
+ * 动作枚举（对外暴露的唯一清单）
+ *
+ * 🔴 v1.129.0（owner 2026-11-10 令「所有浏览器能力都集中到这个 browser_slot」）：
+ *    **前 6 个管槽位，后 9 个管页面，最后 2 个管扩展** —— 三组各归一层，⛔ 不混。
+ *
+ *    分组不是装饰：它们失效的面完全不同（槽位层看进程/端口，页面层看 CDP，
+ *    扩展层看子进程）。一个读数在哪个组里，决定了它坏了该往哪儿查。
+ *
+ * ⚠️ 页面组**必须带 `--slot`**（⛔ 不用裸端口）：槽位号是循环复用的，
+ *    裸端口会让「这是谁的浏览器」变成一个隐含状态。
+ *    先例 `browser` MSM 收 `--port=` —— 那正是它和槽位体系断开的那个口子。
+ */
+export const SLOT_ACTIONS = [
+  // ① 槽位层
+  'acquire',
+  'release',
+  'list',
+  'status',
+  'reap',
+  'doctor',
+  // ② 页面层（CDP）—— 全部要求 --slot
+  'targets',
+  'open',
+  'goto',
+  'eval',
+  'text',
+  'html',
+  'shot',
+  'reload',
+  'close',
+  // ③ 扩展层
+  'ext-list',
+  'ext',
+] as const
 export type SlotAction = (typeof SLOT_ACTIONS)[number]
+
+/** 哪些动作需要 `--slot`（页面层 + ext 需要，槽位层不需要） */
+export const ACTIONS_NEED_SLOT: ReadonlySet<SlotAction> = new Set<SlotAction>([
+  'targets',
+  'open',
+  'goto',
+  'eval',
+  'text',
+  'html',
+  'shot',
+  'reload',
+  'close',
+  'ext',
+])
 
 /** 一次采样缓存（进程内）：CPU 是增量读数，必须有上一次才成立 */
 const sampleCache = new Map<number, ProcSample>()
 
 /** 按 profile 目录采一次样（有 prev 才给出瞬时 CPU） */
 function readProcFor(root: string, n: number, now: number, pidHint = 0): ProcSample {
-  const paths = slotPaths(root, n)
+  const paths = slotPaths(n)
   const pids = findPidsByProfile(paths.profile)
   const prev = sampleCache.get(n) ?? null
   const cur = sampleProcTree(pids, prev, now)
@@ -144,18 +216,23 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
   const now = Date.now()
 
   // ① 同会话复用（防"租了两个只 release 一个"这种静默泄漏）
-  const existing = findLeaseBySession(listLeases(readLedger(input.root)), input.sessionId)
+  const existing = findLeaseBySession(listLeases(readLedger()), input.sessionId)
   if (existing && input.sessionId !== '') {
     const launched = ensureRunning(input.root, existing.slot, existing.pid)
     if (launched.ok) {
-      withLedger(input.root, (lg) => {
+      withLedger((lg) => {
         const cur = lg.leases[String(existing.slot)]
         if (cur) {
           cur.pid = launched.pid || cur.pid
           cur.lastActionAt = now
+          // 旧版租约（v1.128.x 及以前）没有 cccRoot / 也没有 identity.json
+          if (!cur.cccRoot) cur.cccRoot = input.root
         }
         return { ledger: lg, result: null }
       })
+      // 复用同样补写身份：否则"这个 profile 属于谁"只在台账里，
+      // 而旧租约正是从"台账有、profile 无"那一代过来的。
+      stampIdentity(input.root, existing.slot, existing.sessionId, existing.trajectory, existing.leasedAt)
     }
     return {
       ok: launched.ok,
@@ -170,7 +247,7 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
   }
 
   // ② 选址 + 落账（在锁内完成，防两条轨迹抢同一个空槽）
-  const picked = withLedger(input.root, (lg) => {
+  const picked = withLedger((lg) => {
     const leases = listLeases(lg)
     const free = input.want && input.want > 0 ? input.want : pickFreeSlot(leases)
     if (free === 0) return { ledger: lg, result: 0 }
@@ -180,6 +257,7 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
     }
     lg.leases[String(free)] = {
       slot: free,
+      cccRoot: input.root,
       sessionId: input.sessionId,
       trajectory: input.trajectory,
       leasedAt: now,
@@ -215,7 +293,7 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
 
   const n = picked
   const launched = ensureRunning(input.root, n, 0)
-  withLedger(input.root, (lg) => {
+  withLedger((lg) => {
     const cur = lg.leases[String(n)]
     if (cur) cur.pid = launched.pid || 0
     return { ledger: lg, result: null }
@@ -224,12 +302,16 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
   const r = SLOT_RESOLUTION(n)
   if (!launched.ok) {
     // 启动失败 ⇒ **立即释放**，⛔ 不留一个"已占用但没进程"的孤儿记录
-    withLedger(input.root, (lg) => {
+    withLedger((lg) => {
       delete lg.leases[String(n)]
       return { ledger: lg, result: null }
     })
+    // 身份也没必要留（本次租约从未成立）—— 但**不清 profile**，那是槽位的资产
+    clearSlotIdentity(n)
     return { ok: false, slot: n, state: 'free', reused: false, detail: launched.detail }
   }
+
+  stampIdentity(input.root, n, input.sessionId, input.trajectory, now)
 
   return {
     ok: true,
@@ -246,14 +328,14 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
 
 /** 启动退避：连续失败按指数推迟（G9）。返回 0 = 可以尝试，>0 = 还需等待的毫秒 */
 function backoffWaitMs(root: string, n: number, now: number): number {
-  const b = readLedger(root).backoff[String(n)]
+  const b = readLedger().backoff[String(n)]
   if (!b || b.failures === 0) return 0
   return Math.max(0, b.nextAt - now)
 }
 
 /** 记一次启动失败（推下次允许时刻） */
 function noteLaunchFailure(root: string, n: number): number {
-  return withLedger(root, (lg) => {
+  return withLedger((lg) => {
     const cur = lg.backoff[String(n)] ?? { failures: 0, nextAt: 0 }
     const failures = cur.failures + 1
     // 指数退避：30s, 60s, 120s, 240s… 上限 10 分钟（槽位是稀缺资源，⛔ 不能永久封死）
@@ -265,7 +347,7 @@ function noteLaunchFailure(root: string, n: number): number {
 
 /** 启动成功 ⇒ 清零退避 */
 function clearLaunchFailure(root: string, n: number): void {
-  withLedger(root, (lg) => {
+  withLedger((lg) => {
     delete lg.backoff[String(n)]
     return { ledger: lg, result: null }
   })
@@ -273,7 +355,7 @@ function clearLaunchFailure(root: string, n: number): void {
 
 /** 确保槽位进程在跑（内部）：不在则起 + 等就绪 */
 function ensureRunning(root: string, n: number, pidHint: number): { ok: boolean; pid: number; detail: string } {
-  const paths = slotPaths(root, n)
+  const paths = slotPaths(n)
   const live = findPidsByProfile(paths.profile)
   if (live.length > 0) {
     return { ok: true, pid: live[0]!, detail: `槽位 ${slotLabel(n)} 进程已在（pid ${live[0]}）` }
@@ -292,7 +374,7 @@ function ensureRunning(root: string, n: number, pidHint: number): { ok: boolean;
         `  ⇒ 先查根因：\`browser_slot doctor\` 看 pidDrift 与日志路径；或换一个槽位。`,
     }
   }
-  const launched = launchSlot(root, n)
+  const launched = launchSlot(n)
   if (!launched.ok) {
     const w = noteLaunchFailure(root, n)
     return {
@@ -310,9 +392,44 @@ export async function waitSlotReady(root: string, n: number): Promise<{ ok: bool
   return await waitCdp(root, n)
 }
 
+/**
+ * 把归属**同时**写进两处：台账（权威）＋ `identity.json`（profile 侧冗余）。
+ *
+ * 🔴 owner 2026-11-10 令：「每个槽位的浏览器 profile 里加点标识」。
+ *    判据：**资源的归属必须在"资源自己身上"也能被读出来** —— 只靠台账回答归属，
+ *    会让"台账坏了/读了一半"与"槽位无主"在读数上完全同形（D253 同族）。
+ * ⚠️ 两处不一致时**以台账为准**；identity 是抓手，不是第二个真相源。
+ */
+function stampIdentity(
+  root: string,
+  n: number,
+  sessionId: string,
+  trajectory: string,
+  leasedAt: number,
+): void {
+  try {
+    writeSlotIdentity({
+      slot: n,
+      label: slotLabel(n),
+      port: slotPort(n),
+      cccRoot: root,
+      sessionId,
+      trajectory,
+      leasedAt,
+      writtenAt: 0, // writeSlotIdentity 自己盖时刻
+    })
+  } catch (err) {
+    // ⚠️ 写 identity 失败**不许**让 acquire 失败：台账已经记了这次租约，那才是权威。
+    //    但必须留声 —— 静默吞掉会让"标识没写上"与"标识写了但内容空"同形。
+    console.warn(
+      `[serenity-hooks] ⚠️ 槽位 ${slotLabel(n)} 的 identity.json 写入失败：${String((err as Error)?.message ?? err)}`,
+    )
+  }
+}
+
 /** release：交还槽位（**杀进程** + 删记录，⛔ 保留 profile 目录） */
 export function releaseSlot(root: string, sessionId: string, target: number): { ok: boolean; detail: string } {
-  const ledger = readLedger(root)
+  const ledger = readLedger()
   const lease = ledger.leases[String(target)]
   if (!lease) {
     return { ok: true, detail: `槽位 ${slotLabel(target)} 本就无人占用（无需释放）。` }
@@ -326,11 +443,15 @@ export function releaseSlot(root: string, sessionId: string, target: number): { 
         `  ⛔ 不代别人释放 —— 它可能正在用。若确信它已废弃，用 \`browser_slot reap <槽>\`（看守动作，会记录原因）。`,
     }
   }
-  const destroyed = destroySlot(root, target, lease.pid)
-  withLedger(root, (lg) => {
+  const destroyed = destroySlot(target, lease.pid)
+  withLedger((lg) => {
     delete lg.leases[String(target)]
     return { ledger: lg, result: null }
   })
+  // 🔴 身份必须跟着租约一起消失：留着会让"这个 profile 还有主"在读数上成立，
+  //    而那正是 identity.json 存在的目的（回答"谁在用"）—— 留旧值等于让答案过期而不自知。
+  //    ⛔ 但**不动 profile 目录本身**：登录态是槽位的资产，下一个租的人接着用。
+  clearSlotIdentity(target)
   sampleCache.delete(target)
   return {
     ok: true,
@@ -340,7 +461,7 @@ export function releaseSlot(root: string, sessionId: string, target: number): { 
 
 /** list：全部槽位一览（含空槽） */
 export function listSlots(root: string, policy = policyFromEnv()): { views: SlotView[]; ledgerAgeMin: number } {
-  const ledger = readLedger(root)
+  const ledger = readLedger()
   const now = Date.now()
   const views: SlotView[] = []
   for (let n = 1; n <= MAX_SLOTS; n++) {
@@ -357,7 +478,7 @@ export function listSlots(root: string, policy = policyFromEnv()): { views: Slot
 /** status：单槽位详情 */
 export function slotStatus(root: string, target: number, policy = policyFromEnv()): SlotView | null {
   if (target < 1 || target > MAX_SLOTS) return null
-  const ledger = readLedger(root)
+  const ledger = readLedger()
   const lease = ledger.leases[String(target)] ?? null
   const now = Date.now()
   const proc = lease ? readProcFor(root, target, now, lease.pid) : { alive: false, cpuPct: 0, rssMb: 0, at: now }
@@ -369,13 +490,14 @@ export function slotStatus(root: string, target: number, policy = policyFromEnv(
  * ⛔ 与 release 的区别：release 是**占用者的自觉**，reap 是**兜底**，故必须记录原因。
  */
 export function reapSlot(root: string, target: number, reason: string): { ok: boolean; detail: string } {
-  const ledger = readLedger(root)
+  const ledger = readLedger()
   const lease = ledger.leases[String(target)]
-  const destroyed = destroySlot(root, target, lease?.pid ?? 0)
-  withLedger(root, (lg) => {
+  const destroyed = destroySlot(target, lease?.pid ?? 0)
+  withLedger((lg) => {
     delete lg.leases[String(target)]
     return { ledger: lg, result: null }
   })
+  clearSlotIdentity(target)
   sampleCache.delete(target)
   return {
     ok: true,
@@ -408,7 +530,7 @@ export async function nudgeStaleSlots(
   inject: Injector,
   policy = policyFromEnv(),
 ): Promise<{ nudged: NudgeOutcome[]; scanned: number }> {
-  const ledger = readLedger(root)
+  const ledger = readLedger()
   const now = Date.now()
   const out: NudgeOutcome[] = []
   let scanned = 0
@@ -432,7 +554,7 @@ export async function nudgeStaleSlots(
     const text = nudgeText(lease.slot, state, reasons, policy)
     const res = await inject(root, target, text)
     // 记账（无论成败都记时刻，避免失败时每 tick 重试刷屏）
-    withLedger(root, (lg) => {
+    withLedger((lg) => {
       const cur = lg.leases[String(lease.slot)]
       if (cur) {
         cur.nudges += 1
@@ -447,7 +569,7 @@ export async function nudgeStaleSlots(
 
 /** 推进 lastActionAt（由"成功的浏览器操作"调用；这就是"是否长期不动作"的判据来源） */
 export function touchSlot(root: string, target: number): void {
-  withLedger(root, (lg) => {
+  withLedger((lg) => {
     const cur = lg.leases[String(target)]
     if (cur) cur.lastActionAt = Date.now()
     return { ledger: lg, result: null }
@@ -456,12 +578,12 @@ export function touchSlot(root: string, target: number): void {
 
 /** doctor：自检（⛔ 不修改任何东西） */
 export function doctorSlots(root: string, policy = policyFromEnv()): Record<string, unknown> {
-  const ledger = readLedger(root)
+  const ledger = readLedger()
   const now = Date.now()
   const drift: string[] = []
   // ① 台账里记的 pid 与 /proc 实际指向该 profile 的 pid 是否一致
   for (const lease of listLeases(ledger)) {
-    const paths = slotPaths(root, lease.slot)
+    const paths = slotPaths(lease.slot)
     const live = findPidsByProfile(paths.profile)
     if (lease.pid > 0 && live.length > 0 && !live.includes(lease.pid)) {
       drift.push(`槽位 ${slotLabel(lease.slot)}：台账 pid=${lease.pid}，实际=${live.join(',')}`)
@@ -471,11 +593,239 @@ export function doctorSlots(root: string, policy = policyFromEnv()): Record<stri
     }
   }
   const views = listSlots(root, policy).views.filter((v) => v.state !== 'free')
+  // ② identity.json 与台账的对账。
+  //   🔴 为什么必须在这里出现：identity 是**冗余**记录，冗余的价值只在"能被对账"时才成立。
+  //      没有这一格，一份写坏/写旧/根本没写的 identity 与一份正确的在读数上完全一样。
+  const identityDrift: string[] = []
+  for (const lease of listLeases(ledger)) {
+    const ident = readSlotIdentity(lease.slot)
+    if (!ident) {
+      identityDrift.push(`槽位 ${slotLabel(lease.slot)}：台账有租约但 identity.json 缺失`)
+      continue
+    }
+    if (ident.sessionId !== lease.sessionId) {
+      identityDrift.push(
+        `槽位 ${slotLabel(lease.slot)}：identity.sessionId=${ident.sessionId || '(空)'} ≠ 台账=${lease.sessionId || '(空)'}`,
+      )
+    }
+    if ((ident.cccRoot || '') !== (lease.cccRoot || '')) {
+      identityDrift.push(
+        `槽位 ${slotLabel(lease.slot)}：identity.cccRoot 与台账不一致（⛔ 以台账为准）`,
+      )
+    }
+  }
   return {
-    ledger: { path: '.opencode/browser-slots.json', leases: listLeases(ledger).length, ageMin: ledger.updatedAt ? Math.round((now - ledger.updatedAt) / 60_000) : 0 },
+    ledger: { path: ledgerPath(), leases: listLeases(ledger).length, ageMin: ledger.updatedAt ? Math.round((now - ledger.updatedAt) / 60_000) : 0 },
     policy,
     occupied: views,
     pidDrift: drift,
-    verdict: drift.length === 0 ? 'clean' : 'drift',
+    identityDrift,
+    verdict: drift.length === 0 && identityDrift.length === 0 ? 'clean' : 'drift',
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ② 页面层（CDP）—— v1.129.0 从 `browser` MSM 搬进 ACC
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * 页面操作的前置守卫：**这个槽位必须是你租的**。
+ *
+ * 🔴🔴 判据（这条比任何单个动作都值钱）：
+ *    搬进来的动作以前是「给一个端口就能操作」，而端口与归属在**两处**各记一份
+ *    ⇒ 谁都能操作任何人的浏览器，而**没有任何读数会显示这件事**。
+ *    ⇒ 现在页面动作必须先过归属检查：`sessionId` 必须是该槽位的占用者。
+ *
+ * ⚠️ 豁免：`sessionId === ''`（无归属调用，例如 CLI 探针）**一律拒绝**，⛔ 不做"信任本地"的放宽
+ *    —— 一旦放宽，归属就从"机制"退回成"习惯"。
+ */
+export function assertSlotOwned(root: string, slot: number, sessionId: string): void {
+  const lease = readLedger().leases[String(slot)]
+  if (!lease) {
+    throw new Error(
+      `槽位 ${slotLabel(slot)} 当前无人占用 ⇒ 先 \`browser_slot acquire\` 租一个再用。\n` +
+        `  ⛔ 不自动替你租：租了不还就是 2026-11-09 那次 36 小时功耗事故的形状。`,
+    )
+  }
+  if (sessionId === '' || lease.sessionId !== sessionId) {
+    throw new Error(
+      `槽位 ${slotLabel(slot)} 不是你租的（占用者 ${lease.sessionId || '(无)'}）⇒ 拒绝操作。\n` +
+        `  ⇒ 自己的槽位用 \`browser_slot list\` 查；要新开一个用 \`browser_slot acquire\`。\n` +
+        `  ⚠️ 硬拒绝是刻意的：放行会让"谁在动谁的浏览器"变成没有读数可查的事。`,
+    )
+  }
+}
+
+/** 把页面上一次成功的操作推进 lastActionAt（这就是"长期不动作"判据的来源） */
+function pageTouched(root: string, slot: number): void {
+  touchSlot(root, slot)
+}
+
+/** 列当前槽位上的 targets */
+export async function slotTargets(root: string, slot: number, sessionId: string): Promise<CdpTarget[]> {
+  assertSlotOwned(root, slot, sessionId)
+  const list = await listTargets(slot)
+  pageTouched(root, slot)
+  return list
+}
+
+/** 新开标签页 */
+export async function slotOpen(
+  root: string,
+  slot: number,
+  sessionId: string,
+  url: string,
+): Promise<string> {
+  assertSlotOwned(root, slot, sessionId)
+  const id = await openTab(slot, url)
+  pageTouched(root, slot)
+  return id
+}
+
+/** 导航 */
+export async function slotGoto(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  url: string,
+): Promise<void> {
+  assertSlotOwned(root, slot, sessionId)
+  await navigate(slot, targetId, url)
+  pageTouched(root, slot)
+}
+
+/** 页面内求值 */
+export async function slotEval(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  expression: string,
+  timeoutMs?: number,
+): Promise<unknown> {
+  assertSlotOwned(root, slot, sessionId)
+  const v = await evalInPage(slot, targetId, expression, timeoutMs)
+  pageTouched(root, slot)
+  return v
+}
+
+/** 正文 */
+export async function slotText(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+): Promise<string> {
+  assertSlotOwned(root, slot, sessionId)
+  const v = await pageText(slot, targetId)
+  pageTouched(root, slot)
+  return v
+}
+
+/** HTML */
+export async function slotHtml(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  max?: number,
+): Promise<string> {
+  assertSlotOwned(root, slot, sessionId)
+  const v = await pageHtml(slot, targetId, max)
+  pageTouched(root, slot)
+  return v
+}
+
+/** 截图（落点必须在 CCC 根内） */
+export async function slotShot(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  outRel: string,
+): Promise<string> {
+  assertSlotOwned(root, slot, sessionId)
+  const abs = resolveShotPath(root, outRel)
+  await screenshot(slot, targetId, abs)
+  pageTouched(root, slot)
+  return outRel
+}
+
+/** 重载（可先装探针脚本） */
+export async function slotReload(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  script?: string,
+): Promise<string> {
+  assertSlotOwned(root, slot, sessionId)
+  const state = await reloadPage(slot, targetId, script)
+  pageTouched(root, slot)
+  return state
+}
+
+/** 关标签页 */
+export async function slotClose(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  all = false,
+): Promise<string[]> {
+  assertSlotOwned(root, slot, sessionId)
+  const closed = await closeTab(slot, targetId, all)
+  pageTouched(root, slot)
+  return closed
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ③ 扩展层 —— CCC 给 browser_slot 写扩展（ACC 只 spawn，从不 import）
+// ═══════════════════════════════════════════════════════════════════
+
+/** 列本 CCC 的扩展 */
+export function slotExtList(root: string): ExtEntry[] {
+  return listExtensions(root)
+}
+
+/**
+ * 跑一个扩展。
+ *
+ * 🔴 归属检查与页面层同一条：扩展能驱动槽位里的浏览器 ⇒ 它跑的必须是你租的那个槽。
+ * ⚠️ 扩展**不受 SLOT_ACTIONS 约束** —— 那正是扩展的意义（ACC 不预知它要做什么）。
+ *    它拿到的只有 slot/port/cccRoot/args，⛔ 拿不到别人的台账。
+ */
+export async function slotExt(
+  root: string,
+  slot: number,
+  sessionId: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ExtRunResult> {
+  assertSlotOwned(root, slot, sessionId)
+  const entry = findExtension(root, name)
+  if (!entry) {
+    const known = listExtensions(root).map((e) => e.name)
+    return {
+      ok: false,
+      code: 'ext-not-found',
+      error:
+        `没有名为「${name}」的扩展。\n` +
+        (known.length > 0
+          ? `  ⇒ 本 CCC 现有的扩展：${known.join(', ')}`
+          : `  ⇒ 本 CCC 还没有任何扩展（<CCC 根>/${EXT_DIR_REL}/ 下没有 .ts 文件）。\n` +
+            `     写一个：stdin 收 {slot,port,cccRoot,args}，stdout 最后一行给 {"ok":true,"result":…}`),
+    }
+  }
+  const payload = buildExtPayload({
+    name,
+    slot,
+    port: slotPort(slot),
+    cccRoot: root,
+    args,
+  })
+  const res = await runExtension(entry, payload)
+  pageTouched(root, slot)
+  return res
 }

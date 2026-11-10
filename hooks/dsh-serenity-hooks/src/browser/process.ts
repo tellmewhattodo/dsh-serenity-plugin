@@ -15,19 +15,52 @@
  */
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, writeFileSync, rmSync, readdirSync, readlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  closeSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  rmSync,
+  readdirSync,
+  readlinkSync,
+} from 'node:fs'
+import { dirname, join } from 'node:path'
 import { SLOT_RESOLUTION, slotPort, type SlotId, slotNumber, slotLabel } from './state.js'
+import { slotsHomeDir } from './home.js'
 
-/** 槽位工作目录基址（CCC 内，越界即拒绝由调用方保证） */
-export const SLOTS_REL = join('_tmp', 'browser-slots')
+/**
+ * 槽位工作目录 —— **全局唯一，不跟着 CCC 走**。
+ *
+ * 🔴🔴 原实现是 `<CCC 根>/_tmp/browser-slots/`，而端口与 Chrome 进程是**全机唯一**的：
+ *    两个 CCC 各自在自己的根下建 b1，都认为自己拥有 9301 ⇒ 抢同一个端口，
+ *    而**没有任何读数会显示这件事**（两份台账都自洽）。
+ *    ⇒ 判据：**资源的唯一性必须由状态载体的唯一性保证**。
+ *
+ * ⚠️ 副作用（如实登记）：profile **不再随 CCC 的 git 走**。这是刻意的 ——
+ *    槽位 b1 今天给 A、明天给 B，若 profile 跟着 CCC 走就会有两份"b1 的登录态"，
+ *    而那两份在读数上无法区分（你会以为自己登着，其实是另一个 profile）。
+ */
+export const SLOTS_DIR_NAME = 'serenity-browser-slots'
 
-/** 一个槽位的目录布局（全部在 CCC 根内） */
+/** 一个槽位的目录布局（全部在**全局**家目录内） */
 export interface SlotPaths {
   /** 槽位根目录 */
   home: string
   /** Chrome user-data-dir（**独立 profile** 的物理载体） */
   profile: string
+  /**
+   * 身份文件（owner 2026-11-10 要求「每个槽位的浏览器 profile 里加点标识」）。
+   *
+   * 🔴 它解决的问题：`user-data` 目录名只有 `b1`，而**谁在用 b1** 这个事实
+   *    只存在于台账里。台账丢了/被别人读到一半 ⇒ 一个 Chrome 进程跑在 9301 上，
+   *    你从它的 profile 里**看不出它属于哪个 CCC、哪个会话**。
+   *    ⇒ 把身份**写进 profile 本身**：`chrome --user-data-dir` 被认领时能直接读到。
+   * ⚠️ 它是**冗余**记录（权威仍在台账），作用是让"归属"这件事在进程侧也能被回答。
+   */
+  identity: string
   /** 截图落点 */
   shots: string
   /** Chrome stderr 日志 */
@@ -36,15 +69,81 @@ export interface SlotPaths {
   pidFile: string
 }
 
-export function slotPaths(root: string, n: number): SlotPaths {
-  const home = join(root, SLOTS_REL, slotLabel(n))
+export function slotPaths(n: number, homeDir?: string): SlotPaths {
+  const home = join(homeDir ?? slotsHomeDir(), slotLabel(n))
   return {
     home,
     profile: join(home, 'user-data'),
+    identity: join(home, 'identity.json'),
     shots: join(home, 'shots'),
     log: join(home, 'chrome.log'),
     pidFile: join(home, 'pid'),
   }
+}
+
+/**
+ * 一个槽位的身份（写进 `<槽位目录>/identity.json`）。
+ *
+ * 判据：**profile 侧也答得出"我是谁"** —— 只靠台账回答归属，会让"台账坏了"与
+ * "槽位无主"在读数上同形（D253 同族：恒空读数器与真无数据同形）。
+ */
+export interface SlotIdentity {
+  /** 槽位号 */
+  slot: number
+  /** 槽位标号（b1..b20） */
+  label: string
+  /** CDP 端口 */
+  port: number
+  /** 占用它的 CCC 根（空串 = 无归属） */
+  cccRoot: string
+  /** 占用它的 dsc 会话 id */
+  sessionId: string
+  /** 占用它的轨迹目录名 */
+  trajectory: string
+  /** 租出时刻（ms） */
+  leasedAt: number
+  /** 写入时刻（ms）—— 用来判断这份身份有多旧 */
+  writtenAt: number
+}
+
+/** 读槽位身份（不存在/损坏 ⇒ null，⛔ 不抛） */
+export function readSlotIdentity(n: number, homeDir?: string): SlotIdentity | null {
+  const p = slotPaths(n, homeDir).identity
+  try {
+    const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<SlotIdentity>
+    if (!raw || typeof raw !== 'object') return null
+    return {
+      slot: Number(raw.slot) || n,
+      label: typeof raw.label === 'string' ? raw.label : slotLabel(n),
+      port: Number(raw.port) || slotPort(n),
+      cccRoot: typeof raw.cccRoot === 'string' ? raw.cccRoot : '',
+      sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : '',
+      trajectory: typeof raw.trajectory === 'string' ? raw.trajectory : '',
+      leasedAt: Number(raw.leasedAt) || 0,
+      writtenAt: Number(raw.writtenAt) || 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 写槽位身份（**原子写**：temp → rename）。
+ *
+ * ⚠️ 与台账同一个纪律：**只写事实，不写状态** —— 状态由 `state.ts` 现算。
+ *    这里写的是"这个 profile 属于谁"，那是**租出那一刻的事实**，不会随闲置时长变化。
+ */
+export function writeSlotIdentity(ident: SlotIdentity, homeDir?: string): void {
+  const p = slotPaths(ident.slot, homeDir).identity
+  mkdirSync(dirname(p), { recursive: true })
+  const tmp = `${p}.tmp-${process.pid}-${Date.now()}`
+  writeFileSync(tmp, JSON.stringify({ ...ident, writtenAt: Date.now() }, null, 2), 'utf8')
+  renameSync(tmp, p)
+}
+
+/** 释放时清掉身份（⛔ 保留 profile 本身 —— 登录态是槽位的资产） */
+export function clearSlotIdentity(n: number, homeDir?: string): void {
+  rmSync(slotPaths(n, homeDir).identity, { force: true })
 }
 
 /**
@@ -215,8 +314,12 @@ export interface LaunchResult {
 /**
  * 启动一个槽位（**不等待 CDP 就绪** —— 就绪判定走 {@link waitCdp}，与既有实现同款纪律：
  * `launch` 立即返回，不让调用方卡在一个可能永远不返回的等待上）。
+ *
+ * 🔴 v1.129.0：签名里**删掉了 `root`** —— 它曾是一个**完全没被读过**的参数
+ *    （槽位目录已全局化，见 `home.ts`）。留着一个不读的参数是**声明与行为分叉**：
+ *    下一个人读签名会以为"启动是跟着某个 CCC 走的"，而事实相反（D289 同族）。
  */
-export function launchSlot(root: string, n: number): LaunchResult {
+export function launchSlot(n: number): LaunchResult {
   const chrome = findChrome()
   if (!chrome) {
     return {
@@ -227,7 +330,7 @@ export function launchSlot(root: string, n: number): LaunchResult {
         '  ⇒ 装一个或用 `browser_slot` 的 --chrome 指定路径（该选项尚未实现）。',
     }
   }
-  const paths = slotPaths(root, n)
+  const paths = slotPaths(n)
   if (!existsSync(paths.home)) mkdirSync(paths.home, { recursive: true })
   if (!existsSync(paths.profile)) mkdirSync(paths.profile, { recursive: true })
   if (!existsSync(paths.shots)) mkdirSync(paths.shots, { recursive: true })
@@ -486,9 +589,11 @@ export function killPid(pid: number, waitMs = 1500): boolean {
  *
  * 顺序不可换：先按 profile 认领（进程可能换过 pid，台账里那个未必还准）→ 杀 →
  * 清 pid 文件 → **保留 profile 目录**（登录态是槽位的资产，⛔ 不因一次回收就丢）。
+ *
+ * 🔴 v1.129.0：同样删掉未被读的 `root` 参数（理由同 {@link launchSlot}）。
  */
-export function destroySlot(root: string, n: number, pidHint = 0): { killed: number[]; detail: string } {
-  const paths = slotPaths(root, n)
+export function destroySlot(n: number, pidHint = 0): { killed: number[]; detail: string } {
+  const paths = slotPaths(n)
   const pids = new Set<number>(findPidsByProfile(paths.profile))
   if (pidHint > 0) pids.add(pidHint)
   const killed: number[] = []
@@ -584,7 +689,7 @@ export async function waitCdp(
     await new Promise((r) => setTimeout(r, 300))
   }
 
-  const paths = slotPaths(root, n)
+  const paths = slotPaths(n)
 
   if (!everReady) {
     return {

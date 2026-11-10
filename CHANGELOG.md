@@ -14,7 +14,100 @@
 
 ---
 
-## v1.128.2 — 2026-11-09（🔴 槽位看守**从未工作过**：根解析恒返回 null，且全程静默）
+## v1.129.0 — 2026-11-10（浏览器能力集中到 `browser_slot` ＋ CCC 可写扩展 ＋ 全局 20 槽位）
+
+> owner 两条令（逐字）：
+> ① 「我希望所有浏览器能力都集中到这个 browser_slot，同时这个 browser_slot 支持 CCC 给它写扩展，
+>    这样各个 CCC 可以用上最好的浏览器操作能力」
+> ② 「注意 20 个槽位是所有 CCC 共用的，状态管理要全局；为了分辨清楚最好每个槽位的浏览器 profile 里加点标识」
+
+### 🔴 owner 第②条纠正了一个真缺陷（原实现是错的）
+
+台账原落点 `<CCC>/.opencode/browser-slots.json` = **每个 CCC 各一份**，
+而端口 `9301..9320` 与 Chrome 进程是**全机唯一**的：
+一个宿主实测服务 **3 个 CCC** ⇒ 三份台账各自认为 b1 空闲 ⇒ 抢同一端口，
+**且两份台账都自洽、没有任何读数会显示冲突**。
+
+🔴 **判据（比修法值钱）：资源的唯一性必须由状态载体的唯一性保证**，
+⛔ 不能靠"每个使用者各记一份、然后指望它们对得上"。
+这与 2026-11-09「槽位租到了、没有工具能操作它」是**同一族** —— 那次漂在端口区间，这次漂在归属。
+
+⇒ 全局家目录 `~/.dsh/serenity-browser-slots/`（`SERENITY_BROWSER_SLOTS_DIR` 可覆盖）。
+⛔ 不放任何 CCC 里（放谁家就等于让那个 CCC 当"主"，那是治理问题不是技术问题）。
+
+### 新增
+
+| 文件 | 作用 |
+|---|---|
+| `src/browser/home.ts` | 全局家目录。**签名里刻意没有 `root` 参数** |
+| `src/browser/cdp.ts` | CDP 客户端（**零依赖**，用运行时内建 `WebSocket`）：targets/open/goto/eval/text/html/shot/reload/close |
+| `src/browser/extend.ts` | 扩展机制：`<CCC>/browser-ext/*.ts`，**ACC 只 spawn、从不 import**（照 `cro/core.ts` 的 B 案） |
+
+`SLOT_ACTIONS` 17 个，分三组（失效面完全不同，⛔ 不混）：
+① 槽位层 6（acquire/release/list/status/reap/doctor）② 页面层 9（targets…close，**必须带 `--slot`**）
+③ 扩展层 2（ext-list/ext）。
+
+### identity.json（owner 令「profile 里加点标识」）
+
+每槽位写 `<槽位目录>/identity.json`：`slot/label/port/cccRoot/sessionId/trajectory/leasedAt/writtenAt`。
+
+- acquire（新租 ∧ **复用旧租约**）都会写；启动失败时清掉；release/reap 清掉（⛔ **不动 profile 目录**）
+- `doctor` 新增 `identityDrift` 对账（缺失／sessionId 不一致／cccRoot 不一致）并并入 `verdict`
+
+🔴 **判据：profile 侧也答得出"我是谁"** —— 只靠台账回答归属，会让「台账坏了」与「槽位无主」在读数上同形（D253 同族）。
+⚠️ 两处不一致时**以台账为准**；identity 是抓手，不是第二个真相源。
+
+### 页面层归属守卫 `assertSlotOwned`
+
+搬进来的动作以前是「给一个端口就能操作」，而端口与归属在**两处**各记一份 ⇒ 谁都能动任何人的浏览器，
+**没有任何读数会显示这件事**。⇒ 现在页面动作必须先过归属检查；`sessionId === ''` **一律拒绝**
+（⛔ 不做"信任本地"的放宽 —— 一放宽，归属就从"机制"退回成"习惯"）。
+
+### 扩展机制：铁律 + 协议
+
+- **铁律**：扩展的任何失败（超时／非 0 退出／输出非 JSON／spawn 失败／自报失败）**绝不影响既有动作**
+  —— 仅结构化失败返回，⛔ 从不抛。集中能力 ≠ 集中故障（先例 = `im/hook.ts` 旁路容忍）。
+- **协议**：stdin 单行 JSON 进；stdout **最后一个非空行** JSON 出。
+  判据：扩展可以自由 `console.log` 调试 —— ⛔ 要求 stdout 干净会让"加一句 debug"变成破坏契约的动作。
+- payload 只给 `slot/port/cccRoot/args/timeoutMs`：⛔ 不塞进程表、⛔ 不塞别人的台账。
+
+### 顺带修
+
+- `launchSlot` / `destroySlot` **删掉未被读的 `root` 参数**（全局化后它一次都没被读过；留着的签名在向读者
+  声明"启动跟着某个 CCC 走"，与事实相反 —— D289 同族）
+- `ledgerPath()` / `readLedger()` / `withLedger()` / `writeLedger()` **全部去掉 root**；`SlotLease` 加 `cccRoot`
+- `doctor` 的 `ledger.path` 从写死的 `.opencode/browser-slots.json`（**早已失效的字面量**）改为 `ledgerPath()`
+
+### 门禁
+
+`typecheck` ✅ ／ `typecheck-host` ✅ ／ `test` ／ `coverage` **222 files / 3478 tests，
+93.58% stmts ／ 86.3% branches** ／ `build` ／ `pack-check`。
+
+新增 4 个测试文件（`browser-slot-cdp` / `-extend` / `-home` ＋ service/process/ledger 扩写到全局签名），
+其中 `cdp.ts`／`extend.ts`／`home.ts` 三个新模块**原先裸奔**（`coverage-gate` 当场打红）。
+
+### 🔴 变异检验（4 组，全部精确红；并抓出**一条我自己写的假绿**）
+
+| 变异体 | 结果 |
+|---|---|
+| `void stampIdentity`（acquire 不写 identity） | ⑰ 精确红 1 |
+| release 不调 `clearSlotIdentity` | **第一轮全绿** ⇒ 修判据后精确红 1 |
+| `assertSlotOwned` 直接 return | ㉑㉒㉓ 三条同时红 |
+| `ledgerPath()` 落到子目录 | ledger ② 精确红 1 |
+
+🔴🔴 **那条假绿**：⑱ 原本断言「release 后 identity 不存在」——而它**从没写过 identity**。
+「根本没写过」与「写了又被清掉」在读数上**完全同形**，判据对变异体毫无判别力（D254 又一次）。
+⇒ 修法：**判据从非空初态出发**，清除动作之前先断言文件真存在（正控）。
+
+### 🔴 另一条假绿的教训：`Function.length` 判不了"函数有没有某个参数"
+
+`slotsHomeDir(env = process.env)` 里**带默认值的形参不计入 `length`** ⇒ 恒 0，
+于是 `expect(slotsHomeDir.length).toBe(1)` 报 `expected +0 to be 1`。
+⇒ 真判据：**塞一个"看起来该被尊重"的根进去，结果必须一字不变**。
+
+---
+
+
 
 > 这是 v1.128.0 交付里最严重的一格，而且**是我自己漏的**：owner 最在意的那条闭环
 > （「状态异常 ⇒ 反过来向占用它的会话注入提醒」）在真机上**一次都没跑过**。

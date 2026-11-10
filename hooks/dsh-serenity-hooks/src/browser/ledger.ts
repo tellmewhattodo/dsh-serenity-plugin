@@ -1,26 +1,44 @@
 /**
- * browser/ledger.ts — 槽位台账（**唯一**真相源：谁租了哪个槽）
+ * browser/ledger.ts — 槽位台账（**全局唯一**真相源：谁租了哪个槽）
  *
- * 落点：`<CCC>/.opencode/browser-slots.json`
+ * 落点：`<全局家目录>/ledger.json`（默认 `~/.dsh/serenity-browser-slots/`）
  *
- * 🔴 为什么放进 `.opencode/` 而不是 `_tmp/`：`_tmp/` 的语义是"随时可丢"，
- *    而**一个正在被占用的槽位记录不是可丢的东西** —— 丢了之后占用者再也无法 release
- *    （它找不到自己的条目），槽位就永久泄漏。台账必须比它的进程活得久。
+ * 🔴🔴 **它就是全局的，不跟着 CCC 走**（2026-11-10 owner 纠正后改）。
  *
- * 🔴 🔴 **并发**：20 个槽位会被**多条轨迹同时**争抢（本容器 29 条活跃轨迹）。
+ *    原落点是 `<CCC>/.opencode/browser-slots.json` —— **每个 CCC 各一份**，
+ *    而 20 个槽位 / 端口 9301..9320 / Chrome 进程都是**全机唯一**的。
+ *    一个宿主实测服务 **3 个 CCC** ⇒ 三份台账各自认为"b1 空闲" ⇒ 抢同一个端口。
+ *    ⇒ 判据：**资源的唯一性必须由状态载体的唯一性保证**，⛔ 不能靠各自记账再指望对上。
+ *
+ * 🔴 **为什么台账必须比它的进程活得久**：丢了之后占用者再也无法 release
+ *    （它找不到自己的条目），槽位就永久泄漏。
+ *
+ * 🔴 **并发**：20 个槽位会被**多条轨迹 ＋ 多个 CCC 同时**争抢（本机 13 个 live 会话）。
  *    整文件读改写会**静默丢键**（仓里 `localstore.json` 已为同一个病付过一次代价）。
  *    ⇒ 这里用 `O_EXCL` 排他锁 + temp→rename 原子替换，并带**持锁者崩溃自动回收**。
  *
  * ⚠️ 已知边界（如实登记）：锁是**单机文件锁**，只在同一台机器、同一个文件系统上成立。
- *    本容器的槽位天然只属于本机（Chrome 是本地进程），故够用；⛔ 不要据此推断它支持多机。
+ *    槽位天然只属于本机（Chrome 是本地进程），故够用；⛔ 不要据此推断它支持多机。
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { slotsHomeDir } from './home.js'
 import type { SlotLease } from './state.js'
 
-/** 台账在 CCC 内的相对位置 */
-export const LEDGER_REL = join('.opencode', 'browser-slots.json')
+/** 台账文件名（在全局家目录内） */
+export const LEDGER_FILENAME = 'ledger.json'
+
+/**
+ * 台账绝对路径。
+ *
+ * 🔴 签名里**刻意没有 `root`**：这个台账不属于任何 CCC。
+ *    任何想按 CCC 分家的改动都会立刻退回原缺陷（见文件头）。
+ *    `root`（CCC 根）只作为**租约里的一个字段**记录，用来回答"谁租的"。
+ */
+export function ledgerPath(): string {
+  return join(slotsHomeDir(), LEDGER_FILENAME)
+}
 
 /** 锁文件后缀 */
 const LOCK_SUFFIX = '.lock'
@@ -50,15 +68,11 @@ export interface Ledger {
   backoff: Record<string, { failures: number; nextAt: number }>
 }
 
-const EMPTY: Ledger = { version: 1, leases: {}, updatedAt: 0, backoff: {} }
+const EMPTY: Ledger = { version: 2, leases: {}, updatedAt: 0, backoff: {} }
 
-export function ledgerPath(root: string): string {
-  return join(root, LEDGER_REL)
-}
-
-/** 读台账。文件缺失/损坏 ⇒ 返回空台账（⛔ 不抛错：一次坏文件不该炸掉整条轨迹的所有槽位操作） */
-export function readLedger(root: string): Ledger {
-  const p = ledgerPath(root)
+/** 读台账。文件缺失/损坏 ⇒ 返回空台账（⛔ 不抛错：一次坏文件不该炸掉所有槽位操作） */
+export function readLedger(): Ledger {
+  const p = ledgerPath()
   if (!existsSync(p)) return { ...EMPTY, leases: {} }
   try {
     const raw = JSON.parse(readFileSync(p, 'utf8')) as Partial<Ledger>
@@ -73,6 +87,9 @@ export function readLedger(root: string): Ledger {
         slot: n,
         sessionId: typeof l.sessionId === 'string' ? l.sessionId : '',
         trajectory: typeof l.trajectory === 'string' ? l.trajectory : '',
+        // 🔴 v2 新增：租约的 CCC 归属。跨 CCC 时**这是唯一能回答"你是谁"的字段**。
+        //    旧记录（v1）没有它 ⇒ 读成空串，界面显示"(未知 CCC)"，⛔ 不猜。
+        cccRoot: typeof l.cccRoot === 'string' ? l.cccRoot : '',
         leasedAt: Number(l.leasedAt) || 0,
         lastActionAt: Number(l.lastActionAt) || Number(l.leasedAt) || 0,
         nudges: Number(l.nudges) || 0,
@@ -88,15 +105,15 @@ export function readLedger(root: string): Ledger {
       if (!Number.isInteger(n) || n < 1 || n > 20) continue
       backoff[String(n)] = { failures: Number(b?.failures) || 0, nextAt: Number(b?.nextAt) || 0 }
     }
-    return { version: Number(raw.version) || 1, leases, updatedAt: Number(raw.updatedAt) || 0, backoff }
+    return { version: Number(raw.version) || 2, leases, updatedAt: Number(raw.updatedAt) || 0, backoff }
   } catch {
     return { ...EMPTY, leases: {} }
   }
 }
 
 /** 原子写：temp → rename（rename 在同文件系统内是原子的） */
-export function writeLedger(root: string, ledger: Ledger): void {
-  const p = ledgerPath(root)
+export function writeLedger(ledger: Ledger): void {
+  const p = ledgerPath()
   mkdirSync(dirname(p), { recursive: true })
   const tmp = `${p}.tmp-${process.pid}-${Date.now()}`
   const body = JSON.stringify({ ...ledger, updatedAt: Date.now() }, null, 2)
@@ -122,8 +139,8 @@ function tryBreakStaleLock(lock: string): void {
  *    调用方忘记 unlock（或在中途抛错）会**永久锁死**整个槽位系统，而这**没有任何信号**。
  *    把锁的生命周期绑在一个同步函数的执行期上，是唯一不依赖调用方纪律的做法。
  */
-export function withLedger<T>(root: string, update: (ledger: Ledger) => { ledger: Ledger; result: T }): T {
-  const p = ledgerPath(root)
+export function withLedger<T>(update: (ledger: Ledger) => { ledger: Ledger; result: T }): T {
+  const p = ledgerPath()
   mkdirSync(dirname(p), { recursive: true })
   const lock = p + LOCK_SUFFIX
   const deadline = Date.now() + LOCK_WAIT_MS
@@ -151,9 +168,9 @@ export function withLedger<T>(root: string, update: (ledger: Ledger) => { ledger
     )
   }
   try {
-    const current = readLedger(root)
+    const current = readLedger()
     const { ledger, result } = update(current)
-    writeLedger(root, ledger)
+    writeLedger(ledger)
     return result
   } finally {
     rmSync(lock, { force: true })

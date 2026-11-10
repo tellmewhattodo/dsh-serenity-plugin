@@ -16,25 +16,33 @@ import {
   buildArgs,
   findChrome,
   findPidsByProfile,
+  clearSlotIdentity,
   normalizeSlotId,
   portHolders,
+  readSlotIdentity,
   resolveDisplay,
   sampleProcTree,
   slotPaths,
-  SLOTS_REL,
+  writeSlotIdentity,
+  SLOTS_DIR_NAME,
 } from '../src/browser/process.js'
+import { SLOTS_DIR_ENV, slotsHomeDir } from '../src/browser/home.js'
 import { SLOT_RESOLUTION, slotPort } from '../src/browser/state.js'
 
 let root = ''
+const savedEnv = process.env[SLOTS_DIR_ENV]
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'slot-proc-'))
+  process.env[SLOTS_DIR_ENV] = root
 })
 afterEach(() => {
   rmSync(root, { recursive: true, force: true })
+  if (savedEnv === undefined) delete process.env[SLOTS_DIR_ENV]
+  else process.env[SLOTS_DIR_ENV] = savedEnv
 })
 
 describe('启动参数（每一条都对应一次真实代价）', () => {
-  const paths = () => slotPaths('/tmp/cccc', 1)
+  const paths = () => slotPaths(1)
 
   it('① 必须带 --user-data-dir（独立 profile 的物理实现 + 按目录认领的锚点）', () => {
     const args = buildArgs(1, paths())
@@ -145,7 +153,7 @@ describe('🔴 显示后端（真机第一次 LIVE 探针就死在这里）', ()
 
   it('⑱ buildArgs 会把显示后端的参数**真正拼进**最终 argv（⛔ 算了不用）', () => {
     const d = resolveDisplay(envW, onlyWayland)
-    const args = buildArgs(1, slotPaths('/tmp/x', 1), d)
+    const args = buildArgs(1, slotPaths(1), d)
     for (const a of d.args) expect(args).toContain(a)
     // 负控：别的后端的参数不该出现（否则"选后端"是句空话）
     expect(args).not.toContain('--ozone-platform=x11')
@@ -168,23 +176,70 @@ describe('🔴 显示后端（真机第一次 LIVE 探针就死在这里）', ()
 })
 
 describe('目录布局', () => {
-  it('⑥ profile / shots / log 全在 CCC 根内（越界即拒绝由调用方保证）', () => {
-    const p = slotPaths(root, 5)
-    expect(p.home.startsWith(root)).toBe(true)
-    expect(p.profile.startsWith(root)).toBe(true)
-    expect(p.shots.startsWith(root)).toBe(true)
-    expect(p.log.startsWith(root)).toBe(true)
-    // 落点在 _tmp（可丢的运行态），⛔ 不是 .opencode（那是知识）
-    expect(SLOTS_REL.startsWith('_tmp')).toBe(true)
+  it('⑥ 🔴 profile / shots / log 全在**全局家目录**内，且**不含任何 CCC 根**', () => {
+    const p = slotPaths(5)
+    expect(p.home.startsWith(slotsHomeDir())).toBe(true)
+    expect(p.profile.startsWith(slotsHomeDir())).toBe(true)
+    expect(p.shots.startsWith(slotsHomeDir())).toBe(true)
+    expect(p.log.startsWith(slotsHomeDir())).toBe(true)
+    // 落点名 = 宿主存储家（跨 CCC 唯一），⛔ 不是某个 CCC 的 _tmp
+    expect(SLOTS_DIR_NAME).toBe('serenity-browser-slots')
+    expect(slotsHomeDir().endsWith(join('.dsh', SLOTS_DIR_NAME)) || slotsHomeDir() === root).toBe(true)
     // 各槽位目录必须互不相同（否则 profile 不独立）
-    expect(slotPaths(root, 5).profile).not.toBe(slotPaths(root, 6).profile)
+    expect(slotPaths(5).profile).not.toBe(slotPaths(6).profile)
+    // 🔴 签名里**没有 root** —— 拿不到"按 CCC 分家"这个能力（有人改回去这条立刻红）
+    expect(slotPaths.length).toBeLessThanOrEqual(2)
+    expect(slotPaths(5, '/some/other/home').home.startsWith('/some/other/home')).toBe(true)
+  })
+})
+
+describe('🔴 profile 身份标识（owner 令「每个槽位的 profile 里加点标识」）', () => {
+  const ident = () => ({
+    slot: 3,
+    label: 'b3',
+    port: 9303,
+    cccRoot: '/ccc/x',
+    sessionId: 'sess-x',
+    trajectory: 'traj-x',
+    leasedAt: 12345,
+    writtenAt: 0,
+  })
+
+  it('㉕ 写后读回一致；writtenAt 由写入口自己盖（⛔ 调用方传什么都不算）', () => {
+    writeSlotIdentity(ident())
+    const back = readSlotIdentity(3)!
+    expect(back.slot).toBe(3)
+    expect(back.label).toBe('b3')
+    expect(back.port).toBe(9303)
+    expect(back.cccRoot).toBe('/ccc/x')
+    expect(back.sessionId).toBe('sess-x')
+    expect(back.writtenAt).toBeGreaterThan(0)
+    // 负控：`writtenAt` 不采用调用方传的 0
+    expect(back.writtenAt).not.toBe(0)
+  })
+
+  it('㉖ 不存在 ⇒ null（⛔ 抛错）；损坏的 JSON 同样 null', () => {
+    expect(readSlotIdentity(4)).toBeNull()
+    writeSlotIdentity(ident())
+    writeFileSync(slotPaths(3).identity, '{ nope', 'utf8')
+    expect(readSlotIdentity(3)).toBeNull()
+  })
+
+  it('㉗ clearSlotIdentity 只删身份文件，**保留 profile 目录**（登录态是槽位的资产）', () => {
+    mkdirSync(slotPaths(3).profile, { recursive: true })
+    writeSlotIdentity(ident())
+    clearSlotIdentity(3)
+    expect(existsSync(slotPaths(3).identity)).toBe(false)
+    expect(existsSync(slotPaths(3).profile)).toBe(true)
+    // 负控：清一个本就没有的 ⇒ 不抛
+    expect(() => clearSlotIdentity(4)).not.toThrow()
   })
 })
 
 describe('🔴 按 profile 认领（认错就会杀掉 user 自己的浏览器）', () => {
   it('⑦ 只认命令行里带**本槽位专属** user-data-dir 的进程', () => {
-    const profileA = slotPaths(root, 1).profile
-    const profileB = slotPaths(root, 2).profile
+    const profileA = slotPaths(1).profile
+    const profileB = slotPaths(2).profile
     const pids = findPidsByProfile(profileA)
     // 本测试进程的命令行里没有这两个路径 ⇒ 必须一个都不命中
     expect(pids).not.toContain(process.pid)
@@ -194,7 +249,6 @@ describe('🔴 按 profile 认领（认错就会杀掉 user 自己的浏览器�
     expect(profileA).not.toBe(profileB)
     expect(profileA.startsWith(profileB)).toBe(false)
   })
-
   it('⑧ 返回值里绝不含自身 pid（防止把自己当浏览器杀掉）', () => {
     // 用一个"恰好会匹配到自己命令行"的路径做正控：当前进程 cmdline 含 test 文件路径
     const pids = findPidsByProfile('vitest')

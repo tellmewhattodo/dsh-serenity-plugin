@@ -21,7 +21,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acquireSlot, listSlots, releaseSlot, waitSlotReady } from '../src/browser/service.js'
-import { findPidsByProfile, slotPaths } from '../src/browser/process.js'
+import { findPidsByProfile, readSlotIdentity, slotPaths } from '../src/browser/process.js'
 import { SLOT_RESOLUTION, slotPort } from '../src/browser/state.js'
 import { readLedger } from '../src/browser/ledger.js'
 
@@ -84,7 +84,7 @@ describe.skipIf(!LIVE)('浏览器槽位 · 真机探针（SERENITY_SLOT_LIVE=1 �
         expect(ready.ok).toBe(true)
 
         // ② 认领
-        const paths = slotPaths(ROOT, slot)
+        const paths = slotPaths(slot)
         const pids = findPidsByProfile(paths.profile)
         say(`\n=== 认领 ===\npids=${pids.join(',')} profile=${paths.profile}`)
         expect(pids.length).toBeGreaterThan(0)
@@ -104,9 +104,13 @@ describe.skipIf(!LIVE)('浏览器槽位 · 真机探针（SERENITY_SLOT_LIVE=1 �
         expect(cmd).not.toContain('--disable-backgrounding-occluded-windows')
 
         // ⑤ 台账归属 + 状态
-        const lease = readLedger(ROOT).leases[String(slot)]
+        const lease = readLedger().leases[String(slot)]
         expect(lease?.sessionId).toBe(SESSION)
         expect(lease?.pid ?? 0).toBeGreaterThan(0)
+        // ⑤-b 🔴 owner 令「profile 里加点标识」：profile 侧也答得出"我是谁"
+        const ident = readSlotIdentity(slot)
+        expect(ident?.sessionId).toBe(SESSION)
+        expect(ident?.cccRoot).toBe(ROOT)
         const v = listSlots(ROOT).views.find((x) => x.slot === slot)!
         say(`\n=== list ===\n${v.label} state=${v.state} cpu=${v.cpuPct}% rss=${v.rssMb}M res=${v.resolution}`)
         expect(v.state).toBe('leased')
@@ -119,7 +123,7 @@ describe.skipIf(!LIVE)('浏览器槽位 · 真机探针（SERENITY_SLOT_LIVE=1 �
       } finally {
         // ⑥ **无论上面成败都必须 release** —— 这正是本次事故的教训
         if (slot > 0) {
-          const paths = slotPaths(ROOT, slot)
+          const paths = slotPaths(slot)
           const before = findPidsByProfile(paths.profile).length
           const rel = releaseSlot(ROOT, SESSION, slot)
           say('\n=== release ===\n' + rel.detail)
@@ -127,7 +131,9 @@ describe.skipIf(!LIVE)('浏览器槽位 · 真机探针（SERENITY_SLOT_LIVE=1 �
           const after = findPidsByProfile(paths.profile).length
           say(`进程数 before=${before} after=${after}`)
           expect(after).toBe(0)
-          expect(readLedger(ROOT).leases[String(slot)]).toBeUndefined()
+          expect(readLedger().leases[String(slot)]).toBeUndefined()
+          // 🔴 identity 必须跟着消失（留着会让"这个 profile 还有主"在读数上成立）
+          expect(readSlotIdentity(slot)).toBeNull()
           expect(existsSync(paths.profile)).toBe(true) // 登录态保留
           let dead = false
           try {

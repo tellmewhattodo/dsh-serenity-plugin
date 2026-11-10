@@ -64,6 +64,16 @@ export interface SlotLease {
   sessionId: string
   /** 占用它的轨迹目录名（可读性用；判定不依赖它） */
   trajectory: string
+  /**
+   * 占用方的 **CCC 根**（v2 新增）。
+   *
+   * 🔴 为什么必须有它（owner 2026-11-10 纠正）：槽位是**全 CCC 共用**的，
+   *    而一个宿主实测服务 3 个 CCC。没有这个字段，台账上只能看到一串会话 id，
+   *    而「这个浏览器是谁在占」这个问题**在读数上无法回答** ——
+   *    会话 id 是 UUID，它不告诉你属于哪个 CCC。
+   * ⚠️ 旧记录（v1）读成空串 ⇒ 界面显示「(未知 CCC)」，⛔ 不猜、⛔ 不回落。
+   */
+  cccRoot: string
   /** 租出时刻（ms） */
   leasedAt: number
   /** 最后一次**成功操作**时刻（ms）；刚租出时 = leasedAt */

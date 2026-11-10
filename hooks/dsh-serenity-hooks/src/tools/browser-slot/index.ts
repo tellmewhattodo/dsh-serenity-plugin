@@ -25,12 +25,24 @@ import {
   nudgeStaleSlots,
   reapSlot,
   releaseSlot,
+  slotClose,
+  slotEval,
+  slotExt,
+  slotExtList,
+  slotGoto,
+  slotHtml,
+  slotOpen,
+  slotReload,
+  slotShot,
   slotStatus,
+  slotTargets,
+  slotText,
   waitSlotReady,
   type SlotAction,
   type SlotView,
 } from '../../browser/service.js'
-import { MAX_SLOTS, slotLabel } from '../../browser/state.js'
+import { MAX_SLOTS, slotLabel, slotPort } from '../../browser/state.js'
+import { EXT_DIR_REL } from '../../browser/extend.js'
 import { normalizeSlotId } from '../../browser/process.js'
 
 function renderText(value: unknown): ContentBlock[] {
@@ -67,6 +79,54 @@ function row(v: SlotView): string {
   const extra = v.state === 'free' ? '' : ` 持${v.heldMin}m 闲${v.idleMin}m cpu${v.cpuPct}% 内存${v.rssMb}M`
   const why = v.reasons.length > 0 ? `\n      ↳ ${v.reasons.join('；')}` : ''
   return `  ${g} ${v.label.padEnd(3)} :${v.port} ${v.resolution.padEnd(9)} ${v.state.padEnd(8)}${who}${extra}${why}`
+}
+
+/**
+ * 取 `--slot` 并校验（页面层与扩展层的统一入口）。
+ *
+ * 🔴 页面动作**必须亮明槽位**，⛔ 不接受裸端口：
+ *    槽位号是循环复用的（b1 今天给 A、明天给 B），裸端口会让「这是谁的浏览器」
+ *    变成隐含状态 —— 而那正是 `browser` MSM 与槽位体系断开的那个口子。
+ */
+function needSlot(args: Record<string, unknown>): number {
+  const n = normalizeSlotId(String(args.slot ?? ''))
+  if (n === 0) {
+    throw new Error(
+      `⛔ 需要 --slot <b1..b20>（当前收到 ${JSON.stringify(args.slot)}）。\n` +
+        `  ⇒ 页面操作必须指明槽位：先 \`browser_slot list\` 看你租的是哪个。`,
+    )
+  }
+  return n
+}
+
+/** 取字符串参数（空串当没给） */
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v !== '' ? v : undefined
+}
+
+/** 取数字参数（非有限数当没给） */
+function num(v: unknown): number | undefined {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+/**
+ * 组装扩展的 `args`。
+ *
+ * 契约：`--earg key=value` 可重复；`--earg` 之后的值一律当字符串
+ * （⛔ 不做类型猜测 —— 猜错会让扩展收到 `"true"` 而不是 `true`，而那种错在扩展里静默）。
+ */
+function extArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const raw = args.earg
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : []
+  const out: Record<string, unknown> = {}
+  for (const item of list) {
+    if (typeof item !== 'string') continue
+    const i = item.indexOf('=')
+    if (i <= 0) continue
+    out[item.slice(0, i)] = item.slice(i + 1)
+  }
+  return out
 }
 
 /** 动作实现 */
@@ -134,6 +194,104 @@ async function run(
     }
     case 'doctor': {
       return JSON.stringify(doctorSlots(root), null, 2)
+    }
+    // ── ② 页面层（v1.129.0 从 browser MSM 搬入）──────────────────
+    case 'targets': {
+      const n = needSlot(args)
+      const list = await slotTargets(root, n, sessionId)
+      if (list.length === 0) return `槽位 ${slotLabel(n)}（端口 ${slotPort(n)}）上没有 target。`
+      return (
+        `[browser_slot] ${list.length} 个 target（槽位 ${slotLabel(n)}，端口 ${slotPort(n)}）\n` +
+        list
+          .map(
+            (t: { type: string; id: string; title: string; url: string }) =>
+              `  ${t.type.padEnd(10)} ${t.id}  ${t.title.slice(0, 40)}  ${t.url.slice(0, 90)}`,
+          )
+          .join('\n')
+      )
+    }
+    case 'open': {
+      const n = needSlot(args)
+      const url = str(args.url)
+      if (!url) return '⛔ 需要 --url=<地址>'
+      const id = await slotOpen(root, n, sessionId, url)
+      return `[browser_slot] targetId=${id}`
+    }
+    case 'goto': {
+      const n = needSlot(args)
+      const target = str(args.target)
+      const url = str(args.url)
+      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      if (!url) return '⛔ 需要 --url=<地址>'
+      await slotGoto(root, n, sessionId, target, url)
+      return `[browser_slot] navigate ${target} → ${url}`
+    }
+    case 'eval': {
+      const n = needSlot(args)
+      const target = str(args.target)
+      const js = str(args.js)
+      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      if (!js) return '⛔ 需要 --js=<表达式>（例如 document.title）'
+      const v = await slotEval(root, n, sessionId, target, js, num(args.timeout))
+      return typeof v === 'string' ? v : JSON.stringify(v, null, 2)
+    }
+    case 'text': {
+      const n = needSlot(args)
+      const target = str(args.target)
+      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      return await slotText(root, n, sessionId, target)
+    }
+    case 'html': {
+      const n = needSlot(args)
+      const target = str(args.target)
+      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      return await slotHtml(root, n, sessionId, target, num(args.max))
+    }
+    case 'shot': {
+      const n = needSlot(args)
+      const target = str(args.target)
+      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      const out = str(args.out) ?? `_tmp/browser-shots/shot-${target.slice(0, 8)}-${Date.now()}.png`
+      const rel = await slotShot(root, n, sessionId, target, out)
+      return `[browser_slot] shot → ${rel}`
+    }
+    case 'reload': {
+      const n = needSlot(args)
+      const target = str(args.target)
+      if (!target) return '⛔ 需要 --target=<targetId>（先跑 targets）'
+      const state = await slotReload(root, n, sessionId, target, str(args.script))
+      return `[browser_slot] reload 完成（readyState=${state || '?'}）`
+    }
+    case 'close': {
+      const n = needSlot(args)
+      const all = args.all === true
+      const closed = await slotClose(root, n, sessionId, str(args.target) ?? '', all)
+      return `[browser_slot] closed ${closed.join(', ')}`
+    }
+    // ── ③ 扩展层 ─────────────────────────────────────────────────
+    case 'ext-list': {
+      const exts = slotExtList(root)
+      if (exts.length === 0) {
+        return (
+          `本 CCC 还没有任何扩展。\n` +
+          `  写一个：在 <CCC 根>/${EXT_DIR_REL}/ 下放一个 .ts 文件，文件名即扩展名。\n` +
+          `  契约：stdin 收 {slot,port,cccRoot,args}；stdout **最后一个非空行**给 {"ok":true,"result":…}。\n` +
+          `  ⚠️ ACC 只 spawn、⛔ 从不 import —— 你的语法错不会放倒宿主。`
+        )
+      }
+      return (
+        `本 CCC 的浏览器扩展 ${exts.length} 个（<CCC 根>/${EXT_DIR_REL}/）：\n` +
+        exts.map((e: { name: string }) => `  · ${e.name}`).join('\n') +
+        `\n\n调用：browser_slot ext --slot b1 --name <名> [--eslot …/--earg key=value]`
+      )
+    }
+    case 'ext': {
+      const n = needSlot(args)
+      const name = str(args.name)
+      if (!name) return '⛔ 需要 --name=<扩展名>（先跑 ext-list）'
+      const res = await slotExt(root, n, sessionId, name, extArgs(args))
+      if (!res.ok) return `⛔ 扩展「${name}」失败（${res.code ?? 'unknown'}）：\n${res.error ?? ''}`
+      return typeof res.result === 'string' ? res.result : JSON.stringify(res.result ?? null, null, 2)
     }
   }
 }
