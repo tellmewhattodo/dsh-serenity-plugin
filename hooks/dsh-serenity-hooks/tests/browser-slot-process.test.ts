@@ -9,15 +9,20 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
+import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   buildArgs,
+  destroySlot,
   findChrome,
   findPidsByProfile,
   clearSlotIdentity,
+  killPidOutcome,
   normalizeSlotId,
+  pidClaimsProfile,
+  pidIsAlive,
   portHolders,
   readSlotIdentity,
   resolveDisplay,
@@ -249,6 +254,98 @@ describe('🔴 按 profile 认领（认错就会杀掉 user 自己的浏览器�
     expect(profileA).not.toBe(profileB)
     expect(profileA.startsWith(profileB)).toBe(false)
   })
+
+  it('㉘ 🔴 `pidClaimsProfile`：台账里的 pid 只是**线索**，命令行不含本槽位 profile 就拒绝', () => {
+    // 判据来源 = 一次真实污染（2026-11-10）：测试夹具 `{pid: 4242}` 进了真实台账，
+    //   而 `destroySlot` 当时**无条件** kill 了那个 pid ⇒ 向一个陌生进程发了 SIGTERM。
+    //   ⇒ pid 只能当"待验证的线索"，⛔ 不能当"杀死目标"。
+    const profile = slotPaths(3).profile
+    // 本进程命令行里不含该 profile ⇒ 必须拒绝（这正是"陌生人"的形态）
+    expect(pidClaimsProfile(process.pid, profile)).toBe(false)
+    // 负控方向：拿一个**本进程命令行里真的有**的串 ⇒ 必须认（证明上面不是恒 false）
+    expect(pidClaimsProfile(process.pid, 'vitest')).toBe(true)
+    // 垃圾 pid 一律拒绝（⛔ 不许 0/负数/非整数走到 process.kill）
+    for (const bad of [0, 1, -5, 1.5, Number.NaN]) expect(pidClaimsProfile(bad, profile)).toBe(false)
+    // 不存在的 pid ⇒ 拒绝且不抛
+    expect(pidClaimsProfile(999_999_999, profile)).toBe(false)
+  })
+
+  it('㉙ 🔴 `destroySlot` 拒绝按台账杀陌生 pid，并把这件事**说出来**', () => {
+    // 造一个"陈旧的台账记录"：pid 指向本测试进程（它绝不是浏览器）
+    const victim = process.pid
+    const r = destroySlot(4, victim)
+    // 判据一：**副作用** —— 本进程还活着（若真的 kill 了，这一行根本不会被执行到）
+    expect(existsSync(`/proc/${victim}`)).toBe(true)
+    // 判据二：回执必须自解释（⛔ 静默跳过 —— 那会让"没杀"与"没找到"同形）
+    expect(r.killed).not.toContain(victim)
+    expect(r.detail).toContain('未被杀死')
+    expect(r.detail).toContain(String(victim))
+  })
+
+  it('㉚ 🔴 `killPidOutcome`：`absent` 绝不能记成 `killed`（这就是那笔假回收的来源）', () => {
+    // 判据来源 = 一次真实误读（2026-11-10）：`/proc/4242` 根本不存在，
+    //   而 `reap` 回执写着「已回收 1 个进程（4242）」—— 那条清理记录是**假的**。
+    //   成因：旧 `killPid` 在 `process.kill` 抛错时直接 `return true`，注释写"已经不在了"，
+    //   但那个 catch 同时接住了 EPERM（进程存在、只是没权限）与 EINVAL（pid 非法）。
+    expect(killPidOutcome(999_999_999)).toBe('absent') // 动手前就不在
+    for (const bad of [0, 1, -5, 1.5, Number.NaN]) expect(killPidOutcome(bad)).toBe('absent')
+  })
+
+  it('㉛ 🔴 `killPidOutcome` 对真的进程返回 `killed`（证明三档不是恒 absent）', () => {
+    // ⚠️ 这一格是 ㉚ 的**判别力来源**：没有它，一个恒返回 'absent' 的实现也能让 ㉚ 全绿。
+    const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { stdio: 'ignore' })
+    const pid = child.pid!
+    try {
+      expect(pidIsAlive(pid)).toBe(true) // 正控：它真活着
+      expect(killPidOutcome(pid)).toBe('killed')
+      expect(pidIsAlive(pid)).toBe(false) // 判据 = 存活性，⛔ 不是目录存在性
+    } finally {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* 已经死了 */
+      }
+    }
+  })
+
+  it('㉜ 🔴 「`/proc/<pid>` 存在」与「进程活着」不是同一件事（僵尸档）', async () => {
+    // 判据来源：本文件 ㉛ 第一次跑就红在 `expected 'denied' to be 'killed'`。
+    //   真因 = 我们杀掉的子进程成了僵尸（父进程还没 wait），`/proc/<pid>` **仍存在**
+    //   ⇒ 旧判据把「杀掉了」读成「杀不动」，一笔成功回收被报成失败。
+    // ⇒ 这一格直接钉住两条读数在僵尸档上的**不同取值**。
+    const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},60000)'], { stdio: 'ignore' })
+    const pid = child.pid!
+    try {
+      process.kill(pid, 'SIGKILL')
+      // 等它变成僵尸（此时 /proc 还在，但 state=Z）
+      const deadline = Date.now() + 3000
+      let sawZombie = false
+      while (Date.now() < deadline) {
+        if (existsSync(`/proc/${pid}`) && !pidIsAlive(pid)) {
+          sawZombie = true
+          break
+        }
+        if (!existsSync(`/proc/${pid}`)) break // 已被回收（不同内核/gc 时机）⇒ 跳过本档
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      if (sawZombie) {
+        // 这就是判据：目录在，但**不活着**
+        expect(existsSync(`/proc/${pid}`)).toBe(true)
+        expect(pidIsAlive(pid)).toBe(false)
+      }
+      // 无论是否观察到僵尸档：活着时 pidIsAlive 必须为 false（两个方向都成立）
+      expect(pidIsAlive(pid)).toBe(false)
+    } finally {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* 已经死了 */
+      }
+      // 收尸，避免测试进程自己攒僵尸
+      child.on('error', () => {})
+    }
+  })
+
   it('⑧ 返回值里绝不含自身 pid（防止把自己当浏览器杀掉）', () => {
     // 用一个"恰好会匹配到自己命令行"的路径做正控：当前进程 cmdline 含 test 文件路径
     const pids = findPidsByProfile('vitest')

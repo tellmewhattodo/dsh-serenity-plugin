@@ -53,4 +53,17 @@ describe('槽位家目录（唯一性由这个函数保证）', () => {
     expect(p).not.toMatch(/home-serenity|AGENT_SESSIONS|\.opencode/i)
     expect(p.startsWith(homedir())).toBe(true)
   })
+
+  it('⑥ 🔴 测试进程里**不覆盖就直接抛** —— 这是"测试不许污染唯一真相源"的机械保证', () => {
+    // 判据来源 = 一次真实污染（2026-11-10）：一个没跟着迁移的旧测试仍在调
+    //   `writeLedger(root, …)`，而新签名只有形参 ⇒ 多传的 root 被 JS **静默忽略**
+    //   ⇒ 测试夹具落进了真实台账 ⇒ 之后 reap 拿着脏 pid 去杀了陌生进程。
+    // ⇒ 唯一的机械保证：测试进程不给出覆盖值就**起不来**。
+    expect(() => slotsHomeDir({ VITEST: 'true' })).toThrow(/SERENITY_BROWSER_SLOTS_DIR/)
+    expect(() => slotsHomeDir({ VITEST_WORKER_ID: '1' })).toThrow()
+    // 正控：给了覆盖值就正常返回（证明上面不是"任何调用都抛"）
+    expect(slotsHomeDir({ VITEST: 'true', [SLOTS_DIR_ENV]: '/tmp/ok' })).toBe('/tmp/ok')
+    // 负控：不在测试进程里 ⇒ 不抛（生产路径不受影响）
+    expect(() => slotsHomeDir({})).not.toThrow()
+  })
 })

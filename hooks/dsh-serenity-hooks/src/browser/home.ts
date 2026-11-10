@@ -39,6 +39,9 @@ import { join } from 'node:path'
 /** 环境变量名（覆盖全局家目录） */
 export const SLOTS_DIR_ENV = 'SERENITY_BROWSER_SLOTS_DIR'
 
+/** 判「此刻是不是在测试进程里」的环境标记（vitest 自己会设 `VITEST`） */
+const TEST_ENV_MARKERS = ['VITEST', 'VITEST_WORKER_ID', 'VITEST_POOL_ID'] as const
+
 /**
  * 槽位体系的全局家目录。
  *
@@ -48,5 +51,34 @@ export const SLOTS_DIR_ENV = 'SERENITY_BROWSER_SLOTS_DIR'
 export function slotsHomeDir(env: Record<string, string | undefined> = process.env): string {
   const override = env[SLOTS_DIR_ENV]
   if (override && override.trim() !== '') return override
+  assertNotPollutingRealHome(env)
   return join(homedir(), '.dsh', 'serenity-browser-slots')
+}
+
+/**
+ * 🔴🔴 **测试进程必须显式指定家目录，⛔ 不许静默落在真实家目录上**。
+ *
+ * 这条修的是一个**真的发生过**的污染（2026-11-10 真机实测）：
+ *    全局化改动之后，一个**没跟着迁移**的旧测试仍在调 `writeLedger(root, …)` ——
+ *    而全局化后的 `writeLedger(ledger)` 只有一个形参 ⇒ **多传的那个 `root` 被 JS 静默忽略**
+ *    ⇒ 测试夹具 `{slot:2, pid:4242, sessionId:'sess-a'}` 落进了**真实的**全局台账
+ *    ⇒ 之后 `reap b2` 的读数里出现了三条"占用者 sess-a"的幽灵租约，
+ *       并且 `destroySlot` 拿着 `pid:4242` 去杀了**一个陌生进程**（详见 process.ts 的判据）。
+ *
+ * 危害的形状（值得单记）：**测试污染的是唯一真相源，而污染读数与真实读数完全同形** ——
+ * 之后所有人（包括看守）都会把幽灵租约当成真的占用者。
+ *
+ * ⇒ 判据：**"多余的参数被忽略"是 JS 的默认行为，⛔ 不能指望调用方自己发现错签名**。
+ *    唯一的机械保证是：测试进程**不给出覆盖值就起不来**。
+ * ⚠️ 这条只挡"忘记覆盖"，⛔ 不挡"覆盖成一个也错的路径"（那属于测试自己的责任）。
+ */
+function assertNotPollutingRealHome(env: Record<string, string | undefined>): void {
+  const inTest = TEST_ENV_MARKERS.some((k) => typeof env[k] === 'string' && env[k] !== '')
+  if (!inTest) return
+  throw new Error(
+    `⛔ 测试进程里 ${SLOTS_DIR_ENV} 必须显式指向临时目录（当前未设置）。\n` +
+      `  原因：槽位台账是**全局唯一真相源**，测试写进去会留下与真实占用**完全同形**的幽灵租约，` +
+      `且之后 reap/destroy 会按那份脏台账去杀进程。\n` +
+      `  ⇒ 在测试里这样写：process.env.${SLOTS_DIR_ENV} = mkdtempSync(join(tmpdir(), 'slot-…'))`,
+  )
 }

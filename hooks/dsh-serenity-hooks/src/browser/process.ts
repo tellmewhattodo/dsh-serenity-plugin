@@ -552,36 +552,89 @@ export function sampleProcTree(pids: number[], prev: ProcSample | null, now = Da
   return out
 }
 
-/** 杀一个 pid（先 TERM，给 1.5s 收尾，再 KILL）；返回是否最终消失 */
-export function killPid(pid: number, waitMs = 1500): boolean {
-  if (!Number.isInteger(pid) || pid <= 1) return false
+/**
+ * 杀一个 pid（先 TERM，给 1.5s 收尾，再 KILL）。
+ *
+ * 🔴🔴 **返回值必须是三档，不能是 boolean**（2026-11-10 真机实测逼出来的）：
+ *    原版在 `process.kill` 抛错时直接 `return true`，注释写的是"已经不在了"——
+ *    但 `catch` 也会接住 **EPERM**（进程存在、但我们没权限）与 **EINVAL**（pid 非法）。
+ *    ⇒ 「我杀掉了它」与「它本来就不在」与「它在但我杀不动」在读数上全是 `true`。
+ *
+ *    实测代价：台账被测试夹具污染成 `{pid: 4242}`，而 `/proc/4242` **根本不存在**，
+ *    `reap` 的回执却写着「已回收 1 个进程（4242）」—— 于是那条清理记录**是假的**，
+ *    下一个人会以为真有过一个浏览器进程被收掉。
+ *
+ *    ⇒ 判据：**"我做了什么"与"我看到了什么"必须分开报**。
+ *    这也是本仓反复出现的同一形状（D253「恒空读数器」/ D252「读了数 ≠ 读的是那个数」）。
+ */
+export type KillOutcome =
+  /** 它确实存在，且现在没了 —— 是**我们杀的** */
+  | 'killed'
+  /** 我们动手之前它就已经不在了（ESRCH）⇒ ⛔ 不能记成"已回收" */
+  | 'absent'
+  /** 它存在但我们没权限/不能动（EPERM 等）⇒ 要如实说出来 */
+  | 'denied'
+
+export function killPidOutcome(pid: number, waitMs = 1500): KillOutcome {
+  if (!Number.isInteger(pid) || pid <= 1) return 'absent'
+  // 动手之前先定格"它本来在不在" —— 这是区分 killed 与 absent 的唯一依据
+  const existedBefore = pidIsAlive(pid)
   try {
     process.kill(pid, 'SIGTERM')
-  } catch {
-    return true // 已经不在了
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code
+    if (code === 'ESRCH') return 'absent'
+    // ⚠️ 不是"已经不在"，而是"动不了" —— 必须与上面分开
+    return existedBefore ? 'denied' : 'absent'
   }
-  const deadline = Date.now() + waitMs
-  while (Date.now() < deadline) {
-    if (!existsSync(`/proc/${pid}`)) return true
-    const until = Date.now() + 50
-    while (Date.now() < until) {
-      /* spin */
+  const waitGone = (ms: number): boolean => {
+    const deadline = Date.now() + ms
+    while (Date.now() < deadline) {
+      if (!pidIsAlive(pid)) return true
+      const until = Date.now() + 50
+      while (Date.now() < until) {
+        /* spin */
+      }
     }
+    return !pidIsAlive(pid)
   }
+  if (waitGone(waitMs)) return 'killed'
   try {
     process.kill(pid, 'SIGKILL')
   } catch {
-    /* ignore */
+    /* SIGKILL 也可能因 ESRCH 失败（刚死）⇒ 下面统一复核 */
   }
-  const hard = Date.now() + 500
-  while (Date.now() < hard) {
-    if (!existsSync(`/proc/${pid}`)) return true
-    const until = Date.now() + 50
-    while (Date.now() < until) {
-      /* spin */
-    }
+  if (waitGone(500)) return 'killed'
+  return 'denied'
+}
+
+/**
+ * 一个 pid **是否还活着**（⛔ 不是"`/proc/<pid>` 存不存在"）。
+ *
+ * 🔴🔴 这两个在 Linux 上**不是同一件事**：进程死后若父进程还没 `wait()` 它，
+ *    `/proc/<pid>` 会继续存在（**僵尸**，`stat` 的 state = `Z`）。
+ *    实测代价（2026-11-10，本文件 ㉛ 当场抓出）：杀掉一个自己的子进程后
+ *    `existsSync('/proc/<pid>')` 仍为 true ⇒ 判据把「杀掉了」误判成「杀不动」，
+ *    于是一笔**成功的回收被报成失败**。
+ *
+ *    ⇒ 判据：**"存在"与"活着"必须分开读** —— 存在性读目录，存活性读 `stat` 的 state。
+ *    与 D253 同族：一个恒真的读数（`existsSync` 对僵尸为 true）会让相邻的两档同形。
+ */
+export function pidIsAlive(pid: number): boolean {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    // 格式：`pid (comm) state ...`；comm 可能含空格/括号 ⇒ 以**最后一个 `)`** 为界
+    const after = stat.slice(stat.lastIndexOf(')') + 2)
+    const state = after.charAt(0)
+    return state !== 'Z' && state !== 'X'
+  } catch {
+    return false
   }
-  return !existsSync(`/proc/${pid}`)
+}
+
+/** 兼容包装：只要"最终它不在了"就 true。⚠️ 新的调用方请用 {@link killPidOutcome} */
+export function killPid(pid: number, waitMs = 1500): boolean {
+  return killPidOutcome(pid, waitMs) !== 'denied' && !pidIsAlive(pid)
 }
 
 /**
@@ -591,22 +644,84 @@ export function killPid(pid: number, waitMs = 1500): boolean {
  * 清 pid 文件 → **保留 profile 目录**（登录态是槽位的资产，⛔ 不因一次回收就丢）。
  *
  * 🔴 v1.129.0：同样删掉未被读的 `root` 参数（理由同 {@link launchSlot}）。
+ *
+ * 🔴🔴 **`pidHint` 必须先验证归属，⛔ 不许无脑 kill**（v1.129.0 真机实测逼出来的）：
+ *    台账是**文件**，它会被污染 —— 测试夹具、手工编辑、旧版本残留都会留下
+ *    「一个 pid 数字」。若直接 `killPid(pidHint)`，那个 pid 可能是**任何进程**：
+ *    编辑器、user 自己的浏览器、别的 CCC 的服务。
+ *
+ *    实测取证（2026-11-10 08:2x）：全局化改动后，旧测试的 `readLedger(root)` 里
+ *    那个多余参数被**静默忽略** ⇒ 测试夹具 `{slot:2, pid:4242}` 落进了**真实的**全局台账
+ *    ⇒ `reap b2` 回执写着「已回收 1 个进程（4242）」—— 它真的向一个陌生 pid 发了 SIGTERM。
+ *    那次 4242 恰好不存在（`killPid` 的 catch 把 ESRCH 当成功），**纯属运气**。
+ *
+ *    ⇒ 判据：**pid 只能作为"待验证的线索"，⛔ 不能作为"杀死目标"**。
+ *    验证 = 该 pid 的 cmdline 里必须含**本槽位专属的 profile 路径**（与 `findPidsByProfile`
+ *    同一条认领规则）。验不过 ⇒ 只记日志、不杀，并在回执里说出来。
  */
 export function destroySlot(n: number, pidHint = 0): { killed: number[]; detail: string } {
   const paths = slotPaths(n)
+  // ① 权威认领：命令行里带本槽位 profile 的那些（这是唯一可信的来源）
   const pids = new Set<number>(findPidsByProfile(paths.profile))
-  if (pidHint > 0) pids.add(pidHint)
+  // ② 台账里的 pid 只是线索 —— 必须先过同一条认领规则
+  let rejectedHint = 0
+  if (pidHint > 0 && !pids.has(pidHint)) {
+    if (pidClaimsProfile(pidHint, paths.profile)) {
+      pids.add(pidHint)
+    } else {
+      rejectedHint = pidHint
+    }
+  }
   const killed: number[] = []
+  const absent: number[] = []
+  const denied: number[] = []
   for (const pid of pids) {
-    if (killPid(pid)) killed.push(pid)
+    const out = killPidOutcome(pid)
+    if (out === 'killed') killed.push(pid)
+    else if (out === 'absent') absent.push(pid)
+    else denied.push(pid)
   }
   rmSync(paths.pidFile, { force: true })
-  return {
-    killed,
-    detail:
-      killed.length > 0
-        ? `已回收 ${killed.length} 个进程（${killed.join(', ')}）；profile 保留（登录态不丢）`
-        : '无可回收进程（槽位本就空闲）',
+  const parts: string[] = []
+  if (killed.length > 0) {
+    parts.push(`已回收 ${killed.length} 个进程（${killed.join(', ')}）；profile 保留（登录态不丢）`)
+  } else {
+    parts.push('无可回收进程（槽位本就空闲）')
+  }
+  // 🔴 「我杀掉了」与「它本来就不在」必须分两行说 —— 否则台账清掉的是一次**不存在的回收**
+  if (absent.length > 0) {
+    parts.push(
+      `  ℹ️ 另有 ${absent.length} 个 pid（${absent.join(', ')}）**动手前就已不存在** ⇒ 未计入"已回收"` +
+        `（台账里那条是陈旧的）。`,
+    )
+  }
+  if (denied.length > 0) {
+    parts.push(
+      `  ⛔ ${denied.length} 个 pid（${denied.join(', ')}）**杀不动**（多半是权限不足）` +
+        `⇒ 它们可能仍在运行，请人工确认。`,
+    )
+  }
+  if (rejectedHint > 0) {
+    parts.push(
+      `  ⚠️ 台账记的 pid ${rejectedHint} **未被杀死** —— 它的命令行里没有本槽位的 profile，` +
+        `说明台账那条记录是陈旧的或被污染（⛔ 不按台账杀陌生进程）。`,
+    )
+  }
+  return { killed, detail: parts.join('\n') }
+}
+
+/**
+ * 某 pid 是否**真的**属于这个 profile（读 `/proc/<pid>/cmdline`）。
+ *
+ * 判据与 `findPidsByProfile` 同源：命令行里必须出现本槽位专属的 `--user-data-dir`。
+ * ⚠️ 单独包一个函数是为了让「pid 归属校验」这件事有一个**可被点名测试**的落点。
+ */
+export function pidClaimsProfile(pid: number, profileDir: string): boolean {
+  if (!Number.isInteger(pid) || pid <= 1) return false
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(profileDir)
+  } catch {
+    return false
   }
 }
 

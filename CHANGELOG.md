@@ -14,7 +14,86 @@
 
 ---
 
-## v1.129.0 — 2026-11-10（浏览器能力集中到 `browser_slot` ＋ CCC 可写扩展 ＋ 全局 20 槽位）
+## v1.129.1 — 2026-11-10（🔴 v1.129.0 的全局化把**测试**写进了真实台账，并由此揪出两个读数缺陷）
+
+> 这一版没有新功能。它修的是 v1.129.0 **自己引入**的一处污染，以及那处污染**在读数上暴露出的两个假读数**。
+> 三件事是**一条因果链**，所以合在一版：污染 → 假回收 → 假"杀不动"。
+
+### ① 缺陷：一个没跟着迁移的测试往**真实全局台账**写了夹具
+
+v1.129.0 把 `readLedger()` / `writeLedger()` / `withLedger()` 的 `root` 参数**删掉了**，
+但 `tests/browser-slot-ledger.test.ts` **没有跟着迁移**，仍在调 `writeLedger(root, …)`。
+
+🔴 **JS 不会因为你多传一个参数就报错** —— 那个 `root` 被**静默忽略**，
+于是测试夹具 `{slot: 2, pid: 4242, sessionId: 'sess-a', trajectory: 'traj'}` 写进了
+`~/.dsh/serenity-browser-slots/ledger.json`（**唯一真相源**）。
+
+**实测后果**（真机读数）：
+
+- `browser_slot list` 出现三条 `orphaned` 幽灵租约，`heldMin` = 29904504（≈57 年，`leasedAt: 1000`）
+- `doctor` 的 `identityDrift` 报三条 —— 而那三条**本来就该报**（夹具没有 identity）
+- **看守真的工作了**：`nudges` 从 0 变 1，它对 `trajectory: 'traj'` 发过提醒
+
+🔴 **危害的形状（值得单记）**：**测试污染的是唯一真相源，而污染读数与真实读数完全同形** ——
+之后所有人（包括看守）都会把幽灵租约当成真实占用者。
+⇒ 判据：**「多余的参数被忽略」是 JS 的默认行为，⛔ 不能指望调用方自己发现错签名。**
+
+**修法（机械保证，不靠纪律）**：`slotsHomeDir()` 在**测试进程**里（`VITEST*` 环境标记）
+若拿不到 `SERENITY_BROWSER_SLOTS_DIR` ⇒ **直接抛错**。测试进程不给出覆盖值就起不来。
+⚠️ 边界如实登记：这条只挡「忘记覆盖」，⛔ 不挡「覆盖成一个也错的路径」。
+
+### ② 假读数 A：`reap` 把「本来就不存在」报成「已回收」
+
+台账里 `pid: 4242`，而 `/proc/4242` **根本不存在**，`reap` 的回执却是
+「已回收 1 个进程（4242）」。成因：旧 `killPid` 在 `process.kill` 抛错时 `return true`，
+注释写"已经不在了"—— 而那个 `catch` 同时接住了 **EPERM**（存在但没权限）与 **EINVAL**（pid 非法）。
+
+⇒ `killPidOutcome` 改成**三档**：`killed`（我们杀的）／`absent`（动手前就不在）／`denied`（在但动不了）。
+`destroySlot` 把三档**分行**说出来 —— ⛔ 不许把"我没做"写成"我做了"。
+
+### ③ 假读数 B：`pid` 被当成「杀死目标」，而它只是「一条线索」
+
+`destroySlot` 原来无条件 `killPid(pidHint)`。台账是**文件**，会被污染（测试夹具／手工编辑／旧版本残留），
+于是一个脏 `pid` 就可能杀掉**任何进程** —— 编辑器、user 自己的浏览器、别的 CCC 的服务。
+那次 4242 恰好不存在，**纯属运气**。
+
+⇒ 新增 `pidClaimsProfile(pid, profileDir)`：台账里的 pid **必须先通过认领**（命令行含本槽位专属
+`--user-data-dir`，与 `findPidsByProfile` 同一条规则），验不过 ⇒ 不杀、并在回执里点名。
+
+### ④ 假读数 C（写测试时当场抓出）：「`/proc/<pid>` 存在」≠「进程活着」
+
+`killPidOutcome` 第一版用 `existsSync('/proc/<pid>')` 判定"没了"，结果**自己的测试当场红**：
+`expected 'denied' to be 'killed'`。真因 = 我们杀掉的子进程成了**僵尸**（父进程还没 `wait`），
+`/proc/<pid>` **仍然存在** ⇒ 一笔成功的回收被报成「杀不动」。
+
+⇒ 新增 `pidIsAlive(pid)`：读 `/proc/<pid>/stat` 的 **state**（`Z`/`X` 不算活），⛔ 不读目录存在性。
+判据：**"存在"与"活着"必须分开读**（D253 同族：一个恒真的读数会让相邻两档同形）。
+
+### 门禁
+
+`typecheck` ✅ ／ `typecheck-host(0.2.2-rc.1)` ✅ ／ `test` ✅ ／ `coverage` **222 files / 3484 tests，
+93.56% stmts ／ 86.33% branches** ／ `build` ／ `pack-check` ✅。
+
+### 变异检验（5 组，全部精确红）
+
+| 变异体 | 结果 |
+|---|---|
+| `void stampIdentity` | ⑰ 精确红 1 |
+| release 不调 `clearSlotIdentity` | 修判据后精确红 1（首轮曾假绿，见 v1.129.0） |
+| `assertSlotOwned` 直接 return | ㉑㉒㉓ 三条同时红 |
+| `ledgerPath()` 落到子目录 | ledger ② 精确红 1 |
+| `pidIsAlive` 退回 `existsSync` | ㉛ 精确红 1 |
+| `destroySlot` 去掉 pid 认领 | 🔴 **测试进程本身被杀**（exit 2，无输出）—— 比"精确红 1"更强的证据 |
+
+### 🔴 另一条假绿的教训：`Function.length` 判不了「函数有没有某个参数」
+
+`slotsHomeDir(env = process.env)` 里**带默认值的形参不计入 `length`** ⇒ 恒 0，
+于是 `expect(slotsHomeDir.length).toBe(1)` 报 `expected +0 to be 1`。
+⇒ 真判据：**塞一个"看起来该被尊重"的根进去，结果必须一字不变**。
+
+---
+
+
 
 > owner 两条令（逐字）：
 > ① 「我希望所有浏览器能力都集中到这个 browser_slot，同时这个 browser_slot 支持 CCC 给它写扩展，
