@@ -282,7 +282,7 @@ async function run(
       return (
         `本 CCC 的浏览器扩展 ${exts.length} 个（<CCC 根>/${EXT_DIR_REL}/）：\n` +
         exts.map((e: { name: string }) => `  · ${e.name}`).join('\n') +
-        `\n\n调用：browser_slot ext --slot b1 --name <名> [--eslot …/--earg key=value]`
+        `\n\n调用：browser_slot ext --slot b1 --name <名> [--earg key=value …（可重复）]`
       )
     }
     case 'ext': {
@@ -309,6 +309,29 @@ export function createBrowserSlotTool(ctx: Context) {
       slot: { type: 'string', description: 'Slot label for status/release/reap (b1..b20, or 1..20); for acquire = request a specific slot (omit = auto-pick a free one)' },
       wait: { type: 'boolean', description: 'acquire: wait until the CDP endpoint actually answers (2 consecutive probes) before returning. Default false (returns once the process is spawned).' },
       reason: { type: 'string', description: 'reap: why this slot is being force-reclaimed (recorded).' },
+      // ── 页面层（v1.129.0 搬入）与扩展层的参数 ─────────────────────
+      //
+      // 🔴🔴 **这 7 个参数曾长期缺失**（v1.129.0 ~ v1.129.2）：`run()` 一直在读它们，
+      //    而 `parameters` 只声明了 4 个。JS 忽略多余字段 ⇒ **功能一直是对的**，
+      //    坏的是**可发现性**：调用方（尤其没有文档的模型）在 schema 里看不到
+      //    `url`/`target`/`js`，自然也不会传 —— 于是 `⛔ 需要 --url=<地址>`
+      //    这类拒绝看起来像"功能没做"，而不是"你没给参数"。
+      //
+      // ⇒ 判据（D310）：**读而没说 = 半个功能**。一个参数的"存在"由 schema 决定，
+      //    不由 execute 里的 `args.x` 决定 —— 后者只有读过源码的人才知道。
+      //    ⛔ 不靠"文档里写了"补这一格：文档是给人看的，schema 是给调用方看的。
+      url: { type: 'string', description: 'open / goto: the address to open or navigate to (http(s)://…)' },
+      target: { type: 'string', description: 'goto / eval / text / html / shot / reload / close: the targetId from `targets` (⛔ not a slot number)' },
+      js: { type: 'string', description: 'eval: a JavaScript expression to evaluate in the page (e.g. document.title); uses Runtime.evaluate' },
+      out: { type: 'string', description: 'shot: output path for the PNG, relative to the CCC root. Omit = auto-named under _tmp/browser-shots/' },
+      max: { type: 'number', description: 'html: truncate the returned HTML after this many characters' },
+      all: { type: 'boolean', description: 'close: close every target in the slot instead of one (then `target` is not needed)' },
+      name: { type: 'string', description: 'ext: extension name = the .ts file name under <CCC>/browser-ext/ (run `ext-list` to see them)' },
+      // earg 刻意只声明 string：契约是"重复的 key=value，值一律当字符串"，
+      // 若声明成 object 会诱导调用方传 {"k":"true"}，然后在扩展里静默变成字符串 "true"。
+      earg: { type: 'array', items: { type: 'string' }, description: 'ext: repeatable key=value pairs passed to the extension as strings (e.g. ["city=Suzhou"])' },
+      timeout: { type: 'number', description: 'eval: evaluate timeout in milliseconds' },
+      script: { type: 'string', description: 'reload: a script to run after the reload completes' },
     },
     output: {
       schema: { type: 'json' },
