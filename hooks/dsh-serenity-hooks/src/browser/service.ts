@@ -1043,7 +1043,7 @@ export async function slotScroll(
   sessionId: string,
   targetId: string,
   opts: { ref?: number; xy?: { x: number; y: number }; to?: 'top' | 'bottom'; deltaY?: number },
-): Promise<{ scrolledY: number }> {
+): Promise<{ scrolledY: number; via: 'wheel' | 'js-fallback'; why?: string }> {
   assertSlotOwned(root, slot, sessionId)
   // 目标点：给了 ref 就量它的盒中心；给了 xy 就用它；否则视口中心
   let at = opts.xy ?? { x: 600, y: 400 }
@@ -1052,18 +1052,17 @@ export async function slotScroll(
     at = { x: b.x, y: b.y }
   }
   const before = Number(await evalInPage(slot, targetId, 'String(window.scrollY || 0)'))
-  if (opts.to === 'top') {
-    await scrollAt(slot, targetId, at.x, at.y, 0, -100_000)
-  } else if (opts.to === 'bottom') {
-    await scrollAt(slot, targetId, at.x, at.y, 0, 100_000)
-  } else {
-    await scrollAt(slot, targetId, at.x, at.y, 0, opts.deltaY ?? 600)
-  }
+  const r =
+    opts.to === 'top'
+      ? await scrollAt(slot, targetId, at.x, at.y, 0, -100_000)
+      : opts.to === 'bottom'
+        ? await scrollAt(slot, targetId, at.x, at.y, 0, 100_000)
+        : await scrollAt(slot, targetId, at.x, at.y, 0, opts.deltaY ?? 600)
   // 🔴 等一帧再量：wheel 事件是异步生效的，立刻读 scrollY 会读到旧值（而那是「滚动没动」的形状）
   await new Promise((r) => setTimeout(r, 250))
   const after = Number(await evalInPage(slot, targetId, 'String(window.scrollY || 0)'))
   pageTouched(root, slot)
-  return { scrolledY: Number.isFinite(after - before) ? after - before : 0 }
+  return { scrolledY: Number.isFinite(after - before) ? after - before : 0, via: r.via, ...(r.why ? { why: r.why } : {}) }
 }
 
 /** 等待条件成立（条件由 `wait-spec.ts` 解析） */

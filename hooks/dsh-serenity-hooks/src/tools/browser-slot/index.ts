@@ -375,8 +375,12 @@ async function run(
       const to = toRaw === 'top' || toRaw === 'bottom' ? toRaw : undefined;
       if (!refStr && !xy && !to) return '⛔ 需要 --ref=<eNNN> ／ --xy=<x,y> ／ --to=<top|bottom> 之一';
       const ref = refStr ? needBackendId(args) : undefined;
-      const { scrolledY } = await slotScroll(root, n, sessionId, target, { ref, xy, to, deltaY: num(args.delta) });
-      return `[browser_slot] scroll → scrollY 变化 ${scrolledY > 0 ? '+' : ''}${scrolledY}px`;
+      const { scrolledY, via, why } = await slotScroll(root, n, sessionId, target, { ref, xy, to, deltaY: num(args.delta) });
+      const viaLine =
+        via === 'wheel'
+          ? '（真实 wheel 事件）'
+          : `（⚠️ 回落 JS 滚动 —— ${why ?? ''}；本次**没有产生 wheel 事件**，靠 wheel 触发的懒加载不会启动）`;
+      return `[browser_slot] scroll → scrollY 变化 ${scrolledY > 0 ? '+' : ''}${scrolledY}px ${viaLine}`;
     }
     case 'wait': {
       const n = needSlot(args)

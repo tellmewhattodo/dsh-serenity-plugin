@@ -468,17 +468,48 @@ export async function scrollAt(
   y: number,
   deltaX: number,
   deltaY: number,
-): Promise<void> {
-  await withPage(slot, targetId, async (send) => {
-    await send('Input.dispatchMouseEvent', {
-      type: 'mouseWheel',
-      x,
-      y,
-      deltaX,
-      deltaY,
-      pointerType: 'mouse',
-    })
-  })
+): Promise<{ via: 'wheel' | 'js-fallback'; why?: string }> {
+  /**
+   * 🔴🔴 **真机实测（2026-11-11）：Wayland headed Chrome 上 `mouseWheel` 会永久挂住。**
+   *
+   *    同一台机器、同一个 Chrome 版本，对照实验三档：
+   *      · `mouseMoved/mousePressed/mouseReleased` ⇒ **立刻返回**
+   *      · `Input.dispatchMouseEvent{type:'mouseWheel'}` ⇒ **30s 超时**
+   *      · `Input.synthesizeScrollGesture` ⇒ **同样超时**
+   *    而**另起一个 `--headless=new` 实例**发同一个 wheel ⇒ **立刻返回**。
+   *    ⇒ 根因在「headed + Wayland」这一档：窗口被节流/遮挡时合成器不确认输入，
+   *      而 CDP 的 wheel 是**等确认**的（不像 mouseMoved 那样 fire-and-forget）。
+   *    ⚠️ 我们**刻意**没有加 `--disable-renderer-backgrounding` 那组 flag（2026-11-09 耗电事故的教训），
+   *      所以这个节流是预期行为 ⇒ 不该为了让 wheel 好用去关它。
+   *
+   * ⇒ 判据：**一种能力在有副作用的动作上不能"挂住"**。等 30s 再失败，等于把一个
+   *    「滚不动」变成「卡死 30 秒」，而调用方无从区分。
+   *    ⇒ wheel 给**短超时**，超时后回落 JS 滚动，**并在回执里写明走的是哪条路**。
+   *    🔴 回落不是等价物：JS 滚动**不产生 wheel 事件**，只靠 wheel 的懒加载不会触发。
+   *       所以它必须**可见**（`via: 'js-fallback'`），⛔ 不静默替代。
+   */
+  const wheel = { type: 'mouseWheel', x, y, deltaX, deltaY, pointerType: 'mouse' };
+  try {
+    await withPage(slot, targetId, async (send) => {
+      await send('Input.dispatchMouseEvent', wheel, 4000);
+    });
+    return { via: 'wheel' };
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e);
+    if (!/超时|timeout/i.test(msg)) throw e;
+    // 回落：JS 滚动（会产生真正的 scroll 事件，滚动监听的懒加载仍会触发）
+    await withPage(slot, targetId, async (send) => {
+      await send(
+        'Runtime.evaluate',
+        {
+          expression: `window.scrollBy(${Math.round(deltaX)}, ${Math.round(deltaY)})`,
+          returnByValue: true,
+        },
+        8000,
+      );
+    });
+    return { via: 'js-fallback', why: 'mouseWheel 在本机 headed/Wayland 档会挂住（见 scrollAt 判据），已回落 JS 滚动' };
+  }
 }
 
 /**
@@ -777,41 +808,57 @@ export async function handleDialog(
   accept: boolean,
   promptText?: string,
 ): Promise<{ hadDialog: boolean; type: string; message: string; accepted: boolean }> {
-  let seen = { hadDialog: false, type: '', message: '' };
-  await withPage(
-    slot,
-    targetId,
-    async (send) => {
-      // ① 先启用 Page 域并读一次「此刻有没有 dialog」——靠事件的普通调用拿不到已有状态
-      await send('Page.enable');
-      try {
-        // 通过 browser 级 WS 才能可靠地在 page 卡死时也问得到（本仓既有判据）
-        await send('Page.handleJavaScriptDialog', {
-          accept,
-          ...(promptText !== undefined ? { promptText } : {}),
-        });
-        seen = { hadDialog: true, type: '', message: '' };
-      } catch (e) {
-        const msg = String((e as Error)?.message ?? e);
-        // ② 「没有 dialog」是**正常状态**，⛔ 不当失败报
-        if (/no dialog|No dialog is showing/i.test(msg)) return;
-        throw e;
-      }
-    },
-    {
-      events: ['Page.javascriptDialogOpening'],
-      onEvent: (_m, p) => {
-        seen = {
-          hadDialog: true,
-          type: String(p.type ?? ''),
-          message: String(p.message ?? ''),
-        };
-      },
-    },
-  );
-  return { ...seen, accepted: seen.hadDialog ? accept : false };
-}
+  /**
+   * 🔴🔴 **真机实测（2026-11-11）：先 `Page.enable` 再处理弹窗，会把整页卡死。**
+   *
+   *    现象：`click` 一个会 `confirm()` 的按钮 ⇒ 点击请求 30s 超时（页面同步阻塞，这是**预期的**）；
+   *    接着调 `dialog` 去处理它 ⇒ **`Page.enable` 自己超时 30s**，弹窗一直挂着，页面永久卡死。
+   *
+   *    对照实验（裸 WS 直连，同一个卡死的页面）：
+   *      · `Page.handleJavaScriptDialog{accept:false}` **不 enable 直接发** ⇒ 立刻返回 `No dialog is showing`
+   *        （说明这条路**通**，只是此刻那条 confirm 已被上一次尝试里的某个环节关掉了）
+   *      · `Page.enable` ⇒ 在弹窗阻塞的页面上**挂住**
+   *
+   *    ⇒ 判据：**在「页面已阻塞」这个状态下，任何需要页面响应的方法都不能排在前面**。
+   *      `Page.enable` 要往渲染器要一次响应，而渲染器正停在 `confirm()` 那一行上。
+   *      ⇒ **先直接发 `handleJavaScriptDialog`**（它由浏览器进程处理，不经过被阻塞的渲染器），
+   *      成功/失败都能立刻知道；`Page.enable` 只在需要**事件面**（拿弹窗类型与正文）时**事后**补。
+   *
+   * ⚠️ 代价如实登记：不 enable 就拿不到 `Page.javascriptDialogOpening` 的 type/message，
+   *    所以本函数报的 `type`/`message` 多为空。**这不是缺陷** —— 判据是「先把页面救回来」，
+   *    而类型/正文属于附加信息（要它就得在弹窗出现**之前** enable，那是调用方的编排问题）。
+   */
+  const send = async (
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<Record<string, unknown>> =>
+    await withPage(slot, targetId, async (s) => await s(method, params, timeoutMs));
 
+  try {
+    await send(
+      'Page.handleJavaScriptDialog',
+      { accept, ...(promptText !== undefined ? { promptText } : {}) },
+      8000,
+    );
+    return { hadDialog: true, type: '', message: '', accepted: accept };
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e);
+    // 「没有弹窗」是**正常状态**（⛔ 不当失败报）
+    if (/no dialog|No dialog is showing/i.test(msg)) {
+      return { hadDialog: false, type: '', message: '', accepted: false };
+    }
+    // 连 handleJavaScriptDialog 都超时 ⇒ 页面此刻已无法响应，如实说清楚
+    if (/超时|timeout/i.test(msg)) {
+      throw new Error(
+        `⛔ 处理弹窗超时：连 handleJavaScriptDialog 都没能在 8s 内返回。\n` +
+          `  ⇒ 这个 target 已经不响应了（多半是被 sync alert/confirm 卡住且浏览器进程也没接住）。\n` +
+          `  ⇒ 出路：close 掉这个 tab 重来（页面状态已不可信）—— ⛔ 不要反复重试同一个 target。`,
+      );
+    }
+    throw e;
+  }
+}
 /**
  * 在页面里等一个条件成立（`wait` 动作）。
  *

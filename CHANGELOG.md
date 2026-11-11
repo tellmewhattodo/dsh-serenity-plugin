@@ -14,7 +14,56 @@
 
 ---
 
-## v1.130.0 — 2026-11-11（`browser_slot` 高阶页面动作：键盘／填值／滚动／等待／拖拽／AX／上传／下载／dialog）
+## v1.130.2 — 2026-11-11（`scroll` 的真机缺陷：Wayland headed 下 `mouseWheel` 会挂住 30s）
+
+> 真机验收抓出来的，不是测试抓出来的（测试全绿，因为**没有任何单测会去发 wheel**）。
+
+**现象**：`browser_slot scroll --to=bottom` 报 `CDP Input.dispatchMouseEvent 超时 30000ms`。
+
+**定因（三档对照实验，同一台机、同一 Chrome 157）**：
+
+| 发什么 | 结果 |
+|---|---|
+| `mouseMoved` / `mousePressed` / `mouseReleased` | **立刻返回** |
+| `Input.dispatchMouseEvent{type:'mouseWheel'}` | **30s 超时** |
+| `Input.synthesizeScrollGesture` | **同样超时** |
+| 同机另起一个 `--headless=new` 实例发同一个 wheel | **立刻返回** |
+
+⇒ 根因在 **headed + Wayland** 这一档：窗口被节流/遮挡时合成器不确认输入，而 CDP 的 wheel **等确认**
+（`mouseMoved` 是 fire-and-forget，所以它不受影响）。**不是参数写错，也不是我们的连接有问题**
+（用裸 WS 直连、最小参数复现同样超时）。
+
+⚠️ **不修根因是刻意的**：能治它的 flag（`--disable-renderer-backgrounding` 一族）正是 2026-11-09
+那次 **36 小时耗电事故**的成因 —— 那两个名字反着来，它们**禁止**浏览器节流后台窗口。
+⇒ 该节流是预期行为，⛔ 不为让 wheel 好用去关它。
+
+**修法（判据：一种能力不能「挂住」）**：等 30s 再失败，等于把「滚不动」变成「卡死 30 秒」，
+而调用方无从区分两者。⇒ wheel 超时收到 **4s**，超时后回落 JS `window.scrollBy`，
+**并在回执里写明走的是哪条路**：
+
+```
+[browser_slot] scroll → scrollY 变化 +1600px （真实 wheel 事件）
+[browser_slot] scroll → scrollY 变化 +1600px （⚠️ 回落 JS 滚动 —— …本次没有产生 wheel 事件，
+                                              靠 wheel 触发的懒加载不会启动）
+```
+
+🔴 **回落不是等价物**：JS 滚动不产生 wheel 事件 ⇒ 只监听 wheel 的懒加载不会触发，
+而 `scrollY` 照样变。两个读数（动了 / 加载了）都会「看起来正常」⇒ 所以必须**可见**，⛔ 不静默替代。
+
+**新增用例 4 条**（`browser-slot-scroll-contract.test.ts`）：钉住 ① 返回带 `via` ② wheel 超时必须 ≤5s
+③ 回执必须说出走了哪条路 ④ 正控（证明抽取器真读到东西）。变异：超时改回 30s ⇒ **S2 精确红**。
+
+门禁：test **231 files / 3574 tests** 全绿。
+
+---
+## v1.130.1 — 2026-11-11（同 v1.130.0 内容；1.130.0 被 npm 暂存位占用，见文末）
+
+> ⚠️ **为什么版本号是 1.130.1 而不是 1.130.0**：第一次 `npm publish` 超时中断，但**暂存动作已在 registry 落地**
+> （`E409 Cannot publish over previously staged version "1.130.0"`），而 `npm stage list` 看不到它、
+> 也无从取 stage id ⇒ 换版本号是唯一不需要「猜一个 id 去 approve」的做法（猜错会动到别人的东西）。
+> 内容一字未改。
+
+### v1.130.0 内容（`browser_slot` 高阶页面动作：键盘／填值／滚动／等待／拖拽／AX／上传／下载／dialog）
 
 > owner 令（2026-11-11）：「接下来完善浏览器操作的 tool 吧，提供尽可能强大的能力」＋「A+B 一起」。
 > A = 高频且判定简单的（键盘/填值/滚动/等待/拖拽）；B = 有副作用面、判定比实现更值钱的（上传/下载/dialog/AX）。
