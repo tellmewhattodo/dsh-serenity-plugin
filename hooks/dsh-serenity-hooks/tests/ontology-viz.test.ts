@@ -104,7 +104,7 @@ describe('fromEngine：类／关系／实例的桥接', () => {
   it('🔴 刚性两种写法都归一（**这是 v1.56.3 发出去的那个崩溃**，必须钉死）', () => {
     // 实测：容器里两种写法并存 ——
     //   `sr:rigidity "rigid"`  （字面量；ccc-ontology.ttl 等基础链全用这种）
-    //   `sr:rigidity sr:rigid` （带前缀的项；home-mail / home-browser 等领域本体用这种）
+    //   `sr:rigidity sr:rigid` （带前缀的项；home-mail / home-gpu 等领域本体用这种）
     // 引擎按原文存 ⇒ 后者带 `sr:`。不归一 ⇒ 渲染器的颜色表查不到 ⇒ **渲染当场抛
     // `Cannot read properties of undefined (reading 'class')`**（v1.56.3 的实况）。
     write(

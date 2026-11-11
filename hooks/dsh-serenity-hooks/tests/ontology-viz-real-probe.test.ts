@@ -26,9 +26,11 @@ const HAS = ROOT !== undefined && existsSync(join(ROOT, '.opencode', 'skills', '
 
 describe.skipIf(!HAS)('viz 真文件探针（v1.56.3 崩溃回归）', () => {
   // 领域本体（`sr:rigidity sr:rigid` 带前缀项形态）—— 这正是崩溃的触发形态
+  // ⚠️ 2026-11-12：`home-browser` 已归档（.opencode 下不存在了）⇒ 换成同在册、同形态的 `home-esp32`。
+  //    判据：这条探针要的是「领域本体 + 带前缀 rigidity」这个**形态**，不是那个具体 skill。
   for (const rel of [
     '.opencode/skills/home-mail/skill.ttl',
-    '.opencode/skills/home-browser/skill.ttl',
+    '.opencode/skills/home-esp32/skill.ttl',
     '.opencode/skills/home-gpu/skill.ttl',
     '.opencode/skills/dsh-serenity-plugin-development/skill.ttl',
     // 基础链（`sr:rigidity "rigid"` 字面量形态）—— 对照
