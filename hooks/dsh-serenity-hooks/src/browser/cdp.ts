@@ -24,9 +24,11 @@
  * 那些行为有真实使用与踩坑记录（4 条轨迹的手册在用）。搬的时候**不为好看改语义**。
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { dirname, resolve, sep } from 'node:path'
+import { mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve, sep } from 'node:path'
 import { slotPort } from './state.js'
+import type { KeyStroke } from './keys.js'
+import type { AxNode } from './ax.js'
 
 /** 一条 CDP 连接上的相关器：发出去的 id → 待兑现的 promise */
 interface CdpConn {
@@ -339,6 +341,522 @@ export function resolveShotPath(cccRoot: string, relOrAbs: string): string {
     throw new Error(`截图落点越界（必须在 CCC 根内）：${relOrAbs}`)
   }
   return abs
+}
+
+/**
+ * 页面级连接的高阶封装：**一次连接、多次调用、必关**。
+ *
+ * 🔴 为什么需要它（新能力全靠它）：既有 10 个动作每个都自己 `attach(wsConnect(...))` +
+ *    `finally close()`。新动作若照抄，会把「连接生命周期」复制十几份 ——
+ *    而那正是本轮要避免的：**同一件事只该有一个实现**（D314 同族教训）。
+ *
+ * @param fn 收到一个 `send(method, params, timeoutMs)`，它就是本连接上的 `cdpRaw`
+ * @param opts.events 要订阅的 CDP 事件名（例如 `Page.javascriptDialogOpening`）
+ * @param opts.onEvent 事件回调（**同步**执行；不要在里面 await CDP，那会卡住消息循环）
+ */
+export async function withPage<T>(
+  slot: number,
+  targetId: string,
+  fn: (send: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<Record<string, unknown>>) => Promise<T>,
+  opts: { events?: readonly string[]; onEvent?: (method: string, params: Record<string, unknown>) => void } = {},
+): Promise<T> {
+  const conn = attach(await wsConnect(await pageWsUrl(slot, targetId)))
+  if (opts.events && opts.events.length > 0) {
+    const want = new Set(opts.events)
+    const prev = conn.ws.onmessage
+    conn.ws.onmessage = (ev: { data: unknown }) => {
+      // ① 先走原有的 id→promise 相关器（不调它，普通调用就永远等不到兑现）
+      prev?.call(conn.ws, ev as never)
+      // ② 再看是不是我们要订阅的事件（没有 id 的那些）
+      try {
+        const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)) as {
+          method?: string
+          params?: Record<string, unknown>
+        }
+        if (msg.method && want.has(msg.method)) opts.onEvent?.(msg.method, msg.params ?? {})
+      } catch {
+        /* 非 JSON 帧：忽略（与本文件其他处同口径） */
+      }
+    }
+  }
+  try {
+    return await fn((method, params, timeoutMs) => cdpRaw(conn, method, params, timeoutMs))
+  } finally {
+    conn.ws.close()
+  }
+}
+
+/** 浏览器级连接的高阶封装（`Target.*` / `Browser.*`；⛔ 页面动作不要用这个） */
+export async function withBrowser<T>(
+  slot: number,
+  fn: (send: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<Record<string, unknown>>) => Promise<T>,
+): Promise<T> {
+  const conn = attach(await wsConnect(await browserWsUrl(slot)))
+  try {
+    return await fn((method, params, timeoutMs) => cdpRaw(conn, method, params, timeoutMs))
+  } finally {
+    conn.ws.close()
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 高阶动作（v1.130.0）：键盘 ／ 填值 ／ 滚动 ／ 等待 ／ 拖拽 ／
+//                    上传 ／ 下载 ／ dialog ／ AX 快照
+//
+// 🔴 全部走 withPage/withBrowser —— ⛔ 不再各自 attach/close。
+//    判据：连接生命周期只有一份实现；照抄十份就必然有一份忘了 finally。
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * 发一个按键（三事件 `keyDown` → `char`（仅可打印）→ `keyUp`）。
+ *
+ * 🔴 为什么必须是三事件、且 `char` 只在可打印键上发：
+ *    只发 `keyDown`/`keyUp`（`rawKeyDown` 形态）⇒ 大多数页面收得到事件，但**输入框里不会有字**；
+ *    而只发 `char` ⇒ 有字但**没有 keydown**，于是「回车提交」「Esc 关闭」这类**监听 keydown 的逻辑全不触发**。
+ *    两者都缺的表现都是「脚本成功、界面没反应」—— 没有报错。
+ *
+ * ⚠️ 可打印字符走 `Input.insertText` 更稳（不猜键位）；本函数只在**按键语义**（Enter/Esc/方向键/快捷键）用。
+ */
+export async function pressKey(slot: number, targetId: string, stroke: KeyStroke, times = 1): Promise<number> {
+  let sent = 0
+  await withPage(slot, targetId, async (send) => {
+    for (let i = 0; i < times; i++) {
+      const base = {
+        key: stroke.key,
+        code: stroke.code,
+        modifiers: stroke.modifiers,
+        windowsVirtualKeyCode: stroke.windowsVirtualKeyCode ?? 0,
+        nativeVirtualKeyCode: stroke.windowsVirtualKeyCode ?? 0,
+      }
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', ...base })
+      // 🔴 可打印字符才补 char 事件：Enter/Esc/方向键发 char 会被 Chrome 丢弃（不报错）
+      const printable = [...stroke.key].length === 1
+      if (printable) await send('Input.dispatchKeyEvent', { type: 'char', ...base, text: stroke.key, unmodifiedText: stroke.key })
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+      sent++
+    }
+  })
+  return sent
+}
+
+/**
+ * 往「当前焦点」打字（`Input.insertText`）。
+ *
+ * 🔴 与 `fill` 的分工（⛔ 别互相顶替）：
+ *    · `insertText` = **模拟人打字**：走浏览器的文本输入路径 ⇒ 受控组件（React/Vue）**会收到**真事件。
+ *      但它只作用于**当前有焦点**的元素，且**不触发 change**（要 blur 才触发）。
+ *    · `fill` = **设值**：清空 + 设值 + 派发 input/change，一步到位，且不依赖焦点。
+ *    ⇒ 要「像人一样逐字输入、触发每次 keydown」用 `type`；要「把这个字段设成这个值」用 `fill`。
+ */
+export async function insertText(slot: number, targetId: string, text: string): Promise<void> {
+  await withPage(slot, targetId, async (send) => {
+    await send('Input.insertText', { text })
+  })
+}
+
+/**
+ * 滚轮滚动（`Input.dispatchMouseEvent` wheel）。
+ *
+ * 🔴 判据：滚动**必须走真实 wheel 事件**，⛔ 不用 `window.scrollTo`：
+ *    前者会触发懒加载/无限滚动/吸顶 header 的监听；后者只移动视口 ⇒ 页面上的虚拟列表**不加载新行**，
+ *    而读数看起来「滚动成功」（scrollY 变了）。
+ */
+export async function scrollAt(
+  slot: number,
+  targetId: string,
+  x: number,
+  y: number,
+  deltaX: number,
+  deltaY: number,
+): Promise<void> {
+  await withPage(slot, targetId, async (send) => {
+    await send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x,
+      y,
+      deltaX,
+      deltaY,
+      pointerType: 'mouse',
+    })
+  })
+}
+
+/**
+ * 拖拽（`mousePressed` → 多次 `mouseMoved` → `mouseReleased`）。
+ *
+ * 🔴 为什么必须**分多步移动**、且每步之间要 `await`：
+ *    HTML5 拖放与大多数拖拽库（dnd-kit / sortablejs / 原生 draggable）都监听 `mousemove` 序列来算方向与阈值。
+ *    **一次 `mouseMoved` 直接跳到终点** ⇒ 它们收到的是一个「瞬移」，判定为不构成拖拽 ⇒ 什么都不发生，
+ *    而回执与真拖拽一模一样。steps 默认 12 是实测下限（再少 sortablejs 偶发不认）。
+ */
+export async function dragFromTo(
+  slot: number,
+  targetId: string,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  steps = 12,
+): Promise<void> {
+  const n = Math.max(2, Math.min(64, Math.round(steps)))
+  await withPage(slot, targetId, async (send) => {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: from.x, y: from.y })
+    await send('Input.dispatchMouseEvent', {
+      type: 'mousePressed',
+      x: from.x,
+      y: from.y,
+      button: 'left',
+      clickCount: 1,
+    })
+    for (let i = 1; i <= n; i++) {
+      const t = i / n
+      await send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: Math.round(from.x + (to.x - from.x) * t),
+        y: Math.round(from.y + (to.y - from.y) * t),
+        button: 'left',
+        buttons: 1,
+      })
+    }
+    await send('Input.dispatchMouseEvent', {
+      type: 'mouseReleased',
+      x: to.x,
+      y: to.y,
+      button: 'left',
+      clickCount: 1,
+    })
+  })
+}
+
+/**
+ * 在页面里跑的**设值器**：给一个 backendNodeId 与该设什么值，返回设完之后的读数。
+ *
+ * 🔴🔴 这是本轮最容易被做错的一格，判据有三条：
+ *
+ *   ① **必须用原型上的原生 setter**（`Object.getOwnPropertyDescriptor(proto,'value').set.call(el,v)`）。
+ *      直接 `el.value = 'x'` 在 React 下**不触发 onChange** ⇒ 界面上显示新值，但**提交的仍是旧值**。
+ *      这是最贵的一种错：读数（界面上有字）与真相（state 没变）相反，而且**永不报错**。
+ *   ② **必须派发 `input` 和 `change` 两个事件**，且 `input` 用 `InputEvent`（带 `inputType`）。
+ *      只发 `change` ⇒ 监听 input 的组件不更新；只发 `input` ⇒ 提交时校验不认。
+ *   ③ **contenteditable 走另一条路**（`textContent` 无 setter 钩子）⇒ 用 `execCommand('insertText')`
+ *      （唯一能让富文本编辑器（ProseMirror/Quill/Slate）真正更新的路径；它们监听 beforeinput）。
+ *
+ * ⚠️ 返回值**只报读回来的值**，⛔ 不报「设置成功」 —— 判据：设值这个动作没有可靠的成功信号，
+ *    唯一能说的是「读回来是什么」；两者不同就是失败，而那正是调用方要看见的东西。
+ */
+
+/**
+ * 设值：CDP 侧 `DOM.resolveNode` 拿 objectId，再 `Runtime.callFunctionOn` 跑设值器。
+ *
+ * 🔴 为什么不用页面内的 `eval` 直接 querySelector：
+ *    ref 是 backendNodeId（AX 快照给的），它**不告诉你 CSS 选择器** ——
+ *    要把 backendNodeId 变回可操作的 JS 对象，**唯一正确通道就是 DOM.resolveNode**。
+ *    ⛔ 不要试图「猜一个选择器」（那是猜，猜错就设到别的元素上，且静默）。
+ */
+export async function fillByBackendId(
+  slot: number,
+  targetId: string,
+  backendNodeId: number,
+  value: string,
+): Promise<{ ok: boolean; tag: string; readBack: string; why?: string }> {
+  return await withPage(slot, targetId, async (send) => {
+    await send('DOM.enable')
+    const resolved = await send('DOM.resolveNode', { backendNodeId })
+    const objectId = (resolved.object as { objectId?: string } | undefined)?.objectId
+    if (!objectId) return { ok: false, tag: '', readBack: '', why: 'resolveNode 没有给出 objectId（节点可能已失效）' }
+    const r = await send('Runtime.callFunctionOn', {
+      objectId,
+      functionDeclaration: FILL_FN,
+      arguments: [{ value }],
+      returnByValue: true,
+      awaitPromise: true,
+    })
+    const ex = r.exceptionDetails as { text?: string; exception?: { description?: string } } | undefined
+    if (ex) return { ok: false, tag: '', readBack: '', why: (ex.text ?? '') + ' ' + (ex.exception?.description ?? '') }
+    const v = (r.result as { value?: unknown } | undefined)?.value as
+      | { ok?: boolean; tag?: string; readBack?: string; why?: string }
+      | undefined
+    return {
+      ok: v?.ok === true,
+      tag: String(v?.tag ?? ''),
+      readBack: String(v?.readBack ?? ''),
+      ...(v?.why ? { why: String(v.why) } : {}),
+    }
+  })
+}
+
+/**
+ * 页面里跑的设值函数（`this` = 目标元素）。
+ *
+ * 三条判据见 `fillByBackendId` 的头注释；这里只补两条实现细节：
+ *   · `input` 事件优先用 `InputEvent`，不支持时降级 `Event`（老引擎/某些自定义元素）
+ *   · `input type=file` **不走这条路**（它的 value 是只读的设在 C:\fakepath）⇒ 明确拒绝并指路 `upload`
+ */
+export const FILL_FN = `function (value) {
+  const el = this;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'input' && (el.getAttribute('type') || '').toLowerCase() === 'file') {
+    return { ok: false, tag, readBack: '', why: 'input[type=file] 不能用设值 —— 用 browser_slot upload（走 DOM.setFileInputFiles）' };
+  }
+  if (el.isContentEditable) {
+    el.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    let ok = false;
+    try { ok = document.execCommand('insertText', false, value); } catch { ok = false; }
+    if (!ok) { el.textContent = value; }
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, tag, readBack: (el.innerText || el.textContent || '') + '' };
+  }
+  const proto = tag === 'textarea' ? window.HTMLTextAreaElement.prototype : tag === 'select' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+  const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+  if (!desc || !desc.set) return { ok: false, tag, readBack: '', why: '这个元素没有 value setter（不是表单控件）' };
+  el.focus();
+  desc.set.call(el, value);
+  let ev;
+  try { ev = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }); }
+  catch { ev = new Event('input', { bubbles: true }); }
+  el.dispatchEvent(ev);
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return { ok: true, tag, readBack: (el.value === undefined ? '' : el.value) + '' };
+}`;
+
+/**
+ * AX 快照：拿整棵无障碍树，交给 `ax.ts` 的纯判定去剪。
+ *
+ * 🔴 为什么先 `Accessibility.enable`：不启用时 `getFullAXTree` 给的是**空数组**（不是报错）。
+ *    那是典型的恒空读数 —— 与「页面上没有可交互元素」同形。
+ */
+export async function captureAx(slot: number, targetId: string): Promise<AxNode[]> {
+  return await withPage(slot, targetId, async (send) => {
+    await send('Accessibility.enable')
+    const r = await send('Accessibility.getFullAXTree', {}, 20_000)
+    const nodes = r.nodes
+    return Array.isArray(nodes) ? (nodes as AxNode[]) : []
+  })
+}
+
+/**
+ * 把 backendNodeId 变成一个可点的坐标（`DOM.getBoxModel` 的中心点）。
+ *
+ * 🔴 为什么不用 `Runtime.callFunctionOn` + `getBoundingClientRect`：
+ *    `getBoundingClientRect` 是**相对视口且受 transform 影响**的读数，而 `DOM.getBoxModel`
+ *    给的是**布局盒**坐标（同样视口系）且会把 padding/border 算进去；
+ *    更关键的是：`getBoxModel` 对 `display:none` / 零尺寸元素**会明确失败**，
+ *    而 rect 会给一个全 0 的「成功」读数 ⇒ 点 (0,0)。前者报错，后者点错地方。
+ *
+ * ⚠️ 元素**在视口外**时盒模型仍在（会被滚动条挡住）⇒ 返回值额外带 `inViewport`，
+ *    调用方据此决定要不要先 `scroll`。⛔ 这里不代劳滚动：滚动本身有副作用（懒加载）。
+ */
+export async function boxCenterByBackendId(
+  slot: number,
+  targetId: string,
+  backendNodeId: number,
+): Promise<{ x: number; y: number; w: number; h: number; inViewport: boolean }> {
+  return await withPage(slot, targetId, async (send) => {
+    await send('DOM.enable')
+    const box = (await send('DOM.getBoxModel', { backendNodeId })) as {
+      model?: { content?: number[]; border?: number[] }
+    }
+    const quad = box.model?.border ?? box.model?.content
+    if (!quad || quad.length < 8) throw new Error('这个 ref 所在元素没有可见盒（可能 display:none / 零尺寸）');
+    const xs = [quad[0]!, quad[2]!, quad[4]!, quad[6]!]
+    const ys = [quad[1]!, quad[3]!, quad[5]!, quad[7]!]
+    const minX = Math.min(...xs)
+    const maxX = Math.max(...xs)
+    const minY = Math.min(...ys)
+    const maxY = Math.max(...ys)
+    const vp = (await send('Runtime.evaluate', {
+      expression: 'JSON.stringify({w:innerWidth,h:innerHeight})',
+      returnByValue: true,
+    })) as { result?: { value?: string } }
+    let vw = 0
+    let vh = 0
+    try {
+      const o = JSON.parse(String(vp.result?.value ?? '{}')) as { w?: number; h?: number }
+      vw = Number(o.w ?? 0)
+      vh = Number(o.h ?? 0)
+    } catch {
+      /* 视口量不出来 ⇒ inViewport 报 false（保守：调用方会先滚动） */
+    }
+    const cx = (minX + maxX) / 2
+    const cy = (minY + maxY) / 2
+    return {
+      x: Math.round(cx),
+      y: Math.round(cy),
+      w: Math.round(maxX - minX),
+      h: Math.round(maxY - minY),
+      inViewport: vw > 0 && vh > 0 && cx >= 0 && cy >= 0 && cx <= vw && cy <= vh,
+    }
+  })
+}
+
+/**
+ * 上传文件：`DOM.setFileInputFiles`。
+ *
+ * 🔴🔴 **这是本轮唯一一个能把本地文件送进网页的动作**，所以守卫写在这里而不是工具层：
+ *
+ *   ① **路径必须在 CCC 根内**（`insideRoot` 由调用方传入已判定的结果 ——
+ *      ⛔ 本函数不自己算根：那会造出第二个「根在哪」的判定点，D307 同族）。
+ *   ② **文件必须真实存在且是普通文件**（目录/符号链接/设备文件一律拒）——
+ *      判据：`DOM.setFileInputFiles` 对不存在的路径**静默成功**（回执 OK，但表单里是空的），
+ *      而那个空上传在页面上看起来与「上传中」一样。
+ *   ③ **必须同时显式给 target 的 ref/坐标**：不给就变成「上传到页面上任意 file input」，
+ *      而真实页面常有多个（头像/附件/水印）⇒ 传错的那个不会报错，会成功。
+ */
+export async function uploadFiles(
+  slot: number,
+  targetId: string,
+  backendNodeId: number,
+  absPaths: readonly string[],
+): Promise<{ files: string[] }> {
+  return await withPage(slot, targetId, async (send) => {
+    await send('DOM.enable')
+    await send('DOM.setFileInputFiles', { files: [...absPaths], backendNodeId });
+    return { files: [...absPaths] }
+  })
+}
+
+/**
+ * 摄取下载：把 `Browser.setDownloadBehavior` 指向一个固定目录，然后**读那个目录**。
+ *
+ * 🔴 为什么必须显式设行为（而不是「点了下载就完事」）：
+ *    默认行为是弹系统保存框 / 落到用户 `~/Downloads`。前者会把自动化**卡死**（等人点）；
+ *    后者让文件落在**我们看不见的地方**，而回执一切正常。
+ *
+ * 🔴 判据：**落点只有一个**（调用方给，必须在 CCC 根内）。⛔ 不给「用默认目录」这个选项 ——
+ *    那会让「这个文件哪来的」在下一次读数里无法重建。
+ */
+export async function enableDownloads(slot: number, targetId: string, absDir: string): Promise<void> {
+  await withPage(slot, targetId, async (send) => {
+    await send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: absDir }, 10_000);
+  })
+}
+
+/**
+ * 列目录（下载捕获用；只读、不递归）。
+ *
+ * ⚠️ 返回**文件名与大小**，⛔ 不读内容：读内容会让一个「下载了 40 MB 视频」的动作
+ *    把 40 MB 塞进上下文。要看内容由调用方自己决定怎么读。
+ */
+export function listDownloaded(absDir: string): Array<{ name: string; bytes: number }> {
+  let names: string[]
+  try {
+    names = readdirSync(absDir) as string[];
+  } catch {
+    return [];
+  }
+  const out: Array<{ name: string; bytes: number }> = [];
+  for (const n of names) {
+    try {
+      const st = statSync(join(absDir, n));
+      if (st.isFile()) out.push({ name: n, bytes: st.size });
+    } catch {
+        /* 读不到就跳过：下载中的 .crdownload 可能恰好被删 */
+    }
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * 处理原生 dialog（`alert` / `confirm` / `prompt` / `beforeunload`）。
+ *
+ * 🔴🔴 **不处理就会把整个页面卡死** —— `alert`/`confirm` 是**同步阻塞**的，
+ *    页面脚本停在那一行，之后所有 `Runtime.evaluate` 全部超时。而**没有 dialog 时调用这个
+ *    又会报错**（Chrome：`No dialog is showing`）⇒ 所以它必须是「先探、再处理」。
+ *
+ * 判据：**默认 dismiss**（等于点「取消」）。⛔ 不默认 accept ——
+ *    「确定」在真实站点上常意味着**删除/支付/发布**这类不可逆动作，
+ *    而对话框正文由页面控制（可以写任何话）。要接受必须由调用方显式要求。
+ */
+export async function handleDialog(
+  slot: number,
+  targetId: string,
+  accept: boolean,
+  promptText?: string,
+): Promise<{ hadDialog: boolean; type: string; message: string; accepted: boolean }> {
+  let seen = { hadDialog: false, type: '', message: '' };
+  await withPage(
+    slot,
+    targetId,
+    async (send) => {
+      // ① 先启用 Page 域并读一次「此刻有没有 dialog」——靠事件的普通调用拿不到已有状态
+      await send('Page.enable');
+      try {
+        // 通过 browser 级 WS 才能可靠地在 page 卡死时也问得到（本仓既有判据）
+        await send('Page.handleJavaScriptDialog', {
+          accept,
+          ...(promptText !== undefined ? { promptText } : {}),
+        });
+        seen = { hadDialog: true, type: '', message: '' };
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        // ② 「没有 dialog」是**正常状态**，⛔ 不当失败报
+        if (/no dialog|No dialog is showing/i.test(msg)) return;
+        throw e;
+      }
+    },
+    {
+      events: ['Page.javascriptDialogOpening'],
+      onEvent: (_m, p) => {
+        seen = {
+          hadDialog: true,
+          type: String(p.type ?? ''),
+          message: String(p.message ?? ''),
+        };
+      },
+    },
+  );
+  return { ...seen, accepted: seen.hadDialog ? accept : false };
+}
+
+/**
+ * 在页面里等一个条件成立（`wait` 动作）。
+ *
+ * 🔴🔴 为什么条件表达式在**页面内轮询**，而不是在宿主侧每次 `eval` 一次：
+ *    宿主侧轮询 = 每 200ms 一次 CDP 往返 ⇒ 等 30s 就是 150 次往返，
+ *    而**每次往返都可能因为导航而失败**（页面对到了一个死连接），于是「等」本身成了不稳定源。
+ *    页面内轮询 = 一次调用、一次往返，条件是同一段 JS 的连续求值。
+ *
+ * 🔴 判据（超时必须说清等的是什么）：
+ *    超时返回 `{ ok:false, waitedMs, last }` —— `last` 是**最后一次求值的原始结果**，
+ *    ⛔ 不只给一句「超时」。没有 `last` 时，读者无法区分：
+ *      ① 选择器写错了（`last` = null/false）② 元素出现了但条件是别的东西（`last` = 具体值）
+ *    这一格是本轨迹的老账（D252 同族：读了数 ≠ 读的是那个数）。
+ */
+export async function waitForInPage(
+  slot: number,
+  targetId: string,
+  expression: string,
+  timeoutMs: number,
+  pollMs = 200,
+): Promise<{ ok: boolean; waitedMs: number; last: unknown }> {
+  const started = Date.now();
+  const budget = Math.max(50, Math.round(timeoutMs));
+  const poll = Math.max(50, Math.round(pollMs));
+  return await withPage(slot, targetId, async (send) => {
+    const src =
+      '(async () => {' +
+      '  const deadline = Date.now() + ' + String(budget) + ';' +
+      '  let last = null;' +
+      '  while (Date.now() < deadline) {' +
+      '    try { last = await (' + expression + '); } catch (e) { last = "ERR: " + (e && e.message ? e.message : String(e)); }' +
+      '    if (last === true) return { ok: true, last };' +
+      '    if (last && typeof last === "object" && last.ok === true) return { ok: true, last };' +
+      '    await new Promise(r => setTimeout(r, ' + String(poll) + '));' +
+      '  }' +
+      '  return { ok: false, last };' +
+      '})()';
+    const r = await send('Runtime.evaluate', {
+      expression: src,
+      awaitPromise: true,
+      returnByValue: true,
+    }, budget + 10_000);
+    const v = (r.result as { value?: unknown } | undefined)?.value as { ok?: boolean; last?: unknown } | undefined;
+    return { ok: v?.ok === true, waitedMs: Date.now() - started, last: v?.last ?? null };
+  });
 }
 
 /** 导出给测试用（⛔ 生产代码不要直接调这两个） */

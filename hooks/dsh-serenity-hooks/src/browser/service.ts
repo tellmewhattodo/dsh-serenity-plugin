@@ -11,7 +11,8 @@
  *   注入走 `sendToCognitiveTrajectory`（现成通道，语义 = 已注入，不证已执行）。
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   DEFAULT_POLICY,
   MAX_SLOTS,
@@ -42,17 +43,29 @@ import {
   type ProcSample,
 } from './process.js'
 import {
+  boxCenterByBackendId,
+  captureAx,
   clickAt,
   closeTab,
+  dragFromTo,
+  enableDownloads,
   evalInPage,
+  fillByBackendId,
+  handleDialog,
+  insertText,
+  listDownloaded,
   listTargets,
   navigate,
   openTab,
   pageHtml,
   pageText,
+  pressKey,
   reloadPage,
   resolveShotPath,
   screenshot,
+  scrollAt,
+  uploadFiles,
+  waitForInPage,
   type CdpTarget,
 } from './cdp.js'
 import {
@@ -64,8 +77,12 @@ import {
   type ExtEntry,
   type ExtRunResult,
 } from './extend.js'
+import { resolveInside } from '../kernel/ccc.js'
 import { pickTarget, renderHits } from './target-pick.js'
 import { COLLECT_CLICKABLE, pickClickable, renderClickables, type Clickable } from './click-target.js'
+import { parseKeyStroke, type KeyStroke } from './keys.js'
+import { pruneAx, refToBackendId, type AxLine } from './ax.js'
+import { explainWaitTimeout, parseWaitSpec, type WaitSpec } from './wait-spec.js'
 
 /**
  * 动作枚举（对外暴露的唯一清单）
@@ -99,6 +116,17 @@ export const SLOT_ACTIONS = [
   'reload',
   'close',
   'click',
+  // ②b 高阶页面动作（v1.130.0：键盘/填值/滚动/等待/拖拽/AX/上传/下载/dialog）
+  'ax',
+  'press',
+  'type',
+  'fill',
+  'scroll',
+  'wait',
+  'drag',
+  'upload',
+  'downloads',
+  'dialog',
   // ③ 扩展层
   'ext-list',
   'ext',
@@ -117,6 +145,16 @@ export const ACTIONS_NEED_SLOT: ReadonlySet<SlotAction> = new Set<SlotAction>([
   'reload',
   'close',
   'click',
+  'ax',
+  'press',
+  'type',
+  'fill',
+  'scroll',
+  'wait',
+  'drag',
+  'upload',
+  'downloads',
+  'dialog',
   'ext',
 ])
 
@@ -886,6 +924,265 @@ export async function slotClose(
   const closed = await closeTab(slot, targetId, all)
   pageTouched(root, slot)
   return closed
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ②b 高阶页面动作（v1.130.0）—— 判定在各自模块，执行在 cdp.ts，这里只编排
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * 把 `--ref` 解成 backendNodeId。**格式不对或已失效 ⇒ 明确拒绝**，⛔ 不回落。
+ *
+ * 🔴 判据（与 D311 的 `--match` 同族，但后果更重）：
+ *    ref 失效（页面导航后、节点被删后）时，如果**悄悄重取一次快照再按顺序找**，
+ *    很可能命中「另一个元素」—— 于是点击落在一个你看不见的地方，而回执完全正常。
+ *    ⇒ 唯一允许的是**报错 ＋ 指路**：重跑 `ax` 拿新 ref。
+ */
+export function needBackendId(args: Record<string, unknown>): number {
+  const ref = typeof args.ref === 'string' ? args.ref : ''
+  if (!ref) {
+    throw new Error(
+      `⛔ 需要 --ref=<eNNN>（先跑 \`browser_slot ax\` 拿 ref）。\n` +
+        `  ⇒ ref 来自无障碍树快照；⛔ 不是 DOM 选择器，也不是 CSS 路径。`,
+    );
+  }
+  const id = refToBackendId(ref)
+  if (id === null) {
+    throw new Error(
+      `⛔ --ref 格式不对：${JSON.stringify(ref)}（应形如 e12345，来自 \`ax\` 的输出）。\n` +
+        `  ⛔ 不接受 CSS 选择器/文本 —— 那需要猜，而猜错会操作到另一个元素且没有任何信号。`,
+    );
+  }
+  return id
+}
+
+/** AX 快照 */
+export async function slotAx(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  limit = 200,
+): Promise<{ lines: AxLine[]; total: number }> {
+  assertSlotOwned(root, slot, sessionId)
+  const nodes = await captureAx(slot, targetId)
+  const lines = pruneAx(nodes, limit)
+  pageTouched(root, slot)
+  // total = 剪枝后未被 limit 截断时的条数（让渲染能说「另有 N 个」）
+  const all = pruneAx(nodes, Number.MAX_SAFE_INTEGER)
+  return { lines, total: all.length }
+}
+
+/** 按键（语义键 + 快捷键）；返回实际发出的次数 */
+export async function slotPress(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  keyDesc: string,
+  times = 1,
+): Promise<{ stroke: KeyStroke; sent: number }> {
+  assertSlotOwned(root, slot, sessionId)
+  const stroke = parseKeyStroke(keyDesc)
+  if (!stroke) {
+    throw new Error(
+      `⛔ 解析不出按键：${JSON.stringify(keyDesc)}。\n` +
+        `  ⇒ 可用形态：Enter ／ Escape ／ Tab ／ ArrowUp/Down/Left/Right ／ Home ／ End ／ PageUp ／ PageDown ／ Space ／ Backspace ／ Delete；` +
+        `修饰用 + 连接（Control+A ／ Meta+Shift+Enter）；单字符只认 a-z 0-9。\n` +
+        `  ⇒ 要「把一段文字打进输入框」用 type（走 Input.insertText，不猜键位）：--text=<原文>`,
+    );
+  }
+  const sent = await pressKey(slot, targetId, stroke, times)
+  pageTouched(root, slot)
+  return { stroke, sent }
+}
+
+/** 打字（走浏览器文本输入路径；作用于当前焦点） */
+export async function slotType(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  text: string,
+): Promise<void> {
+  assertSlotOwned(root, slot, sessionId)
+  await insertText(slot, targetId, text)
+  pageTouched(root, slot)
+}
+
+/**
+ * 填值（按 ref）。
+ *
+ * 🔴 回执**只报读回来的值**，⛔ 不报「设置成功」—— 见 `cdp.ts` FILL_FN 的判据。
+ *    调用方要判成功，必须自己比 `readBack === 期望值`（或再 `eval` 读一次）。
+ */
+export async function slotFill(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  backendNodeId: number,
+  value: string,
+): Promise<{ ok: boolean; tag: string; readBack: string; why?: string }> {
+  assertSlotOwned(root, slot, sessionId)
+  const r = await fillByBackendId(slot, targetId, backendNodeId, value)
+  pageTouched(root, slot)
+  return r;
+}
+
+/**
+ * 滚动：`--ref`（滚到元素可见）/ `--xy`（在该点滚）/ `--to top|bottom`（整页）。
+ *
+ * 🔴 判据：滚到元素时**先量盒模型再滚**，⛔ 不用 `scrollIntoView` ——
+ *    后者会改页面的滚动容器与动画状态，且**在虚拟列表里不触发懒加载**（它只移动视口）；
+ *    而这里走的是**真实 wheel 事件**，浏览器自己会做该做的事。
+ */
+export async function slotScroll(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  opts: { ref?: number; xy?: { x: number; y: number }; to?: 'top' | 'bottom'; deltaY?: number },
+): Promise<{ scrolledY: number }> {
+  assertSlotOwned(root, slot, sessionId)
+  // 目标点：给了 ref 就量它的盒中心；给了 xy 就用它；否则视口中心
+  let at = opts.xy ?? { x: 600, y: 400 }
+  if (opts.ref !== undefined) {
+    const b = await boxCenterByBackendId(slot, targetId, opts.ref)
+    at = { x: b.x, y: b.y }
+  }
+  const before = Number(await evalInPage(slot, targetId, 'String(window.scrollY || 0)'))
+  if (opts.to === 'top') {
+    await scrollAt(slot, targetId, at.x, at.y, 0, -100_000)
+  } else if (opts.to === 'bottom') {
+    await scrollAt(slot, targetId, at.x, at.y, 0, 100_000)
+  } else {
+    await scrollAt(slot, targetId, at.x, at.y, 0, opts.deltaY ?? 600)
+  }
+  // 🔴 等一帧再量：wheel 事件是异步生效的，立刻读 scrollY 会读到旧值（而那是「滚动没动」的形状）
+  await new Promise((r) => setTimeout(r, 250))
+  const after = Number(await evalInPage(slot, targetId, 'String(window.scrollY || 0)'))
+  pageTouched(root, slot)
+  return { scrolledY: Number.isFinite(after - before) ? after - before : 0 }
+}
+
+/** 等待条件成立（条件由 `wait-spec.ts` 解析） */
+export async function slotWait(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  raw: string,
+  timeoutMs: number,
+): Promise<{ spec: WaitSpec; waitedMs: number }> {
+  assertSlotOwned(root, slot, sessionId)
+  const spec = parseWaitSpec(raw)
+  if (!spec) {
+    throw new Error(
+      `⛔ 解析不出等待条件：${JSON.stringify(raw)}。\n` +
+        `  ⇒ 可用形态（前缀必填，裸值有歧义会等到永不到来的条件）：\n` +
+        `     selector:<CSS>   text:<子串>   url:<子串>   gone:<CSS>   js:<表达式>`,
+    );
+  }
+  const r = await waitForInPage(slot, targetId, spec.expression, timeoutMs)
+  pageTouched(root, slot)
+  if (!r.ok) throw new Error(explainWaitTimeout(spec, r.waitedMs, r.last))
+  return { spec, waitedMs: r.waitedMs }
+}
+
+/** 拖拽（坐标；判定在调用方，执行在 cdp.ts） */
+export async function slotDrag(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  steps = 12,
+): Promise<void> {
+  assertSlotOwned(root, slot, sessionId)
+  await dragFromTo(slot, targetId, from, to, steps)
+  pageTouched(root, slot)
+}
+
+/**
+ * 上传（路径必须在 CCC 根内 —— 这是本轮唯一的「把本地文件送进网页」动作）。
+ *
+ * 🔴 守卫三条（判据在 `cdp.ts` uploadFiles 头注释；这里做**路径侧**那两条）：
+ *   ① 每个路径都过 `resolveInside`（CCC 根外一律拒）
+ *   ② 必须是**真实存在的普通文件**（`DOM.setFileInputFiles` 对不存在的路径**静默成功**）
+ */
+export function resolveUploadPath(cccRoot: string, relOrAbs: string): string {
+  // resolveInside 自己会抛（越界/不存在由调用方另行核对）
+  const abs = resolveInside(cccRoot, relOrAbs)
+  let st: { isFile: () => boolean; size: number }
+  try {
+    st = statSync(abs)
+  } catch {
+    throw new Error(
+      `⛔ 文件不存在：${relOrAbs}（解析为 ${abs}）。\n` +
+        `  ⚠️ 这条拒绝是必要的：DOM.setFileInputFiles 对不存在的路径**静默成功**，` +
+        `表单里会是空的，而页面上看起来与「上传中」一样。`,
+    );
+  }
+  if (!st.isFile()) {
+    throw new Error(`⛔ 不是普通文件（目录/设备/符号链接）：${relOrAbs}`)
+  }
+  return abs;
+}
+export async function slotUpload(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  backendNodeId: number,
+  absPaths: readonly string[],
+): Promise<{ files: string[] }> {
+  assertSlotOwned(root, slot, sessionId)
+  const r = await uploadFiles(slot, targetId, backendNodeId, absPaths)
+  pageTouched(root, slot)
+  return r;
+}
+
+/**
+ * 下载：把捕获目录指向 `<CCC 根>/_tmp/browser-downloads/b<slot>/` 并列出其中文件。
+ *
+ * 🔴 为什么目录**由本函数决定**而不是调用方传：
+ *    下载落点是「这个文件哪来的」的一部分。让人随便传 ⇒ 下一次读数时
+ *    没人能重建「这个文件是这次下载的，还是上次留下的」。⇒ 固定目录 + 前缀不清理。
+ *    ⚠️ **不自动清理**：清理掉的是**证据**。要清理由人来做。
+ */
+export const DOWNLOAD_DIR_REL = '_tmp/browser-downloads';
+export function downloadDirFor(root: string, slot: number): string {
+  return join(root, DOWNLOAD_DIR_REL, slotLabel(slot));
+}
+export async function slotDownloads(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+): Promise<{ dir: string; files: Array<{ name: string; bytes: number }> }> {
+  assertSlotOwned(root, slot, sessionId)
+  const dir = downloadDirFor(root, slot)
+  mkdirSync(dir, { recursive: true })
+  await enableDownloads(slot, targetId, dir)
+  pageTouched(root, slot)
+  return { dir: `${DOWNLOAD_DIR_REL}/${slotLabel(slot)}`, files: listDownloaded(dir) }
+}
+
+/** dialog：默认 dismiss（见 cdp.ts handleDialog 判据） */
+export async function slotDialog(
+  root: string,
+  slot: number,
+  sessionId: string,
+  targetId: string,
+  accept: boolean,
+  promptText?: string,
+): Promise<{ hadDialog: boolean; type: string; message: string; accepted: boolean }> {
+  assertSlotOwned(root, slot, sessionId)
+  const r = await handleDialog(slot, targetId, accept, promptText)
+  pageTouched(root, slot)
+  return r;
 }
 
 // ═══════════════════════════════════════════════════════════════════

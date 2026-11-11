@@ -25,8 +25,18 @@ import {
   nudgeStaleSlots,
   reapSlot,
   releaseSlot,
+  slotAx,
   slotClose,
+  slotDialog,
+  slotDownloads,
+  slotDrag,
   slotEval,
+  slotFill,
+  slotPress,
+  slotScroll,
+  slotType,
+  slotUpload,
+  slotWait,
   slotExt,
   slotExtList,
   slotGoto,
@@ -40,12 +50,16 @@ import {
   slotClick,
   slotText,
   waitSlotReady,
+  needBackendId,
+  resolveUploadPath,
+  downloadDirFor,
   type SlotAction,
   type SlotView,
 } from '../../browser/service.js'
 import { MAX_SLOTS, slotLabel, slotPort } from '../../browser/state.js'
 import { EXT_DIR_REL } from '../../browser/extend.js'
 import { normalizeSlotId } from '../../browser/process.js'
+import { renderAx } from '../../browser/ax.js'
 
 function renderText(value: unknown): ContentBlock[] {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -305,6 +319,115 @@ async function run(
         ? `[browser_slot] clicked @${xy.x},${xy.y}（坐标直给；未做命中校验）`
         : `[browser_slot] clicked <${picked.tag}> "${picked.text.slice(0, 60)}" @${picked.x},${picked.y}`
     }
+    // ── ②b 高阶页面动作（v1.130.0）──────────────────────────────
+    case 'ax': {
+      const n = needSlot(args)
+      const target = await needTarget(root, n, sessionId, args)
+      const { lines, total } = await slotAx(root, n, sessionId, target, num(args.limit) ?? 200)
+      if (lines.length === 0) {
+        return (
+          `[browser_slot] ax —— 无障碍树里没有可交互元素（target=${target}）。\n` +
+            `  ⇒ 可能页面还没渲染完（先 wait 一下），或这个页面真的只有静态文本（用 text 读）。`
+        )
+      }
+      return `[browser_slot] ax —— ${lines.length} 个可交互元素（共 ${total} 个，ref 跨快照稳定）\n${renderAx(lines, total)}`;
+    }
+    case 'press': {
+      const n = needSlot(args)
+      const target = await needTarget(root, n, sessionId, args)
+      const k = str(args.key)
+      if (!k) return '⛔ 需要 --key=<按键>（例如 Enter ／ Escape ／ Control+A ／ Meta+Shift+Enter）';
+      const { stroke, sent } = await slotPress(root, n, sessionId, target, k, num(args.times) ?? 1);
+      return (
+        `[browser_slot] press ${stroke.key}（code=${stroke.code}，modifiers=${stroke.modifiers}）× ${sent}\n` +
+          `  ⚠️ 回执只说「发了几个按键」，⛔ 不说「界面响应了」 —— 效果请用 ax ／ eval 再读一次。`
+      );
+    }
+    case 'type': {
+      const n = needSlot(args)
+      const target = await needTarget(root, n, sessionId, args)
+      const text = typeof args.text === 'string' ? args.text : undefined;
+      if (text === undefined || text === '') return '⛔ 需要 --text=<要打的原文>（作用于当前焦点；要设值用 fill）';
+      await slotType(root, n, sessionId, target, text);
+      return `[browser_slot] type ${JSON.stringify(text.slice(0, 40))}（已插入 ${[...text].length} 个字符；⛔ 未触发 change —— blur 才触发）`;
+    }
+    case 'fill': {
+      const n = needSlot(args)
+      const target = await needTarget(root, n, sessionId, args)
+      const id = needBackendId(args);
+      const value = typeof args.value === 'string' ? args.value : undefined;
+      if (value === undefined) return '⛔ 需要 --value=<要设成的值>（空串可以：--value=）';
+      const r = await slotFill(root, n, sessionId, target, id, value);
+      if (!r.ok) return `⛔ fill 失败（<${r.tag || '?'}>）：${r.why ?? '未知原因'}`;
+      // 🔴 只报读回来的值：设值没有可靠成功信号
+      const same = r.readBack === value;
+      return (
+        `[browser_slot] fill <${r.tag}> 读回=${JSON.stringify(r.readBack.slice(0, 80))}` +
+          (same ? '  ✓ 与给的值一致' : '  ⚠️ 与给的值**不一致** —— 该控件可能做了格式化/拒绝')
+      );
+    }
+    case 'scroll': {
+      const n = needSlot(args)
+      const target = await needTarget(root, n, sessionId, args)
+      const refStr = str(args.ref);
+      const xy = parseXY(str(args.xy));
+      const toRaw = str(args.to);
+      const to = toRaw === 'top' || toRaw === 'bottom' ? toRaw : undefined;
+      if (!refStr && !xy && !to) return '⛔ 需要 --ref=<eNNN> ／ --xy=<x,y> ／ --to=<top|bottom> 之一';
+      const ref = refStr ? needBackendId(args) : undefined;
+      const { scrolledY } = await slotScroll(root, n, sessionId, target, { ref, xy, to, deltaY: num(args.delta) });
+      return `[browser_slot] scroll → scrollY 变化 ${scrolledY > 0 ? '+' : ''}${scrolledY}px`;
+    }
+    case 'wait': {
+      const n = needSlot(args)
+      const target = await needTarget(root, n, sessionId, args)
+      const forRaw = str(args.for);
+      if (!forRaw) return '⛔ 需要 --for=<selector:…|text:…|url:…|gone:…|js:…>（前缀必填）';
+      const { spec, waitedMs } = await slotWait(root, n, sessionId, target, forRaw, num(args.timeout) ?? 15_000);
+      return `[browser_slot] wait ${spec.kind} 成立（等了 ${waitedMs}ms）`;
+    }
+    case 'drag': {
+      const n = needSlot(args);
+      const target = await needTarget(root, n, sessionId, args);
+      const from = parseXY(str(args.from));
+      const to = parseXY(str(args.to));
+      if (!from || !to) return '⛔ 需要 --from=<x,y> 与 --to=<x,y>（先 ax 拿 ref，再用 scroll/eval 量坐标）';
+      await slotDrag(root, n, sessionId, target, from, to, num(args.steps) ?? 12);
+      return `[browser_slot] drag ${from.x},${from.y} → ${to.x},${to.y}（分 ${num(args.steps) ?? 12} 步；⛔ 回执不说拖成功）`;
+    }
+    case 'upload': {
+      const n = needSlot(args);
+      const target = await needTarget(root, n, sessionId, args);
+      const id = needBackendId(args);
+      const list = Array.isArray(args.file) ? (args.file as unknown[]) : typeof args.file === 'string' ? [args.file] : [];
+      if (list.length === 0) return '⛔ 需要 --file=<CCC 内路径>（可重复；⛔ 不接受 CCC 根外路径）';
+      const abs = list.filter((x): x is string => typeof x === 'string' && x !== '').map((f) => resolveUploadPath(root, f));
+      if (abs.length === 0) return '⛔ --file 里没有可用路径';
+      const r = await slotUpload(root, n, sessionId, target, id, abs);
+      return `[browser_slot] upload ${r.files.length} 个文件 → ref ${str(args.ref) ?? ''}\n  ${r.files.map((f) => f.replace(root + '/', '')).join('\n  ')}`;
+    }
+    case 'downloads': {
+      const n = needSlot(args);
+      const target = await needTarget(root, n, sessionId, args);
+      const { dir, files } = await slotDownloads(root, n, sessionId, target);
+      const body = files.length === 0 ? '（目录是空的）' : files.map((f) => `  ${f.name}  ${Math.round(f.bytes / 1024)} KB`).join('\n');
+      return (
+        `[browser_slot] 下载捕获目录：${dir}\n${body}\n` +
+          `  ⇒ 触发下载用 click（点带 download 的链接会被拒）或 eval；之后**再调一次 downloads** 看新文件。\n` +
+          `  ⚠️ 目录不自动清理 —— 清掉的是证据。`
+      );
+    }
+    case 'dialog': {
+      const n = needSlot(args);
+      const target = await needTarget(root, n, sessionId, args);
+      const accept = args.accept === true;
+      const r = await slotDialog(root, n, sessionId, target, accept, str(args.prompt));
+      if (!r.hadDialog) return '[browser_slot] dialog —— 此刻没有弹窗（正常状态，不报错）';
+      return (
+        `[browser_slot] dialog ${r.type || '(未知类型)'}：${JSON.stringify(r.message.slice(0, 120))}\n` +
+          `  ${r.accepted ? '✓ 已接受（确定）' : '✓ 已拒绝（取消）'}`
+      );
+    }
     case 'close': {
       const n = needSlot(args)
       const all = args.all === true
@@ -348,6 +471,8 @@ export function createBrowserSlotTool(ctx: Context) {
       'Browser slot manager (ACC-level, max 20 Chrome slots). Each slot = one isolated Chrome process with its own profile dir, fixed resolution, and a CDP port (9301+). ' +
       'Slots carry state: free / leased / stale (idle too long, CPU or memory over threshold, lease expired) / orphaned (process died). ' +
       'Actions: acquire (lease a slot; reuses your existing lease instead of leasing a second one) / release (REQUIRED when done — a background watchman nudges you if you forget) / list (all slots + occupancy) / status --slot <bN> / reap --slot <bN> (force-reclaim an abandoned slot, records a reason) / doctor (self-check, read-only). ' +
+      'PAGE: targets / open / goto / eval / text / html / shot / reload / close / click (text or xy, real mouse events). ' +
+      'HIGH-LEVEL (v1.130.0): ax (accessibility-tree snapshot -> stable `ref` like e12345; the only honest answer to "is this control clickable") / press (semantic keys & chords: Enter, Escape, Control+A; non-ASCII text must use `type`) / type (browser text input at the focused element) / fill --ref --value (native setter + input/change so React/Vue actually see it; receipt reports the READ-BACK value) / scroll (real wheel events, so lazy-loading and virtual lists fire) / wait --for <selector:|text:|url:|gone:|js:> (in-page polling; timeout says WHAT it waited for and what it last read) / drag --from --to (multi-step mouseMoved; one-jump drags are ignored by sortablejs & friends) / upload --ref --file (paths must stay inside the CCC root) / downloads (pins the capture dir to _tmp/browser-downloads/<slot>) / dialog (default DISMISS — OK often means delete/pay/publish). ' +
       '🔴 Lease before you drive a browser for evidence, and ALWAYS release when finished — an unreleased slot keeps a Chrome process alive and burns power.',
     parameters: {
       action: { type: 'string', enum: [...SLOT_ACTIONS], required: true, description: 'Subcommand' },
@@ -380,6 +505,19 @@ export function createBrowserSlotTool(ctx: Context) {
       text: { type: 'string', description: 'click: visible-text SUBSTRING of the element to click (matched against rendered text + value + aria-label + title). Refuses when 0 or >1 elements match, or the single hit is disabled/zero-size/pointer-events:none — never guesses, because a wrong click has already happened' },
       xy: { type: 'string', description: 'click: "x,y" viewport coordinates to click instead of --text (no hit-testing; the receipt says so). ⛔ Omit both text and xy = refused' },
       script: { type: 'string', description: 'reload: a script to run after the reload completes' },
+      ref: { type: 'string', description: 'fill / scroll / upload: the element ref from \`ax\` (e.g. e12345 = an AX backendDOMNodeId). ⛔ NOT a CSS selector — refs are identities and re-snapshot when stale' },
+      value: { type: 'string', description: 'fill: the value to set (empty string allowed). Drives the native value setter + input/change so controlled components (React/Vue) see it. Receipt reports the READ-BACK value, not "success"' },
+      key: { type: 'string', description: 'press: key or chord — Enter / Escape / Tab / ArrowUp / Home / Space / Backspace / Delete / Control+A / Meta+Shift+Enter / single a-z 0-9. Non-ASCII text must use \`type\`' },
+      times: { type: 'number', description: 'press: how many times to send the key (default 1)' },
+      to: { type: 'string', description: 'scroll: "top" | "bottom" (whole-page jump). Otherwise give ref or xy plus optional delta' },
+      delta: { type: 'number', description: 'scroll: wheel deltaY in px (default 600; negative scrolls up)' },
+      for: { type: 'string', description: 'wait: REQUIRED PREFIX — selector:<css> | text:<substring> | url:<substring> | gone:<css> | js:<expr>. A bare value is refused because "which form" would be a guess' },
+      from: { type: 'string', description: 'drag: "x,y" start point in viewport coords' },
+      steps: { type: 'number', description: 'drag: number of intermediate mouseMoved steps (default 12; sortablejs needs a real move sequence)' },
+      file: { type: 'array', items: { type: 'string' }, description: 'upload: repeatable path INSIDE the CCC root. Paths outside are refused, as are missing files (DOM.setFileInputFiles silently succeeds on them)' },
+      accept: { type: 'boolean', description: 'dialog: accept (OK) instead of the default dismiss (Cancel). Default is dismiss because "OK" often means delete/pay/publish' },
+      prompt: { type: 'string', description: 'dialog: text to type into a prompt() dialog (only meaningful with accept)' },
+      limit: { type: 'number', description: 'ax: max interactive rows to return (default 200)' },
     },
     output: {
       schema: { type: 'json' },
