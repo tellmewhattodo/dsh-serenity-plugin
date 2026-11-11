@@ -313,11 +313,17 @@ async function run(
       if (!text && !xy) {
         return '⛔ 需要 --text=<按钮可见文字> 或 --xy=<x,y>（例如 --text=登录 ／ --xy=320,48）'
       }
-      const { picked } = await slotClick(root, n, sessionId, target, { text, xy })
+      const { picked, dialogs } = await slotClick(root, n, sessionId, target, { text, xy })
       // ⚠️ 回执只说"点了什么"，⛔ 不说"点成功了" —— 界面该变成什么样由调用方判断
-      return xy
+      const base = xy
         ? `[browser_slot] clicked @${xy.x},${xy.y}（坐标直给；未做命中校验）`
         : `[browser_slot] clicked <${picked.tag}> "${picked.text.slice(0, 60)}" @${picked.x},${picked.y}`
+      // 🔴 自动处理掉的弹窗必须报出来（⛔ 静默替你点了「取消」是另一种欺骗）
+      if (dialogs.length === 0) return base
+      const seen = dialogs
+        .map((d) => `  ⚠️ 自动处理弹窗 ${d.type || '(未知类型)'}：${JSON.stringify(d.message.slice(0, 100))} ⇒ ${d.accepted ? '已确定' : '已取消'}`)
+        .join('\n')
+      return `${base}\n${seen}\n  （默认取消；要「确定」请单独用 dialog --accept —— OK 常意味着删除/支付/发布）`
     }
     // ── ②b 高阶页面动作（v1.130.0）──────────────────────────────
     case 'ax': {

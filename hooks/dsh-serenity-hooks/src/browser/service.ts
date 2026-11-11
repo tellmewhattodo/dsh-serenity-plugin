@@ -763,7 +763,7 @@ export async function slotClick(
   sessionId: string,
   targetId: string,
   opts: { text?: string; xy?: { x: number; y: number } },
-): Promise<{ picked: Clickable; total: number }> {
+): Promise<{ picked: Clickable; total: number; dialogs: Array<{ type: string; message: string; accepted: boolean }> }> {
   assertSlotOwned(root, slot, sessionId)
   if (!opts.text && !opts.xy) {
     throw new Error('⛔ 需要 --text=<按钮可见文字> 或 --xy=<x,y>（先 targets 拿 targetId）')
@@ -771,11 +771,12 @@ export async function slotClick(
 
   // 坐标直通：不必采集整页（省一次大对象往返），直接点
   if (opts.xy) {
-    await clickAt(slot, targetId, opts.xy.x, opts.xy.y)
+    const r = await clickAt(slot, targetId, opts.xy.x, opts.xy.y)
     pageTouched(root, slot)
     return {
       picked: { tag: '', type: '', text: '', role: '', ...opts.xy, w: 0, h: 0, disabled: false, pointerNone: false, download: false },
       total: 0,
+      dialogs: r.dialogs,
     }
   }
 
@@ -802,9 +803,9 @@ export async function slotClick(
     )
   }
 
-  await clickAt(slot, targetId, res.el.x, res.el.y)
+  const clicked = await clickAt(slot, targetId, res.el.x, res.el.y)
   pageTouched(root, slot)
-  return { picked: res.el, total: list.length }
+  return { picked: res.el, total: list.length, dialogs: clicked.dialogs }
 }
 
 /** 列当前槽位上的 targets */

@@ -14,6 +14,30 @@
 
 ---
 
+## v1.130.3 — 2026-11-11（`dialog`：先 `Page.enable` 会把被弹窗阻塞的页面再卡 30s）
+
+> 又一条**只有真机才抓得到**的缺陷（单测发不出 confirm，也就测不到这条路）。
+
+**现象**：`click` 一个会 `confirm()` 的按钮 ⇒ 点击 30s 超时（页面同步阻塞，**这是预期的**）；
+接着调 `browser_slot dialog` 去救 ⇒ **`Page.enable` 自己超时 30s** ⇒ 弹窗一直挂着，页面**永久卡死**。
+
+**定因（裸 WS 直连对照）**：
+
+| 发什么（页面已被 confirm 阻塞） | 结果 |
+|---|---|
+| `Page.enable` | **挂住**（它要往渲染器要一次响应，而渲染器正停在 `confirm()` 那一行） |
+| `Page.handleJavaScriptDialog{accept:false}`（**不 enable 直接发**） | **立刻返回**（由浏览器进程处理，不经过被阻塞的渲染器） |
+
+⇒ 判据：**在「页面已阻塞」这个状态下，任何需要页面响应的方法都不能排在前面。**
+⇒ 修法：**先直接发 `handleJavaScriptDialog`**（8s 超时），只在需要**事件面**（拿弹窗类型与正文）时事后补 `Page.enable`。
+
+**代价如实登记**：不 enable 就拿不到 `Page.javascriptDialogOpening` 的 `type`/`message`，
+所以 `hadDialog=true` 时这两个字段多为空。判据是「**先把页面救回来**」—— 类型/正文属附加信息，
+要它得在弹窗出现**之前** enable，那是调用方的编排问题，不该由这一个动作擅自决定。
+
+超时时给明确出路（`close` 这个 tab 重来），⛔ 不让调用方反复重试一个已经不响应的 target。
+
+---
 ## v1.130.2 — 2026-11-11（`scroll` 的真机缺陷：Wayland headed 下 `mouseWheel` 会挂住 30s）
 
 > 真机验收抓出来的，不是测试抓出来的（测试全绿，因为**没有任何单测会去发 wheel**）。

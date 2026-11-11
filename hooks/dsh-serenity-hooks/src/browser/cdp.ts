@@ -238,16 +238,48 @@ export async function closeTab(slot: number, targetId: string, all = false): Pro
  * 🔴 顺序与坐标：`mouseMoved` → `mousePressed` → `mouseReleased`，三次同一坐标。
  *    ⛔ 不发 `mousePressed` 就发 `mouseReleased` 会被 Chrome 丢弃（且**不报错**）。
  */
-export async function clickAt(slot: number, targetId: string, x: number, y: number): Promise<void> {
-  const conn = attach(await wsConnect(await pageWsUrl(slot, targetId)))
+export async function clickAt(
+  slot: number,
+  targetId: string,
+  x: number,
+  y: number,
+): Promise<{ dialogs: AutoDialog['handled'] }> {
+  /**
+   * 🔴🔴 **点击是「会弹窗」的动作，所以自动弹窗必须挂在这条连接上**（2026-11-11 owner 现场报障）。
+   *
+   *    改之前：点一个 `confirm()` 按钮 ⇒ `mouseReleased` **30s 超时**，弹窗留在屏幕上，
+   *    这个 tab 之后所有调用全超时 —— **整条自动化被原地卡死**。
+   *    改之后：事件到达即由浏览器进程 dismiss ⇒ 点击**正常返回**，且回执写明处理了什么。
+   *
+   * ⚠️ 超时也保留兜底：真的 30s 没返回（页面被别的东西卡住），错误文案要说清
+   *    「可能是同步弹窗且自动处理没接住」并给出路，⛔ 不甩一句裸超时。
+   */
+  const policy: AutoDialog = { mode: 'dismiss', handled: [] }
   try {
-    const base = { x, y, button: 'left' as const, clickCount: 1 }
-    await cdpRaw(conn, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y })
-    await cdpRaw(conn, 'Input.dispatchMouseEvent', { type: 'mousePressed', ...base })
-    await cdpRaw(conn, 'Input.dispatchMouseEvent', { type: 'mouseReleased', ...base })
-  } finally {
-    conn.ws.close()
+    await withPage(
+      slot,
+      targetId,
+      async (send) => {
+        const base = { x, y, button: 'left' as const, clickCount: 1 }
+        await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }, 8000)
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...base }, 8000)
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...base }, 20_000)
+      },
+      { autoDialog: policy },
+    )
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? e)
+    if (/超时|timeout/i.test(msg) && policy.handled.length === 0) {
+      throw new Error(
+        `⛔ 点击超时（${msg}），且本次**没有捕获到任何弹窗**。\n` +
+          `  ⇒ 页面可能被同步脚本卡住（死循环 / 大计算 / 已存在的弹窗不是本连接触发的）。\n` +
+          `  ⇒ 出路：\`browser_slot dialog\` 试一次救场；不行就 \`close\` 掉这个 tab 重来。\n` +
+          `  ⚠️ 自动弹窗处理**只对本连接期间新出现的弹窗**生效。`,
+      )
+    }
+    throw e
   }
+  return { dialogs: policy.handled }
 }
 
 /** 正文（`document.body.innerText`） */
@@ -354,33 +386,106 @@ export function resolveShotPath(cccRoot: string, relOrAbs: string): string {
  * @param opts.events 要订阅的 CDP 事件名（例如 `Page.javascriptDialogOpening`）
  * @param opts.onEvent 事件回调（**同步**执行；不要在里面 await CDP，那会卡住消息循环）
  */
+export interface AutoDialog {
+  /** 自动处理策略：dismiss（默认，等于点「取消」）／accept（等于点「确定」）／none（交给调用方） */
+  mode: 'dismiss' | 'accept' | 'none'
+  /** 本次连接上**实际处理掉**的弹窗（回执要报出去，⛔ 不许静默） */
+  handled: Array<{ type: string; message: string; accepted: boolean }>
+}
+
+/**
+ * 🔴🔴 **自动处理原生弹窗（2026-11-11 owner 现场报障）**
+ *
+ *    **现象**（owner 截图）：点一个会 `confirm()` 的按钮 ⇒ 弹窗留在屏幕上，**整个自动化流程被原地卡死** ——
+ *    那次 `click` 30s 超时，之后这个 tab 上**所有** CDP 调用全部超时，只能 `close` 掉重来。
+ *
+ *    **为什么以前必须在点击之后手动调 `dialog` 是错的**：那个编排要求调用方**预知**「这一下会弹窗」，
+ *    而真实站点里弹窗常由页面逻辑触发（离开确认、删除确认、会话过期重登）——
+ *    **没有人能在点击前知道**。⇒ 正确的形态是「**持续在场，事件一到就处理**」。
+ *
+ *    **唯一可行的实现**（判据 D320 的反面）：
+ *      · 在**同一条连接**上先 `Page.enable` ⇒ 才会收到 `Page.javascriptDialogOpening`
+ *      · 事件到达时立刻发 `Page.handleJavaScriptDialog` —— 它由**浏览器进程**处理，
+ *        **不经过被阻塞的渲染器**，所以在「点击请求还挂着」的同一时刻也能生效
+ *      · 处理完，被阻塞的点击请求才会返回
+ *    ⚠️ 顺序反了（先等点击返回再处理弹窗）就永远等不到 —— 那就是这次的卡死。
+ *
+ *    **默认 dismiss**（判据 D318：不可逆性小的那侧）。要 accept 必须由调用方显式要求。
+ */
+function attachAutoDialog(
+  send: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<Record<string, unknown>>,
+  policy: AutoDialog,
+): { events: string[]; onEvent: (method: string, params: Record<string, unknown>) => void } | null {
+  if (policy.mode === 'none') return null;
+  const accept = policy.mode === 'accept';
+  return {
+    events: ['Page.javascriptDialogOpening'],
+    onEvent: (method, params) => {
+      if (method !== 'Page.javascriptDialogOpening') return;
+      const entry = {
+        type: String(params.type ?? ''),
+        message: String(params.message ?? ''),
+        accepted: accept,
+      };
+      policy.handled.push(entry);
+      // 🔴 fire-and-forget：事件回调是同步的，await 会把消息循环堵住（然后所有调用一起超时）
+      void send('Page.handleJavaScriptDialog', { accept }, 8000).catch(() => {
+        /* 处理失败不抛：页面可能已被别处关掉；回执侧靠 handled 里那条记录如实呈现 */
+      });
+    },
+  };
+}
+
 export async function withPage<T>(
   slot: number,
   targetId: string,
   fn: (send: (method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<Record<string, unknown>>) => Promise<T>,
-  opts: { events?: readonly string[]; onEvent?: (method: string, params: Record<string, unknown>) => void } = {},
+  opts: {
+    events?: readonly string[];
+    onEvent?: (method: string, params: Record<string, unknown>) => void;
+    /** 自动处理原生弹窗（默认 **dismiss**）；传 { mode: 'none' } 才交回调用方 */
+    autoDialog?: AutoDialog;
+  } = {},
 ): Promise<T> {
   const conn = attach(await wsConnect(await pageWsUrl(slot, targetId)))
-  if (opts.events && opts.events.length > 0) {
-    const want = new Set(opts.events)
-    const prev = conn.ws.onmessage
-    conn.ws.onmessage = (ev: { data: unknown }) => {
-      // ① 先走原有的 id→promise 相关器（不调它，普通调用就永远等不到兑现）
-      prev?.call(conn.ws, ev as never)
-      // ② 再看是不是我们要订阅的事件（没有 id 的那些）
-      try {
-        const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)) as {
-          method?: string
-          params?: Record<string, unknown>
-        }
-        if (msg.method && want.has(msg.method)) opts.onEvent?.(msg.method, msg.params ?? {})
-      } catch {
-        /* 非 JSON 帧：忽略（与本文件其他处同口径） */
-      }
-    }
-  }
+  const send = (method: string, params?: Record<string, unknown>, timeoutMs?: number) =>
+    cdpRaw(conn, method, params, timeoutMs)
+  /**
+   * 🔴 **默认就是 dismiss**（判据 D318 + 2026-11-11 owner 报障）。
+   *    只有显式 `{ mode: 'none' }` 才把弹窗交回调用方 —— 那意味着调用方承诺自己接得住。
+   */
+  const policy: AutoDialog = opts.autoDialog ?? { mode: 'dismiss', handled: [] }
   try {
-    return await fn((method, params, timeoutMs) => cdpRaw(conn, method, params, timeoutMs))
+    // ① 自动弹窗：必须先 Page.enable（不 enable 收不到 dialogOpening 事件）
+    const auto = attachAutoDialog(send, policy)
+    if (auto) {
+      await send('Page.enable', {}, 8000).catch(() => {
+        /* 页面已被阻塞时 enable 会挂住 ⇒ 8s 内放弃，⛔ 不把整次调用拖进 30s 超时 */
+      });
+    }
+    const events = [...(opts.events ?? []), ...(auto?.events ?? [])]
+    if (events.length > 0) {
+      const want = new Set(events)
+      const prev = conn.ws.onmessage
+      conn.ws.onmessage = (ev: { data: unknown }) => {
+        prev?.call(conn.ws, ev as never)
+        try {
+          const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)) as {
+            method?: string;
+            params?: Record<string, unknown>;
+          };
+          if (!msg.method || !want.has(msg.method)) return;
+          auto?.onEvent(msg.method, msg.params ?? {});
+          if (opts.onEvent && !auto) opts.onEvent(msg.method, msg.params ?? {});
+          if (opts.onEvent && auto && msg.method !== 'Page.javascriptDialogOpening') {
+            opts.onEvent(msg.method, msg.params ?? {});
+          }
+        } catch {
+          /* 非 JSON 帧：忽略 */
+        }
+      };
+    }
+    return await fn(send)
   } finally {
     conn.ws.close()
   }
