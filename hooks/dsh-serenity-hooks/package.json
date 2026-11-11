@@ -1,6 +1,6 @@
 {
   "name": "@shgroup/dsh-serenity-hooks",
-  "version": "1.130.3",
+  "version": "1.131.0",
   "description": "宁静号 ACC harness（Native Cordis 插件）——给 DeepSeek Harness 装一个「AI 工作区」：14 个工具（container_fs/cognitive_trajectory/dashboard/container_git/msm/praxis/ontology/serenity-skill-creator/localstore/container_admin/browser_slot；另三个 im-bridge/diagram/reconstruct 按条件出现）+ 机械约束（安全模式/工作区围墙/密钥守卫/对外输出守卫）+ 认知轨迹日志与原地重建 + 网页登录入口/IM 桥/认知轨迹唤醒注册表 + 浏览器槽位管理（≤20 个独立 profile 的 Chrome 槽位，带占用归属与异常时向所属会话反向注入提醒）。轨迹声明 = 轨迹目录下的 trajectory.json（约束面 + 旧标识 uid + CRO 机器绑定 cro.host；旧名 trajectory-constraint.json / skiff.json 仍在读取族里）；轨迹提示词 = 轨迹目录下的 PROMPT.md（一条轨迹「是谁、按什么章程工作」，所有轨迹通用，追加在容器层与质量层之后，不替换它们）。适配 DSH 0.1.7-rc.1 / 0.2.0-rc.1 / 0.2.1-rc.1（三档）。",
   "license": "MIT",
   "repository": {
