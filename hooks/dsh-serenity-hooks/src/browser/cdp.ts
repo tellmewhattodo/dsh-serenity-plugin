@@ -28,6 +28,7 @@ import { mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { slotPort } from './state.js'
 import type { KeyStroke } from './keys.js'
+import type { HitProbe } from './hit-test.js'
 import type { AxNode } from './ax.js'
 
 /** 一条 CDP 连接上的相关器：发出去的 id → 待兑现的 promise */
@@ -825,6 +826,72 @@ export async function boxCenterByBackendId(
       w: Math.round(maxX - minX),
       h: Math.round(maxY - minY),
       inViewport: vw > 0 && vh > 0 && cx >= 0 && cy >= 0 && cx <= vw && cy <= vh,
+    }
+  })
+}
+
+/**
+ * 命中测试：**这个点上到底是谁**（`DOM.getNodeForLocation`）。
+ *
+ * 🔴 为什么是它而不是页面里的 `document.elementFromPoint`：
+ *    前者问的是**合成器／真实点击用的那套命中逻辑**，后者是 DOM 侧的另一份实现。
+ *    「点下去发生了什么」要用**与点击同一套**的答案来回答（同族判据：有宿主自带实现就别复刻语义）。
+ *
+ * ⚠️ 三条 CDP 行为必须知道（否则读数会被读反）：
+ *   ① **坐标越界不报错** —— 只回 `nodeId: 0`。所以**视口判定必须自己算**，不能靠"回了空"。
+ *   ② `DOM.enable` 与 `Overlay.enable` 都可省；但 `DOM.enable` 之后要销毁连接，本函数走 withPage 高层封装。
+ *   ③ 解析节点用 `DOM.describeNode`（拿 nodeName / id），⛔ 不用 `DOM.getOuterHTML`（会把整段 HTML 拉回上下文）。
+ */
+export async function hitTestAt(slot: number, targetId: string, x: number, y: number): Promise<HitProbe> {
+  return await withPage(slot, targetId, async (send) => {
+    // 视口自己量：CDP 对越界坐标**不报错**，只回空 ⇒ 不能靠它判"在不在视口内"
+    const vp = (await send('Runtime.evaluate', {
+      expression: 'JSON.stringify({w:innerWidth,h:innerHeight})',
+      returnByValue: true,
+    })) as { result?: { value?: string } }
+    let vw = 0
+    let vh = 0
+    try {
+      const o = JSON.parse(String(vp.result?.value ?? '{}')) as { w?: number; h?: number }
+      vw = Number(o.w ?? 0)
+      vh = Number(o.h ?? 0)
+    } catch {
+      /* 量不出来 ⇒ 按"不在视口内"处理（保守：让调用方先 scroll，而不是点空） */
+    }
+    const inViewport = vw > 0 && vh > 0 && x >= 0 && y >= 0 && x <= vw && y <= vh
+    if (!inViewport) return { inViewport, viewport: vw > 0 && vh > 0 ? { w: vw, h: vh } : undefined }
+
+    await send('DOM.enable')
+    const found = (await send('DOM.getNodeForLocation', {
+      x: Math.round(x),
+      y: Math.round(y),
+      includeUserAgentShadowDOM: false,
+      ignorePointerEventsNone: false,
+    })) as { backendNodeId?: number; nodeId?: number }
+    const backend = Number(found.backendNodeId ?? 0)
+    if (!Number.isFinite(backend) || backend <= 0) return { inViewport, viewport: { w: vw, h: vh } }
+
+    let nodeName = ''
+    let id = ''
+    try {
+      const desc = (await send('DOM.describeNode', { backendNodeId: backend, depth: 0 })) as {
+        node?: { nodeName?: string; attributes?: string[] }
+      }
+      nodeName = String(desc.node?.nodeName ?? '')
+      const attrs = desc.node?.attributes ?? []
+      for (let i = 0; i + 1 < attrs.length; i += 2) {
+        if (attrs[i] === 'id') {
+          id = String(attrs[i + 1] ?? '')
+          break
+        }
+      }
+    } catch {
+      /* 描述失败不影响"命中了谁"这个结论 —— 只是回执里少了名字 */
+    }
+    return {
+      inViewport,
+      viewport: { w: vw, h: vh },
+      node: { backendNodeId: backend, nodeName: nodeName || '?', ...(id ? { id } : {}) },
     }
   })
 }

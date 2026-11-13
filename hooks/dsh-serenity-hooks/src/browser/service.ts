@@ -52,6 +52,7 @@ import {
   evalInPage,
   fillByBackendId,
   handleDialog,
+  hitTestAt,
   insertText,
   listDownloaded,
   listTargets,
@@ -83,6 +84,7 @@ import { COLLECT_CLICKABLE, pickClickable, renderClickables, type Clickable } fr
 import { parseKeyStroke, type KeyStroke } from './keys.js'
 import { pruneAx, refToBackendId, type AxLine } from './ax.js'
 import { explainWaitTimeout, parseWaitSpec, type WaitSpec } from './wait-spec.js'
+import { judgeHit, renderHit, type HitVerdict } from './hit-test.js'
 
 /**
  * 动作枚举（对外暴露的唯一清单）
@@ -762,21 +764,46 @@ export async function slotClick(
   slot: number,
   sessionId: string,
   targetId: string,
-  opts: { text?: string; xy?: { x: number; y: number } },
-): Promise<{ picked: Clickable; total: number; dialogs: Array<{ type: string; message: string; accepted: boolean }> }> {
+  opts: { text?: string; xy?: { x: number; y: number }; ref?: number },
+): Promise<{
+  picked: Clickable
+  total: number
+  dialogs: Array<{ type: string; message: string; accepted: boolean }>
+  /** 「这一下**会点到谁**」的判定（B 项，D328）。⛔ 回执不说"点成功"，只说它落在哪 */
+  hit: HitVerdict
+}> {
   assertSlotOwned(root, slot, sessionId)
   if (!opts.text && !opts.xy) {
-    throw new Error('⛔ 需要 --text=<按钮可见文字> 或 --xy=<x,y>（先 targets 拿 targetId）')
+    throw new Error('⛔ 需要 --text=<按钮可见文字> 或坐标（先 targets 拿 targetId）')
   }
 
-  // 坐标直通：不必采集整页（省一次大对象往返），直接点
+  // 坐标直通：不必采集整页（省一次大对象往返）——
+  // 🔴 但**必须先做命中测试**（2026-11-13 B 项）：CDP 对"点在视口外 / 点在被盖住的元素上"**一行都不报**，
+  //    回执照样写着 clicked @x,y。判据：**「发了鼠标事件」与「点到了目标」是两件事**（D311 的坐标版）。
   if (opts.xy) {
+    const probe = await hitTestAt(slot, targetId, opts.xy.x, opts.xy.y)
+    const hit = judgeHit(probe, opts.ref !== undefined ? { backendNodeId: opts.ref } : undefined)
+    if (hit.kind === 'offscreen' || hit.kind === 'blank') {
+      // 不点：点一个不存在的落点是纯副作用（事件发出去了，责任还在我们账上）
+      throw new Error(
+        `⛔ 不点：${renderHit(hit)}\n` +
+          `  ⇒ 坐标 ${opts.xy.x},${opts.xy.y}。先用 \`ax\` 拿 ref（更稳）或 \`scroll\` 把目标滚进视口。`,
+      )
+    }
+    if (hit.kind === 'blocked') {
+      throw new Error(
+        `⛔ 不点：${renderHit(hit)}\n` +
+          `  ⇒ 被挡住时点下去会**执行另一个元素**的处理逻辑（而回执若是"clicked"就无从发现）。\n` +
+          `  ⇒ 出路：先用 \`ax\` 看那一层是什么（弹层／固定头／遮罩），关掉它；或改用 \`--ref\` 点名目标。`,
+      )
+    }
     const r = await clickAt(slot, targetId, opts.xy.x, opts.xy.y)
     pageTouched(root, slot)
     return {
       picked: { tag: '', type: '', text: '', role: '', ...opts.xy, w: 0, h: 0, disabled: false, pointerNone: false, download: false },
       total: 0,
       dialogs: r.dialogs,
+      hit,
     }
   }
 
@@ -803,9 +830,22 @@ export async function slotClick(
     )
   }
 
+  // 🔴 文本命中（`pickClickable`）判的是**元素本身能不能点**，但它看不见"谁盖在上面"——
+  //    固定头／浮层／遮罩全部在 DOM 里"可见、可点、文字对得上"，**只有命中测试能问出来**。
+  //    ⚠️ 这里的 `expect` 只能给到「同一位置的元素」这一层：采集器给的是坐标，不是 backendNodeId ⇒
+  //       有 expect 时比的是**位置命中到的那个节点**；没有 expect 时只报告"落到了谁"。
+  const probe = await hitTestAt(slot, targetId, res.el.x, res.el.y)
+  const hit = judgeHit(probe)
+  if (hit.kind === 'offscreen' || hit.kind === 'blank') {
+    throw new Error(
+      `⛔ 不点「${opts.text}」：${renderHit(hit)}\n` +
+        `  ⇒ 「找得到」与「点得到」是两件事：元素在 DOM 里可见、可点，不代表这一下会落在它上面。`,
+    )
+  }
+
   const clicked = await clickAt(slot, targetId, res.el.x, res.el.y)
   pageTouched(root, slot)
-  return { picked: res.el, total: list.length, dialogs: clicked.dialogs }
+  return { picked: res.el, total: list.length, dialogs: clicked.dialogs, hit }
 }
 
 /** 列当前槽位上的 targets */

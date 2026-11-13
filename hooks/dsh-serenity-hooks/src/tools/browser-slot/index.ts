@@ -59,8 +59,9 @@ import {
 import { MAX_SLOTS, slotLabel, slotPort } from '../../browser/state.js'
 import { EXT_DIR_REL } from '../../browser/extend.js'
 import { normalizeSlotId } from '../../browser/process.js'
-import { renderAx } from '../../browser/ax.js'
+import { refToBackendId, renderAx } from '../../browser/ax.js'
 import { parseXY, xyFormHint } from '../../browser/coords.js'
+import { renderHit } from '../../browser/hit-test.js'
 
 function renderText(value: unknown): ContentBlock[] {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -306,11 +307,19 @@ async function run(
       if (!text && !xy) {
         return `⛔ 需要 --text=<按钮可见文字> 或坐标（坐标三种写法都收）：\n${xyFormHint('xy')}\n  例如：--text=登录`;
       }
-      const { picked, dialogs } = await slotClick(root, n, sessionId, target, { text, xy })
-      // ⚠️ 回执只说"点了什么"，⛔ 不说"点成功了" —— 界面该变成什么样由调用方判断
-      const base = xy
-        ? `[browser_slot] clicked @${xy.x},${xy.y}（坐标直给；未做命中校验）`
-        : `[browser_slot] clicked <${picked.tag}> "${picked.text.slice(0, 60)}" @${picked.x},${picked.y}`
+      // 🔴 `--ref` 参与命中判定（2026-11-13 B 项）：给了 ref 就**必须**落在那个 ref 上，
+      //    ⛔ 不给 ref 时只报告"落到了谁"（调用方没说要打谁，就没有"打错了"这回事）
+      const refRaw = str(args.ref)
+      const refId = refRaw === undefined ? undefined : (refToBackendId(refRaw) ?? undefined)
+      if (refRaw !== undefined && refId === undefined) {
+        return `⛔ --ref 格式不对：${JSON.stringify(refRaw)}（要 \`ax\` 给出的 eNNN）`
+      }
+      const { picked, dialogs, hit } = await slotClick(root, n, sessionId, target, { text, xy, ref: refId })
+      // ⚠️ 回执只说"点了什么 / 落到谁身上"，⛔ 不说"点成功了" —— 界面该变成什么样由调用方判断
+      const what = xy
+        ? `@${xy.x},${xy.y}`
+        : `<${picked.tag}> "${picked.text.slice(0, 60)}" @${picked.x},${picked.y}`
+      const base = `[browser_slot] clicked ${what}｜命中：${renderHit(hit)}`;
       // 🔴 自动处理掉的弹窗必须报出来（⛔ 静默替你点了「取消」是另一种欺骗）
       if (dialogs.length === 0) return base
       const seen = dialogs
