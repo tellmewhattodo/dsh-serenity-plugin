@@ -14,6 +14,55 @@
 
 ---
 
+## v1.132.0 — 2026-11-13（坐标参数收三种形态；并测出「PTC 签名只有一维」）
+
+> owner 2026-11-13 截图报「本轮运行失败 / `MALFORMED_RESPONSE`」。
+
+### 根因（**不在点击逻辑里**）
+
+错误发生在**参数 JSON 解析阶段** —— 工具一次都没执行。`xy` 原本只声明成 `string`，
+模型想传两个数字时写出了裸两个值 `{"xy": 1428,76}` ⇒ JSON 坏掉。
+判据：**schema 的形状会改变调用方的写法**。收窄参数类型，等于逼调用方把自然表达序列化进字符串。
+
+### 修法
+
+| 文件 | 改了什么 |
+|---|---|
+| `src/browser/coords.ts`（新） | `parseXY` 收 `"x,y"` ／ `[x,y]` ／ `{x,y}`；`xyFormHint` 列三种写法（拒绝时只列一种 = 又把口子收窄回去） |
+| `src/tools/browser-slot/index.ts` | `xy`／`from` 改 `oneOf` 三支；4 处调用点去掉 `str()` 包装（它只认 string，会把数组/对象当"没给"） |
+| `tests/browser-slot-coords.test.ts`（新） | C1~C11：解析层判据 |
+| `tests/browser-slot-xy-schema.test.ts`（新） | S1~S3：**跑宿主自己的编译＋校验器**（非复刻），取 `createBrowserSlotTool()` **编译后**的 schema |
+
+### 🔴 对象支的形状是**试出来的**，四种写法只有一种能用
+
+| 写法 | 结果 |
+|---|---|
+| `{type:'object', additionalProperties:true}` | 任何对象都命中 ⇒ 非数字分量被放行 |
+| `{enum:[{}]}`（想表达"任意对象"） | **恒不命中**（枚举匹配只认标量）⇒ 对象形态整体被拒 |
+| `{…properties, required:['x','y']}`（分支级必填） | **最低档宿主编译失败** ⇒ `defineTool` 在创建时就抛 ⇒ **整个工具消失**，而单测只要不构造工具就照样全绿 |
+| ✅ `type:'object' + properties{x,y 各带 required:true} + additionalProperties:false` | 三形态**各自恰好命中一支**；非数字／缺分量／多余键**照旧被拒** |
+
+判据：**收得宽 ≠ 判得松**。schema 管**形状**，`parseXY` 管**内容**（分量个数／有限数／非负）。
+
+### 🔴 顺带测出的一条（真机才有）：**schema 能力 ≠ 模型看得见的能力**
+
+`renderToolsSdk`（PTC）把每份 schema 先过 `assertSupportedJsonSchema`，
+**任何抛错都被 `catch` 成 `unknown`**；而 `parameters:` 这一层在渲染时**不做属性级 union 展开**。
+⇒ 模型实际看到的签名是 `xy?: string` —— 数组/对象形态在 PTC 会话里**根本传不进去**
+（`invalid arguments: "xy" must be a string`，工具一次没跑，与坐标逻辑无关）。
+⚠️ 因此本版**不宣称"PTC 里三种形态都能用"**：只有 `"x,y"`。另外两种保留给非 PTC 会话与直接调用方。
+判据进 `references/70-browser-surface.md`（§3 坐标参数一节）。
+
+### 门禁与证据
+
+- `typecheck` ✓ ／ `test --filter browser-slot` **17 files / 202 tests** ✓ ／ `build` ✓ ／ `pack-check` 189 文件 ✓
+- 变异四例各自精确红：数组不校验个数 ⇒ C5；负数放行 ⇒ C7；`additionalProperties:true` ⇒ S2；
+  分支级 `required` ⇒ **编译失败**
+- 真机（v1.131.0 装机版，即修前）：`click xy:"200,240"` ⇒ `clicked @200,240` 且页面证明 `INIT → CLICKED`（**副作用**，非回执）
+- ⚠️ 全量 `test` 有 **7 个失败文件与本笔无关**（cordis/storage peer 解析、PATH 上假 git/tsdown、一条已登记的 `待裁` xfail）
+
+---
+
 ## v1.131.0 — 2026-11-11（原生弹窗**自动处理**：不再因一个 `confirm` 卡死整条流程）
 
 > owner 现场报障（截图）：「**这个要想办法攻破；避免实际使用过程中这种东西直接阻断过程**」。
