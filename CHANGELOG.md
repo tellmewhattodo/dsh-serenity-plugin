@@ -14,6 +14,49 @@
 
 ---
 
+## v1.134.0 — 2026-11-14（核心提示词精简 41%；禁止用 emoji 表达状态）
+
+> owner：「核心提示词的尺寸我想缩减下，保留故事和框架，少一些约束性」＋「新增不允许使用 emoji 恢复或写文件」。
+> 逐块前后对照经 owner 审阅两轮后放行；**EAP 块明确放弃精简**，整块回滚。
+
+### 体量（渲染后逐块称重）
+
+| 块 | 前 | 后 | 变化 |
+|---|---:|---:|---:|
+| ACC 身份 | 700 | 469 | -33% |
+| CCE | 2,310 | 834 | -64% |
+| Principles | 1,634 | 1,309 | -20% |
+| EAP | 566 | 566 | 0（整块回滚） |
+| Metaphor | 3,301 | 1,838 | -44% |
+| **合计** | **8,511** | **5,016** | **-41%** |
+
+### 判据：留故事与框架，删重复解释与强调语气
+
+- **ACC**：删唯一一个 emoji；删长示例路径与工具名枚举；MSM 指引压成一行。
+- **CCE**：删 `FIVE BEHAVIORAL CONSTRAINTS (engineering requirements, not suggestions):` 抬头与五条各 2~3 行解释；
+  删与 H_op 段重复的整段 `THIS IS PERSISTENCE ENGINEERING`；`ΔH_org >= ΔH_in` 换成同一判据的自然语言。**五条名字一个没少。**
+- **Principles**：去 `Why a cognitive container:` 设问句头并句；本体论 / session 关系 / MSM 三原则 /
+  四条边界（**含 `wait for user "use" or "使用" to confirm` 逐字**）一字未动；末尾新增 emoji 禁令。
+- **Metaphor**：删各条后的比喻展开与重复的 H_op 句；`→` 改 ASCII `->`。**十景与判决句全部保留，编号 1–10 未变。**
+- **EAP**：owner 裁定放弃 ⇒ 回滚为原稿，一个字符没动。
+
+### 新增禁令
+
+```
+Style: plain text. Do not use emoji to mark status, to soften an error, or to decorate
+a file or an answer — say it in words.
+```
+
+⚠️ **边界如实登记**：该禁令约束的是**表情符号**；`E↑` `R↓` `S↑` `→` `Δ` 这类数学/箭头符号
+**不在禁令内**（EAP 回滚后它们仍在）。要收它们需要另一条令。
+
+### 证据
+
+- `typecheck` 通过；prompt 相关 **3 files / 59 tests** 全绿。
+- 测试只改断言字符串（旧措辞 -> 新措辞），⛔ 没删任何断言；EAP 与 Session-first 的断言随回滚一并还原。
+
+---
+
 ## v1.133.0 — 2026-11-13（点击前做**命中判定**：视口外 ／ 被盖住 ／ 空白）
 
 > owner 2026-11-13 同意按 **B → A → F → C/D → E** 的顺序做；这是 **B** —— 调研里最贵的那个缺口
