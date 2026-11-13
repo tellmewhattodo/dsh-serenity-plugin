@@ -60,6 +60,7 @@ import { MAX_SLOTS, slotLabel, slotPort } from '../../browser/state.js'
 import { EXT_DIR_REL } from '../../browser/extend.js'
 import { normalizeSlotId } from '../../browser/process.js'
 import { renderAx } from '../../browser/ax.js'
+import { parseXY, xyFormHint } from '../../browser/coords.js'
 
 function renderText(value: unknown): ContentBlock[] {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -138,15 +139,7 @@ async function needTarget(
   return resolveTarget(root, n, sessionId, { target, match })
 }
 
-/** 解析 `--xy=x,y`（也接受 `x y`）。⛔ 非有限数、负数一律当没给 —— 越界坐标会让点击落到别处。 */
-function parseXY(raw: string | undefined): { x: number; y: number } | undefined {
-  if (!raw) return undefined
-  const parts = raw.split(/[,\s]+/).filter(Boolean)
-  if (parts.length !== 2) return undefined
-  const x = Number(parts[0])
-  const y = Number(parts[1])
-  return Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 ? { x, y } : undefined
-}
+
 
 /** 取字符串参数（空串当没给） */
 function str(v: unknown): string | undefined {
@@ -309,9 +302,9 @@ async function run(
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const text = str(args.text)
-      const xy = parseXY(str(args.xy))
+      const xy = parseXY(args.xy as never)
       if (!text && !xy) {
-        return '⛔ 需要 --text=<按钮可见文字> 或 --xy=<x,y>（例如 --text=登录 ／ --xy=320,48）'
+        return `⛔ 需要 --text=<按钮可见文字> 或坐标（坐标三种写法都收）：\n${xyFormHint('xy')}\n  例如：--text=登录`;
       }
       const { picked, dialogs } = await slotClick(root, n, sessionId, target, { text, xy })
       // ⚠️ 回执只说"点了什么"，⛔ 不说"点成功了" —— 界面该变成什么样由调用方判断
@@ -376,7 +369,7 @@ async function run(
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const refStr = str(args.ref);
-      const xy = parseXY(str(args.xy));
+      const xy = parseXY(args.xy as never);
       const toRaw = str(args.to);
       const to = toRaw === 'top' || toRaw === 'bottom' ? toRaw : undefined;
       if (!refStr && !xy && !to) return '⛔ 需要 --ref=<eNNN> ／ --xy=<x,y> ／ --to=<top|bottom> 之一';
@@ -399,11 +392,12 @@ async function run(
     case 'drag': {
       const n = needSlot(args);
       const target = await needTarget(root, n, sessionId, args);
-      const from = parseXY(str(args.from));
-      const to = parseXY(str(args.to));
-      if (!from || !to) return '⛔ 需要 --from=<x,y> 与 --to=<x,y>（先 ax 拿 ref，再用 scroll/eval 量坐标）';
-      await slotDrag(root, n, sessionId, target, from, to, num(args.steps) ?? 12);
-      return `[browser_slot] drag ${from.x},${from.y} → ${to.x},${to.y}（分 ${num(args.steps) ?? 12} 步；⛔ 回执不说拖成功）`;
+      const from = parseXY(args.from as never);
+      const to = parseXY(args.to as never);
+      if (!from || !to) return `⛔ 需要 --from 与 --to（坐标三种写法都收）：\n${xyFormHint('from')}${xyFormHint('to')}\n  先 ax 拿 ref，再用 scroll/eval 量坐标`;
+      const steps = num(args.steps) ?? 12;
+      await slotDrag(root, n, sessionId, target, from, to, steps);
+      return `[browser_slot] drag ${from.x},${from.y} → ${to.x},${to.y}（分 ${steps} 步；⛔ 回执不说拖成功）`;
     }
     case 'upload': {
       const n = needSlot(args);
@@ -513,7 +507,32 @@ export function createBrowserSlotTool(ctx: Context) {
       earg: { type: 'array', items: { type: 'string' }, description: 'ext: repeatable key=value pairs passed to the extension as strings (e.g. ["city=Suzhou"])' },
       timeout: { type: 'number', description: 'eval: evaluate timeout in milliseconds' },
       text: { type: 'string', description: 'click: visible-text SUBSTRING of the element to click (matched against rendered text + value + aria-label + title). Refuses when 0 or >1 elements match, or the single hit is disabled/zero-size/pointer-events:none — never guesses, because a wrong click has already happened' },
-      xy: { type: 'string', description: 'click: "x,y" viewport coordinates to click instead of --text (no hit-testing; the receipt says so). ⛔ Omit both text and xy = refused' },
+      // 🔴 坐标三种形态都声明（2026-11-13 事故）：只收 string 会逼模型把两个数字序列化进字符串，
+      //    它更自然的写法是裸两个数字 ⇒ 参数 JSON 直接坏在解析阶段（MALFORMED_RESPONSE），工具一次没跑。
+      // 🔴🔴 对象那一支的形状是**试出来的，不是想出来的**（D326），四种写法只有一种能用：
+      //    ① `{ type:'object', additionalProperties:true }` ⇒ 任何对象都命中 ⇒ 非数字分量也放行
+      //    ② `{ enum:[{}] }`（想表达"任意对象"）            ⇒ **恒不命中**（枚举匹配只认标量）⇒ 对象形态整体被拒
+      //    ③ `{ …properties, required:['x','y'] }`（分支级必填）⇒ **最低档宿主编译失败**
+      //       （`oneOf` 的子分支不允许 `required`，报 "is not supported by the value schema DSL"）
+      //       ⚠️ 这一条最险：`defineTool` 在**创建时**就编译 ⇒ 抛错 = **整个 browser_slot 在真机上不存在**，
+      //       而单测只要不构造工具就照样全绿。⇒ 本文件必须有一条"工具能构造出来"的用例兜底（见 S1）。
+      //    ④ ✅ 采纳：`type:'object' + properties{x,y 各带 required:true} + additionalProperties:false`
+      //       ⇒ 三种形态**各自恰好命中一支**；非数字分量 / 缺分量 / 多余键**照旧被拒**。
+      //    ⇒ 判据：**收得宽 ≠ 判得松**。放宽的是「形态」，收紧的是「分量」——两层分工写清：
+      //      schema 管**形状**，`parseXY` 管**内容**（分量个数、有限数、非负）。谁都不越界。
+      xy: {
+        oneOf: [
+          { type: 'string', description: '"x,y" (comma or space separated)' },
+          { type: 'array', items: { type: 'number' }, description: '[x, y]' },
+          {
+            type: 'object',
+            properties: { x: { type: 'number', required: true, description: 'viewport x' }, y: { type: 'number', required: true, description: 'viewport y' } },
+            additionalProperties: false,
+            description: '{x, y}',
+          },
+        ],
+        description: 'click / scroll: viewport coordinates as "x,y" | [x,y] | {x,y}. ⛔ Not a slot or element id — pass `ref` for provenance',
+      },
       script: { type: 'string', description: 'reload: a script to run after the reload completes' },
       ref: { type: 'string', description: 'fill / scroll / upload: the element ref from \`ax\` (e.g. e12345 = an AX backendDOMNodeId). ⛔ NOT a CSS selector — refs are identities and re-snapshot when stale' },
       value: { type: 'string', description: 'fill: the value to set (empty string allowed). Drives the native value setter + input/change so controlled components (React/Vue) see it. Receipt reports the READ-BACK value, not "success"' },
@@ -522,7 +541,20 @@ export function createBrowserSlotTool(ctx: Context) {
       to: { type: 'string', description: 'scroll: "top" | "bottom" (whole-page jump). Otherwise give ref or xy plus optional delta' },
       delta: { type: 'number', description: 'scroll: wheel deltaY in px (default 600; negative scrolls up)' },
       for: { type: 'string', description: 'wait: REQUIRED PREFIX — selector:<css> | text:<substring> | url:<substring> | gone:<css> | js:<expr>. A bare value is refused because "which form" would be a guess' },
-      from: { type: 'string', description: 'drag: "x,y" start point in viewport coords' },
+      from: {
+        // 三支互斥的理由同 `xy`（四种写法的实测结论见上面那段；⛔ 别把 required 提到分支级）
+        oneOf: [
+          { type: 'string', description: '"x,y"' },
+          { type: 'array', items: { type: 'number' }, description: '[x, y]' },
+          {
+            type: 'object',
+            properties: { x: { type: 'number', required: true }, y: { type: 'number', required: true } },
+            additionalProperties: false,
+            description: '{x, y}',
+          },
+        ],
+        description: 'drag: start point in viewport coords (three forms, same as xy)',
+      },
       steps: { type: 'number', description: 'drag: number of intermediate mouseMoved steps (default 12; sortablejs needs a real move sequence)' },
       file: { type: 'array', items: { type: 'string' }, description: 'upload: repeatable path INSIDE the CCC root. Paths outside are refused, as are missing files (DOM.setFileInputFiles silently succeeds on them)' },
       accept: { type: 'boolean', description: 'dialog: accept (OK) instead of the default dismiss (Cancel). Default is dismiss because "OK" often means delete/pay/publish' },
