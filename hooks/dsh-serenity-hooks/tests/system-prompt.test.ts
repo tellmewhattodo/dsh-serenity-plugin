@@ -99,7 +99,7 @@ describe('system-prompt: 结构注入（需求③：ACC身份→Metaphor→Princ
     // "Serenity Tools" 标题——那里列的是 **ACC 内置工具**，而 MSM 是 CCC 注册的**另一层**
     // （两者不是一回事）；指错对象 = 对 LLM 的干扰。改指 msm() 无参目录。
     expect(block).not.toContain('(see the "Serenity Tools" heading below)')
-    expect(block).toContain('call msm() with no arguments to list them')
+    expect(block).toContain('msm() lists them')
   })
 
   it('toolsBlock：只剩 MSM 调用示例，⛔ 不含工具清单（v1.124.0：清单是第二真相源，已删）', () => {
@@ -124,33 +124,34 @@ describe('system-prompt: 结构注入（需求③：ACC身份→Metaphor→Princ
 
   it('CCE 块：5 行为约束 + H_op（逐字对齐 osp）', () => {
     const block = cceBlock()
-    expect(block).toContain('FIVE BEHAVIORAL CONSTRAINTS')
+    expect(block).toContain('Cognitive Continuity Engineering')
     expect(block).toContain('1. Continuity')
     expect(block).toContain('2. Bounded Space')
-    expect(block).toContain('3. Entropy is Intrinsic')
-    expect(block).toContain('4. Reconstruction > Preservation')
-    expect(block).toContain('5. Multi-Agent Cognition')
-    expect(block).toContain('OPERATIONAL ENTROPY')
+    expect(block).toContain('3. Entropy')
+    expect(block).toContain('4. Reconstruction')
+    expect(block).toContain('5. Multi-Agent')
+    expect(block).toContain('H_op <= H_critical')
     expect(block).toContain('H_op')
-    expect(block).toContain('ΔH_org ≥ ΔH_in')
+    expect(block).toContain('Organization must at least match')
   })
 
   it('Principles 块（v1.19.8 合并 Constraints）：本体论 + MSM 原则 + Root/文件/shell/subagent/session-first', () => {
     const block = principlesBlock(dir)
     // 认知容器本体论
-    expect(block).toContain('Why a cognitive container')
+    expect(block).toContain('All work is cognition')
     expect(block).toContain('contains no errors')
     // MSM 原则（v1.19.9）
-    expect(block).toContain('MSM principles')
-    expect(block).toContain('Determinism first')
-    expect(block).toContain('Single source of truth')
-    expect(block).toContain('Registered to act')
+    expect(block).toContain('Machinery before improvisation')
+    expect(block).toContain('registered Mech before hand-rolling')
+    expect(block).toContain('only decoder of its own usage')
+    expect(block).toContain('no tool exists unless it is on the manifest')
     // 操作边界（原 Constraints 内容）
     expect(block).toContain(`Root: ${dir}`)
     expect(block).toContain('File access')
-    expect(block).toContain('Shell')
-    expect(block).toContain('Subagent')
+    expect(block).toContain('Shell — use msm by default')
+    expect(block).toContain('Subagent — copies ALL parent constraints')
     expect(block).toContain('Session-first')
+    expect(block).toContain('wait for user "use" or "使用" to confirm')
   })
 })
 
@@ -487,8 +488,8 @@ describe('v1.23.1 persona 彩蛋（装配替换，SERENITY_HOOKS_CONFIG 注入�
     const text = serenitySystemPrompt(dir)
     expect(text).toContain('=== Serenity EAP ===')
     expect(text).toContain('E↑ Explicit')
-    expect(text).toContain('MSM principles')
-    expect(text).toContain('Determinism first')
+    expect(text).toContain('Machinery before improvisation')
+    expect(text).toContain('registered Mech')
     expect(text).not.toContain('=== Serenity Persona ===')
   })
 
@@ -506,11 +507,11 @@ describe('v1.23.1 persona 彩蛋（装配替换，SERENITY_HOOKS_CONFIG 注入�
     // 表达层紧跟在质量层之后（先立标准，再谈表达）
     expect(text.indexOf('=== Serenity EAP ===')).toBeLessThan(text.indexOf('=== Serenity Persona ==='))
     // MSM 原则段剥离（指令遵循约束被 persona 承接）——这一条**不变**
-    expect(text).not.toContain('MSM principles')
-    expect(text).not.toContain('Determinism first')
+    expect(text).not.toContain('Machinery before improvisation')
+    expect(text).not.toContain('registered Mech before hand-rolling')
     // 安全硬约束永远保留：本体论 / 关系段 / 操作边界 / CCE
-    expect(text).toContain('Why a cognitive container')
-    expect(text).toContain('The session–cognitive-trajectory relation')
+    expect(text).toContain('All work is cognition')
+    expect(text).toContain('rebuildable carrier of a cognitive trajectory')
     expect(text).toContain('Operational boundaries:')
     expect(text).toContain('File access')
     expect(text).toContain('=== Serenity CCE ===')
@@ -522,9 +523,9 @@ describe('v1.23.1 persona 彩蛋（装配替换，SERENITY_HOOKS_CONFIG 注入�
     const { principlesBlock } = await import('../src/seams/system-prompt.js')
     const full = principlesBlock(dir, false)
     const omitted = principlesBlock(dir, true)
-    expect(full).toContain('MSM principles')
-    expect(omitted).not.toContain('MSM principles')
-    expect(omitted).toContain('Why a cognitive container')
+    expect(full).toContain('Machinery before improvisation')
+    expect(omitted).not.toContain('Machinery before improvisation')
+    expect(omitted).toContain('All work is cognition')
     expect(omitted).toContain('Operational boundaries:')
     expect(omitted).toContain('Session-first')
   })
