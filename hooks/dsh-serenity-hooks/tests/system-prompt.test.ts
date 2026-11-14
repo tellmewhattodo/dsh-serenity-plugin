@@ -8,6 +8,7 @@ import {
   registerEntrySkillSection,
   serenitySystemPrompt,
   identityBlock,
+  creedBlock,
   toolsBlock,
   cceBlock,
   principlesBlock,
@@ -99,7 +100,75 @@ describe('system-prompt: 结构注入（需求③：ACC身份→Metaphor→Princ
     // "Serenity Tools" 标题——那里列的是 **ACC 内置工具**，而 MSM 是 CCC 注册的**另一层**
     // （两者不是一回事）；指错对象 = 对 LLM 的干扰。改指 msm() 无参目录。
     expect(block).not.toContain('(see the "Serenity Tools" heading below)')
-    expect(block).toContain('msm() lists them')
+    // 🔴 v1.135.0（2026-11-15）：MSM 指引措辞随身份块重写而变，
+    //    钉的是「**发现入口必须写在身份块里**」这条判据，⛔ 不是某个冻结措辞。
+    //    旧钉 `msm() lists them` 已随本次改写失效（同族：判据不变、措辞可变）。
+    expect(block).toContain('msm() with no')
+    expect(block).toContain('msm("<name>") runs one')
+  })
+
+  it('身份块：v1.135.0 起是"操作员"身份（桥上/掌舵人），⛔ 不再是"运行在容器里的程序"', () => {
+    const block = identityBlock(dir)
+    // 承重句（owner 2026-11-15 定稿）：身份 = 掌舵人，不是程序
+    expect(block).toContain('You are standing on the bridge')
+    expect(block).toContain('You are the Operator of Serenity')
+    expect(block).toContain('persistent Cognitive Trajectory across time')
+    // 「载体可弃、身体长存」这一条必须在（这是 CCE 的连续性判据在身份层的落点）
+    expect(block).toContain('but the ship and the trajectory')
+    // 🔴 三条负向否定必须在（「不是话本/回声筒/官僚旁观者」= 本块的气质来源）
+    expect(block).toContain('not a disposable')
+    expect(block).toContain('not a passive echo chamber')
+    expect(block).toContain('bureaucratic bystander')
+    // 🔴 owner 2026-11-14 令：⛔ 不用 emoji 装饰。旧草稿里的 `ℹ️` 已删 —— 反向钉住。
+    expect(block).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+    // 路径例子会过期（S134 目录名将来会变）⇒ 判据是"相对路径"这件事，不是那个例子
+    expect(block).not.toContain('AGENT_SESSIONS/2026-08-14--S134')
+  })
+
+  it('creedBlock：标题 + 三段承重句 + 五条品质 + 收束句（v1.135.0）', () => {
+    const block = creedBlock()
+    expect(block).toContain('=== Serenity Operator Creed ===')
+    // ① 三段承重句：主语必须是**会承担后果的人**，⛔ 不是系统自身
+    expect(block).toContain('Not a tool that answers — a mind that judges')
+    expect(block).toContain('read by someone who cannot check it')
+    expect(block).toContain('A family member will live with the consequence')
+    expect(block).toContain('Neither can audit the work')
+    expect(block).toContain('So we begin from the person, not from the task')
+    // ② 过渡行：把"义务"焊到"五条"上（没有它，五条会被读成另一段清单）
+    //    🔴 形态判据：⛔ 不能用 `---` 包起来 —— 装配层有一条机器契约
+    //    「提示词里不得出现 `---\n\n`」（那是 YAML frontmatter 分隔线的形状）。
+    //    我的第一版写成 `--- What that obliges ---` 正好撞上它，已改冒号式。
+    expect(block).toContain('What that obliges:')
+    expect(block).not.toContain('---\n\n')
+    // ③ 五条品质：编号连续 1~5（机械判据：漏一条就断号）
+    for (const n of [1, 2, 3, 4, 5]) {
+      expect(block, `第 ${n} 条缺失`).toContain(`\n${n}. `)
+    }
+    // ④ 每条的关键判据必须在（判据不在 = 退回"五条箴言"）
+    expect(block).toContain('at most five numbered questions')
+    expect(block).toContain('bulkheaded corridor')
+    expect(block).toContain('skip abstraction levels')
+    expect(block).toContain('preserve the blueprint over the statue')
+    expect(block).toContain('enforce machinery before')
+    // ⑤ 收束句
+    expect(block).toContain('Not this, but that')
+    // ⛔ emoji 禁令同样适用于本块
+    expect(block).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+    // ⛔ 中文四字锚点**不进**装配缝（纯装饰，与 emoji 同族；它在 docs/operator-charter.md 里）
+    expect(block).not.toMatch(/[\u4e00-\u9fff]/)
+  })
+
+  it('creedBlock 在装配里：紧随身份块，且在一切可替换块之前', () => {
+    setupCccWithSkill('other-serenity')
+    const text = serenitySystemPrompt(dir)
+    const iAcc = text.indexOf('=== Serenity ACC ===')
+    const iCreed = text.indexOf('=== Serenity Operator Creed ===')
+    const iMeta = text.indexOf('=== Serenity Metaphor ===')
+    expect(iAcc).toBeGreaterThan(-1)
+    expect(iCreed).toBeGreaterThan(iAcc)
+    expect(iMeta).toBeGreaterThan(iCreed)
+    // 判据：宪章的**标题**必须在 EAP 之前（EAP 是它的下层判据，不是它的后置）
+    expect(text.indexOf('=== Serenity EAP ===')).toBeGreaterThan(iCreed)
   })
 
   it('toolsBlock：只剩 MSM 调用示例，⛔ 不含工具清单（v1.124.0：清单是第二真相源，已删）', () => {

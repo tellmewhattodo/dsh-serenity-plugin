@@ -275,7 +275,10 @@ describe('osp 对齐：身份块 + MSM 块结构（v1.124.0：工具清单已删
     expect(block).toContain(`ACC: dsh-serenity-hooks v${ACC_VERSION}`)
     expect(block).toContain(`CCC: ${dir.split('/').pop()}`)
     expect(block).not.toContain(`Root: ${dir}`) // v1.19.6：Root 唯一真相源 = Constraints 块
-    expect(block).toContain('You are running inside a Concrete Cognitive Container (CCC)')
+    // 🔴 v1.135.0（owner 2026-11-15 定稿）：身份句从「运行在容器里的程序」
+    //    改为「站在桥上、掌舵一条持久认知轨迹的操作员」。**判据不变**（身份行必须在），
+    //    ⛔ 只跟措辞走 —— 旧钉 `You are running inside a Concrete Cognitive Container` 已失效。
+    expect(block).toContain('You are standing on the bridge of a Concrete Cognitive Container (CCC)')
     // 身份块不再内嵌工具清单（需求③移出 toolsBlock）
     expect(block).not.toContain('container_fs     —')
     expect(block).not.toContain('cheap-worker  —')
@@ -286,9 +289,9 @@ describe('osp 对齐：身份块 + MSM 块结构（v1.124.0：工具清单已删
     // 2026-09-16（S142 §0e-C，所有者裁「同意修正」）：MSM 指引改指 msm() 无参目录。
     // 旧文 `call msm("<name>") to execute or discover them (see the "Serenity Tools" heading below)`
     // 把 **MSM**（CCC 注册的另一层）指到 **ACC 内置工具清单**标题下 ⇒ 指错对象，属干扰。
-    // 🔴 v1.134.0（owner 令精简）：该指引句压成一行 —— 判据跟着**新措辞**走，
-    //    ⛔ 不是删掉判据（"MSM 发现入口必须写在身份块里"这件事仍然成立）。
-    expect(block).toContain('msm() lists them')
+    // 🔴 v1.135.0（2026-11-15）：措辞再变（`msm() with no arguments lists them`）——
+    //    **判据不变**：MSM 发现入口必须写在身份块里。⛔ 判措辞字面 = 每改一次文案就红一次。
+    expect(block).toContain('msm() with no')
     expect(block).toContain('msm("<name>") runs one')
     expect(block).not.toContain('(see the "Serenity Tools" heading below)')
   })
