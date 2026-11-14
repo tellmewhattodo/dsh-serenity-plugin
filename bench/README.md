@@ -41,7 +41,7 @@ DSH 每发一个新的 rc，我们都要把插件适配过去。但**在本机�
 **mode B 的标准流程**（七步，全走 MSM，不手敲 ssh）：
 
 ```
-msm("dsh-develop", ["build"])                          # 1. 产出本地 lib/（mode B 验的就是它）
+msm("dsp-develop", ["build"])                          # 1. 产出本地 lib/（mode B 验的就是它）
 msm("bench-docker", ["up", "--run=mb1", "--plugin-tarball",
                      "--dsh-version=0.1.7-rc.2"])      # 2. 打包 → 推 → 起容器（后台，立即返回）
                                                        #    🔴 up 还会推 profile patch ＋ 运行期注入 key

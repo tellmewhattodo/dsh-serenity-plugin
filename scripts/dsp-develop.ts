@@ -1,21 +1,21 @@
 #!/usr/bin/env bun
 /**
- * dsh-develop.ts — dsh-serenity-plugin 开发操作 MSM（Mech，纯确定性）
+ * dsp-develop.ts — dsh-serenity-plugin 开发操作 MSM（Mech，纯确定性）
  *
  * safe-mode 下 bash 被禁，但构建/测试/git/部署仍需执行。
  * 本 MSM 是注册的机械工具（acc_msm exec 走 bun 直跑），封装常用开发操作的白名单通道。
  *
  * 子命令:
- *   dsh-develop typecheck             tsc --noEmit（hooks 目录）
- *   dsh-develop typecheck-cli         🔴 已退役（恒 exit 2）：对象 = 仓库根包 src/，2026-09-28 随安装器族删除
- *   dsh-develop test [--filter <p>]   vitest run（hooks 目录）
- *   dsh-develop build                 tsc + tsdown 双 bundle（产物 lib/）
- *   dsh-develop status                插件仓库 git status + 版本
- *   dsh-develop commit <message>      git add -A + commit（插件仓库）
- *   dsh-develop push                  git push origin（GitHub 公开仓库，SSH-over-443）
- *   dsh-develop deploy                load-plugin.sh 全流程（构建+双锚+shim+profile+预检）
- *   dsh-develop version               package.json / dsh.plugin.json / CHANGELOG 版本
- *   dsh-develop bump <version>        同步 package.json + dsh.plugin.json 版本
+ *   dsp-develop typecheck             tsc --noEmit（hooks 目录）
+ *   dsp-develop typecheck-cli         🔴 已退役（恒 exit 2）：对象 = 仓库根包 src/，2026-09-28 随安装器族删除
+ *   dsp-develop test [--filter <p>]   vitest run（hooks 目录）
+ *   dsp-develop build                 tsc + tsdown 双 bundle（产物 lib/）
+ *   dsp-develop status                插件仓库 git status + 版本
+ *   dsp-develop commit <message>      git add -A + commit（插件仓库）
+ *   dsp-develop push                  git push origin（GitHub 公开仓库，SSH-over-443）
+ *   dsp-develop deploy                load-plugin.sh 全流程（构建+双锚+shim+profile+预检）
+ *   dsp-develop version               package.json / dsh.plugin.json / CHANGELOG 版本
+ *   dsp-develop bump <version>        同步 package.json + dsh.plugin.json 版本
  *
  * 退出码: 0 成功 / 1 用户错误 / 2 系统错误
  *
@@ -27,6 +27,10 @@ import { resolve, dirname, join, basename, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync, execFileSync, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import {
+  jobsDir, readJob, writeJob, listJobs, pruneJobs, makeJobId, localIso,
+  spawnRunner, formatJob, decidePoll, type JobRecord, type JobReading,
+} from './jobs.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const SCRIPTS_DIR = dirname(__filename)
@@ -34,6 +38,25 @@ const REPO_ROOT = resolve(SCRIPTS_DIR, '..')
 const HOOKS_DIR = join(REPO_ROOT, 'hooks', 'dsh-serenity-hooks')
 
 const HOME_DIR = process.env.HOME ?? ''
+
+// ── 阻塞上界（2026-11-15 owner 令「消灭所有阻塞点」）──
+//
+// 🔴 每一条都是**同步耗时上界**：调用方最多等这么久就拿到回执，剩下的交给后台 job。
+//    ⛔ 不许再把这类常量写成"循环多少次 × sleep 多少秒" —— 那种写法让上界藏在循环里，
+//    读代码的人算不出总时间，而这正是 B1（`for(;;)`）能存活三个月的原因。
+
+/** 单条 registry 探测 curl 的上界（秒）。三条 curl 串行 ⇒ `verifyPublished` 同步面 ≤ 3×此值。 */
+const LANDING_CURL_TIMEOUT_S = '8'
+/** 后台续验 job 的总观察预算：实测传播 16~25 分钟，留到 30 分钟。 */
+const LANDING_JOB_BUDGET_MS = 30 * 60_000
+/** 后台续验的轮询间隔（job 内部 `sleep`，不阻塞任何人）。 */
+const LANDING_JOB_INTERVAL_MS = 60_000
+/**
+ * `restart-web` 健康探测的**总上界**（原实现是无条件 `sleep 18`，快慢都不合身）。
+ * ⚠️ 实测宿主机从 kill 到 /serenity/status 可用约 6~10 s ⇒ 15 s 留足余量，
+ * 且**小于**原来固定的 18 s ⇒ 重构后不但更快，还不会因机器慢而误报失败。
+ */
+const RESTART_PROBE_BUDGET_MS = 15_000
 
 const GIT_SSH = process.env.GIT_SSH_COMMAND
   ?? `ssh -F /dev/null -i ${process.env.SERENITY_GITLAB_KEY ?? join(HOME_DIR, '.ssh', 'id_ed25519_gitlab')} -o IdentitiesOnly=yes`
@@ -44,8 +67,8 @@ const GIT_SSH_GITHUB = process.env.GIT_SSH_COMMAND_GITHUB
 /**
  * `pnpm` 的可执行路径 —— **解析成绝对路径，不用裸名**（2026-11-09 实测）。
  *
- * 🔴 **症状与成因**：`dsh-develop publish` 报「锁文件与 package.json 不一致 → 先跑 lockfile」，
- * 而紧接着 `dsh-develop lockfile` 又只印一行 `pnpm install --lockfile-only` 就失败。
+ * 🔴 **症状与成因**：`dsp-develop publish` 报「锁文件与 package.json 不一致 → 先跑 lockfile」，
+ * 而紧接着 `dsp-develop lockfile` 又只印一行 `pnpm install --lockfile-only` 就失败。
  * 真相是 **`spawnSync('pnpm')` 拿到 `ENOENT`** —— 宿主进程的 `PATH` 里**没有 pnpm**
  * （本机 pnpm 装在 `~/.local/bin/bin/pnpm`，而 `PATH` 只含 `~/.local/bin` 本级）。
  * ⇒ **不是锁文件的问题，是解释器找不到**（D252 同族：读数器坏了 ≠ 被测对象坏了）。
@@ -177,7 +200,7 @@ function currentVersion(): { pkg: string; plugin: string; changelog: string | nu
 }
 
 function fail(msg: string, code = 1): never {
-  console.error(`[dsh-develop] ${msg}`)
+  console.error(`[dsp-develop] ${msg}`)
   process.exit(code)
 }
 
@@ -197,7 +220,7 @@ function cmdTypecheck(): void {
     console.error(clientR.stdout + clientR.stderr)
     fail(`client typecheck 失败 (exit ${clientR.status})`, 2)
   }
-  console.log(`[dsh-develop] ✓ typecheck 通过（node + client）`)
+  console.log(`[dsp-develop] ✓ typecheck 通过（node + client）`)
 }
 
 /**
@@ -211,13 +234,13 @@ function cmdTypecheck(): void {
  * 🆕 为什么**删而不留**（R↓）：它当年存在的理由是「根包 `src/` 不在任何门禁范围内」（2026-09-21 补），
  * 而**`src/` 本身没了** ⇒ 门禁跟着没有对象。留一个 stub 只会在门禁清单里制造
  * 「看起来还有这一关」的假象（同族：判据 43「退役必须留『旧形态不再出现』的钉」——
- * 钉在 `scripts/dsh-develop.test.ts`，本函数只负责给人一句路牌）。
+ * 钉在 `scripts/dsp-develop.test.ts`，本函数只负责给人一句路牌）。
  *
  * 判据 43 的两条钉：① **旧形态不再出现** = 本命令恒 exit 2（不再是"跑一下看看"的绿门）
  * ② **旧配置静默忽略的正向钉** = 仓库根 `tsconfig.json` 已删，`typecheck`（hooks 双面）**照常全绿**。
  */
 function cmdTypecheckCli(): void {
-  console.log('[dsh-develop typecheck-cli] 🔴 本命令已退役（对象已不存在）\n'
+  console.log('[dsp-develop typecheck-cli] 🔴 本命令已退役（对象已不存在）\n'
     + '  · 对象 = 仓库根包 `@shgroup/dsh-serenity-plugin`（安装器 CLI ／ init 向导 ／ 技能模板）'
     + ' ＋ 根 tsconfig（include: src）\n'
     + '  · 该族与其 9 个测试已于 2026-09-28 整体删除（S142 ③ 周边整合；owner 令「连模板和安装命令一起删」）\n'
@@ -230,7 +253,7 @@ function cmdTypecheckCli(): void {
  * cmdTypecheckScripts — `scripts/` 下**开发工具**的类型检查（**A26-c 的探针／门禁**）。
  *
  * 为什么存在（R↓，2026-09-28 实测缺口）：`scripts/` 由 **bun 直接跑**（只转译、**不检查**），
- * 且它**不在任何 tsconfig 的 `include` 里** ⇒ `dsh-develop.ts`（123 KB）的改动
+ * 且它**不在任何 tsconfig 的 `include` 里** ⇒ `dsp-develop.ts`（123 KB）的改动
  * **没有任何机械判据**（`typecheck` 只管 `hooks/` 双面；`typecheck-cli` 随安装器族退役 ⇒ 恒 exit 2）。
  *
  * 两条设计约束：
@@ -240,7 +263,7 @@ function cmdTypecheckCli(): void {
  *     **量出存量**，不是假装一直绿。若存量太大 ⇒ 那是**要给 owner 看的数**（A26-c 的判据），
  *     而不是把它悄悄降级成宽松档。
  *
- * 用法: `dsh-develop typecheck-scripts [--no-strict]`
+ * 用法: `dsp-develop typecheck-scripts [--no-strict]`
  */
 function cmdTypecheckScripts(strict: boolean): void {
   const tscBin = join(REPO_ROOT, 'node_modules', '.bin', 'tsc')
@@ -269,7 +292,7 @@ function cmdTypecheckScripts(strict: boolean): void {
     fail(`typecheck-scripts 失败（exit ${r.status}；${errs} 条 error TS；strict=${strict}）——`
       + `未见"全绿"不等于"没坏"，见上方逐条`, 2)
   }
-  console.log(`[dsh-develop] ✓ typecheck-scripts 通过（${files.length} 个 .ts；strict=${strict}）`)
+  console.log(`[dsp-develop] ✓ typecheck-scripts 通过（${files.length} 个 .ts；strict=${strict}）`)
 }
 
 function cmdTest(filter?: string): void {
@@ -286,7 +309,7 @@ function cmdTest(filter?: string): void {
   }
   // 汇总行
   const m = r.stdout.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/)
-  console.log(m ? `[dsh-develop] ✓ 测试通过 (${m[1]} files / ${m[2]} tests)` : '[dsh-develop] ✓ 测试通过')
+  console.log(m ? `[dsp-develop] ✓ 测试通过 (${m[1]} files / ${m[2]} tests)` : '[dsp-develop] ✓ 测试通过')
 }
 
 /** coverage：vitest --coverage（v1.28.0 可测试可验证——coverage 阈值门禁见 hooks vitest.config.ts）。
@@ -331,7 +354,7 @@ function cmdCoverage(): void {
       if (!inFailBlock) continue
       // 块内继续过滤：拖尾的插件告警不属于失败证据
       if (/^\s*\[serenity-hooks\]/.test(line)) continue
-      if (/^\s*\[dsh-develop\]/.test(line)) continue
+      if (/^\s*\[dsp-develop\]/.test(line)) continue
       kept.push(line)
     }
     const MAX = 120
@@ -343,11 +366,11 @@ function cmdCoverage(): void {
 
   // 全绿时只留两行：用例汇总 + 覆盖率门禁结论
   const m = r.stdout.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/)
-  console.log(m ? `[dsh-develop] ✓ 测试通过 (${m[1]} files / ${m[2]} tests)` : '[dsh-develop] ✓ 测试通过')
+  console.log(m ? `[dsp-develop] ✓ 测试通过 (${m[1]} files / ${m[2]} tests)` : '[dsp-develop] ✓ 测试通过')
   // 覆盖率总表（vitest 的 "All files" 行）——有就印，没有不编
   const allRow = r.stdout.split('\n').find((l) => /^All files\s*\|/.test(l.trim()) || /^\s*All files\s/.test(l))
-  if (allRow) console.log(`[dsh-develop]   ${allRow.trim()}`)
-  console.log('[dsh-develop] ✓ coverage 门禁通过（报告：hooks/dsh-serenity-hooks/coverage/）')
+  if (allRow) console.log(`[dsp-develop]   ${allRow.trim()}`)
+  console.log('[dsp-develop] ✓ coverage 门禁通过（报告：hooks/dsh-serenity-hooks/coverage/）')
 }
 
 function cmdBuild(): void {
@@ -381,7 +404,7 @@ function cmdBuild(): void {
     return existsSync(p) ? `${statSync(p).size} B` : 'N/A'
   }
   console.log(
-    `[dsh-develop] ✓ 构建完成（node: lib/index.js ${sizeText('index.js')}｜client: lib/client.js ${sizeText('client.js')}）`,
+    `[dsp-develop] ✓ 构建完成（node: lib/index.js ${sizeText('index.js')}｜client: lib/client.js ${sizeText('client.js')}）`,
   )
 
   // 🔴 2026-10-16（S142 续 147）：**必须补第二半** —— `tsc --emitDeclarationOnly`。
@@ -417,7 +440,7 @@ function cmdBuild(): void {
     fail('构建后 lib/ 仍无 .d.ts —— 类型产物未落地，中止', 2)
   }
   const jsCount = readdirSync(join(HOOKS_DIR, 'lib')).filter((f) => f.endsWith('.js')).length
-  console.log(`[dsh-develop] ✓ 类型声明已产出（lib/**/*.d.ts ${dtsCount} 个；顶层 js ${jsCount} 个）`)
+  console.log(`[dsp-develop] ✓ 类型声明已产出（lib/**/*.d.ts ${dtsCount} 个；顶层 js ${jsCount} 个）`)
 }
 
 function readlinkSafe(p: string): string {
@@ -430,29 +453,29 @@ function readlinkSafe(p: string): string {
 
 function cmdStatus(): void {
   const v = currentVersion()
-  console.log(`[dsh-develop] 版本: package.json=${v.pkg} | dsh.plugin.json=${v.plugin} | CHANGELOG=${v.changelog ?? '(无)'}`)
+  console.log(`[dsp-develop] 版本: package.json=${v.pkg} | dsh.plugin.json=${v.plugin} | CHANGELOG=${v.changelog ?? '(无)'}`)
   const r = run('git', ['status', '--short'], { cwd: REPO_ROOT, quiet: true })
   if (r.status !== 0) {
-    console.log('[dsh-develop] 仓库非 git 或 status 失败')
+    console.log('[dsp-develop] 仓库非 git 或 status 失败')
     return
   }
   const lines = r.stdout.trim().split('\n').filter(Boolean)
-  console.log(lines.length ? `[dsh-develop] git status (${lines.length} 变更):` : '[dsh-develop] git status: clean')
+  console.log(lines.length ? `[dsp-develop] git status (${lines.length} 变更):` : '[dsp-develop] git status: clean')
   for (const l of lines.slice(0, 40)) console.log('  ' + l)
   if (lines.length > 40) console.log(`  … 还有 ${lines.length - 40} 条`)
 }
 
 function cmdCommit(message?: string): void {
-  if (!message) fail('commit 需要消息: dsh-develop commit <message>')
+  if (!message) fail('commit 需要消息: dsp-develop commit <message>')
   const add = run('git', ['add', '-A'], { cwd: REPO_ROOT, quiet: true })
   if (add.status !== 0) fail(`git add 失败: ${add.stderr}`, 2)
   const c = run('git', ['commit', '-m', message], { cwd: REPO_ROOT, quiet: true })
   if (c.status !== 0) {
-    console.log('[dsh-develop] 无可提交内容或提交失败')
+    console.log('[dsp-develop] 无可提交内容或提交失败')
     console.log(c.stderr.trim())
     process.exit(c.status)
   }
-  console.log(`[dsh-develop] ✓ committed: ${message}`)
+  console.log(`[dsp-develop] ✓ committed: ${message}`)
 }
 
 function cmdPush(): void {
@@ -475,11 +498,11 @@ function ensureRemote(target: string, url: string, cwd = REPO_ROOT): void {
   if (existing.status !== 0) {
     const add = run('git', ['remote', 'add', target, url], { cwd, quiet: true })
     if (add.status !== 0) fail(`remote add ${target} 失败: ${add.stderr}`, 2)
-    console.log(`[dsh-develop] remote ${target} -> ${url}`)
+    console.log(`[dsp-develop] remote ${target} -> ${url}`)
   } else if (existing.stdout.trim() !== url) {
     const set = run('git', ['remote', 'set-url', target, url], { cwd, quiet: true })
     if (set.status !== 0) fail(`remote set-url ${target} 失败: ${set.stderr}`, 2)
-    console.log(`[dsh-develop] remote ${target} 更新为 ${url}`)
+    console.log(`[dsp-develop] remote ${target} 更新为 ${url}`)
   }
 }
 
@@ -499,13 +522,13 @@ function cmdGithubPush(remote?: string, force = false): void {
     if (r.status !== 0) {
       if (target === OMD_SH_REMOTE) {
         // 组织镜像失败不阻断主发布（网络/权限问题可后续补推）；保留日志便于排查
-        console.warn(`[dsh-develop] ⚠️ omdsh 组织镜像推送失败（不影响主仓，可后续 github-push omdsh 补推）: ${(r.stderr || r.stdout).slice(0, 300)}`)
+        console.warn(`[dsp-develop] ⚠️ omdsh 组织镜像推送失败（不影响主仓，可后续 github-push omdsh 补推）: ${(r.stderr || r.stdout).slice(0, 300)}`)
         continue
       }
       console.error(r.stdout + r.stderr)
       fail(`git push ${target} 失败 (exit ${r.status})`, 2)
     }
-    console.log(`[dsh-develop] ✓ pushed to ${target}${force ? '（force）' : ''}`)
+    console.log(`[dsp-develop] ✓ pushed to ${target}${force ? '（force）' : ''}`)
   }
 }
 
@@ -524,8 +547,8 @@ function cmdSquashHistory(message?: string): void {
   run('git', ['branch', '-D', 'master'], { cwd: REPO_ROOT, quiet: true })
   const rename = run('git', ['branch', '-m', 'master'], { cwd: REPO_ROOT, quiet: true })
   if (rename.status !== 0) fail(`分支改名失败: ${rename.stderr}`, 2)
-  console.log(`[dsh-develop] ✓ 历史已抹除（单初始 commit: ${msg}）`)
-  console.log(`[dsh-develop]   推送公开仓库需 force（如: dsh-develop github-push --force）`)
+  console.log(`[dsp-develop] ✓ 历史已抹除（单初始 commit: ${msg}）`)
+  console.log(`[dsp-develop]   推送公开仓库需 force（如: dsp-develop github-push --force）`)
 }
 
 /**
@@ -548,11 +571,11 @@ function syncPackageReadme(): void {
     .replace(/\]\((?!https?:\/\/|mailto:|#)([^)]+)\)/g, (_m, rel: string) => `](${REPO_BLOB_URL}/${rel})`)
   const before = existsSync(dst) ? readFileSync(dst, 'utf-8') : ''
   if (before === out) {
-    console.log('[dsh-develop] ✓ 包内 README 与仓库 README 一致（无变更）')
+    console.log('[dsp-develop] ✓ 包内 README 与仓库 README 一致（无变更）')
     return
   }
   writeFileSync(dst, out, 'utf-8')
-  console.log(`[dsh-develop] ✓ 包内 README 已同步（README.md → hooks/dsh-serenity-hooks/README.md，${out.length} 字节）`)
+  console.log(`[dsp-develop] ✓ 包内 README 已同步（README.md → hooks/dsh-serenity-hooks/README.md，${out.length} 字节）`)
 }
 
 function cmdPublish(): void {
@@ -587,7 +610,63 @@ function cmdPublish(): void {
     fail(`npm publish 失败 (exit ${r.status})`, 2)
   }
   verifyPublished(currentVersion().pkg, r.stdout + r.stderr)
-  console.log(`[dsh-develop] ✓ published @shgroup/dsh-serenity-hooks@${currentVersion().pkg}（npm registry）`)
+  console.log(`[dsp-develop] ✓ published @shgroup/dsh-serenity-hooks@${currentVersion().pkg}（npm registry）`)
+  // 🔴 2026-11-15 新增（owner 令「集成 GitHub 推送」）：发布链尾部补上**推远端**这一段。
+  //
+  //   **为什么原来没有是不行的**（机械证据）：`github` 远端停在 `02f3038`（= v1.129.5），
+  //   而本地 `master` 已领先 12 个提交 ⇒ `publish` 跑到这里就结束，**从不推 GitHub**；
+  //   `github-push` 是另一个独立子命令，**要靠人记得跑**。靠自觉的纪律会静默失效（本轨已反复实测）。
+  //
+  //   **顺序为什么必须在 npm publish 之后**：`gitHead` 由 npm 从**当时的 HEAD** 写进包元数据。
+  //   若先推后发，包里会记一个远端不存在的提交（或至少不是这次发布的那个）。
+  //   ⚠️ 旧纪律「提交必须排在 publish 之前」（㊱）说的是**本地提交**，与**推远端**是两件事，不冲突。
+  //
+  //   **失败语义**：推送失败**不改变 npm 已发布这个事实** ⇒ 退出码仍按 npm 成功，
+  //   但回执必须显式印"推送未完成"＋补推命令。
+  //   ⛔ 不得把 push 失败报成 publish 失败 —— 那会诱使人重跑 publish（同版本只会 409）。
+  pushAfterPublish()
+}
+
+/**
+ * pushAfterPublish — 发布尾部推送（github ＋ omdsh），**失败不阻断**。
+ *
+ * 与 `cmdGithubPush` 的分工：那个是**命令**（失败就该退出码非 0，因为用户就是来推的）；
+ * 这个是**发布链的一段**（失败只降级为警告 + 指路）。⇒ 不复用它，避免把两种语义焊在一起。
+ */
+function pushAfterPublish(): void {
+  const results: string[] = []
+  for (const target of ['github', OMD_SH_REMOTE]) {
+    if (target === OMD_SH_REMOTE) ensureRemote(OMD_SH_REMOTE, OMD_SH_URL)
+    const r = run('git', ['push', target, 'HEAD'], {
+      cwd: REPO_ROOT,
+      quiet: true,
+      env: { GIT_SSH_COMMAND: GIT_SSH_GITHUB },
+    })
+    if (r.status === 0) {
+      results.push(`${target} ✓`)
+      continue
+    }
+    // 🔴 回执空 ≠ 没推（已知形态）：`git push` 在"已经是最新"时**不打印任何 ref 行**。
+    //    ⇒ 用 ls-remote 与本地 HEAD 对读，而不是看 stdout。
+    const head = run('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, quiet: true }).stdout.trim()
+    const remote = run('git', ['ls-remote', target, 'refs/heads/master'], {
+      cwd: REPO_ROOT, quiet: true, env: { GIT_SSH_COMMAND: GIT_SSH_GITHUB },
+    }).stdout.trim()
+    if (head !== '' && remote.startsWith(head)) {
+      results.push(`${target} ✓（已在远端）`)
+    } else {
+      results.push(`${target} 🔴 未完成（${(r.stderr || '').trim().slice(0, 120) || `exit ${r.status}`}）`)
+    }
+  }
+  const failed = results.filter((s) => s.includes('未完成'))
+  if (failed.length === 0) {
+    console.log(`[dsp-develop] ✓ 已推远端：${results.join(' ／ ')}`)
+    return
+  }
+  console.log(`[dsp-develop] ⚠️ **推送未完成**：${results.join(' ／ ')}`)
+  console.log('   ⚠️ 这**不影响"npm 已发布"这个事实** —— 包已经在 registry 上、可以安装。')
+  console.log('   ⇒ 补推：`dsp-develop github-push`（该命令会响亮失败，与本链的降级语义不同）')
+  console.log('   ⛔ **不要重跑 publish**（同版本只会 409）。')
 }
 
 /**
@@ -621,9 +700,13 @@ function cmdPublish(): void {
  */
 function landingRead(version: string): { record: string; tarball: string } {
   const base = 'https://registry.npmjs.org/@shgroup%2Fdsh-serenity-hooks'
-  const r = run('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', `${base}/${version}?write=true`],
+  // 🔴🔴 2026-11-15（owner 令：消灭所有阻塞点）：两条 curl **原先没有 --max-time**。
+  //   实证的失败形态：`verifyPublished` 的 `for(;;)` 里调它 ⇒ 网络一慢就**永久挂住**
+  //   整个 MSM 调用（不是"慢"，是"不返回"，且没有任何信号）。
+  //   判据：**凡本仓发出的 curl 都必须带上界**，写进 `tests/curl-timeout.test.ts` 机械钉住。
+  const r = run('curl', ['-s', '--max-time', LANDING_CURL_TIMEOUT_S, '-o', '/dev/null', '-w', '%{http_code}', `${base}/${version}?write=true`],
     { cwd: SCRIPTS_DIR, quiet: true, env: {} })
-  const t = run('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}',
+  const t = run('curl', ['-s', '--max-time', LANDING_CURL_TIMEOUT_S, '-o', '/dev/null', '-w', '%{http_code}',
     `https://registry.npmjs.org/@shgroup/dsh-serenity-hooks/-/dsh-serenity-hooks-${version}.tgz`],
     { cwd: SCRIPTS_DIR, quiet: true, env: {} })
   return {
@@ -675,6 +758,150 @@ function npmReportedSuccess(npmOutput: string, version: string): boolean {
 }
 
 /**
+ * probeTarballReachable — **装之前先探一次**：这个版本的 tarball 此刻取不取得到。
+ *
+ * 为什么要把"探"和"装"分开（R↓，这是本轮 `npm-install` 重构的全部思想）：
+ *   原实现把两者焊在 `for(循环)` 里 ⇒ 「等」和「装」共享同一段时间，调用方**必然**陪等满。
+ *   分开之后：
+ *     · 探是**秒级、带超时、只读**的（curl `--max-time`）
+ *     · 探不过 ⇒ **当场返回**并把"再等多久"还给调用方（人/agent 决定，而不是脚本替他睡）
+ *
+ * ⚠️ **探测通过 ≠ 装得上**：负缓存按 CDN 边缘分片，我这次命中的边缘与你 pnpm 命中的可能不同。
+ *   ⇒ 探过之后 pnpm 仍可能报传播错，那条路径照旧识别为"传播"而**不判失败**（见调用处）。
+ *   这是 **D252 同族**：读数器与真实动作走不同面时，两者不一致是**信息**，不是矛盾。
+ */
+function probeTarballReachable(version: string, timeoutS: string): { reachable: boolean; detail: string } {
+  const url = `https://registry.npmjs.org/@shgroup/dsh-serenity-hooks/-/dsh-serenity-hooks-${version}.tgz`
+  // HEAD 而不是 GET：只问"在不在"，不下载整个 tarball（GET 会把几十 MB 拉下来）
+  const r = run('curl', ['-s', '-I', '--max-time', timeoutS, '-o', '/dev/null', '-w', '%{http_code}', url],
+    { cwd: SCRIPTS_DIR, quiet: true, env: {} })
+  const code = (r.stdout || '').trim()
+  if (code === '200') return { reachable: true, detail: 'tarball 200' }
+  if (code === '404') return { reachable: false, detail: 'tarball 404（尚未传播到本边缘）' }
+  if (code === '') return { reachable: false, detail: `curl 无输出（exit ${r.status}，可能是超时）` }
+  return { reachable: false, detail: `tarball HTTP ${code}` }
+}
+
+/**
+ * startLandingJob — 起一个后台进程继续盯「版本落地」。
+ *
+ * 为什么需要（R↓）：传播真实要 16~25 分钟。同步等是不可能的（见 {@link verifyPublished}），
+ * 而"让 agent 3 分钟后再来查"要求**模型记住一个时刻** —— 那是判据 `#105` 的形态
+ * （定时刻的事件靠提示词 ⇒ 恒不可达）。⇒ 必须有一个**脱离的进程**到点去看。
+ *
+ * @returns job 句柄；起不来时返回 `null`（**不判失败** —— 发布本身已经成立，
+ *   只是"复核"这一步没起来。⛔ 不得把这个降级成 publish 失败）。
+ */
+function startLandingJob(version: string): { id: string; logPath: string } | null {
+  const id = makeJobId('publish-landing')
+  const now = Date.now()
+  const rec: JobRecord = {
+    id,
+    kind: 'publish-landing',
+    what: `等 @shgroup/dsh-serenity-hooks@${version} 在三个读数上成立`,
+    startedAt: localIso(),
+    deadlineAt: localIso(new Date(now + LANDING_JOB_BUDGET_MS)),
+    state: 'running',
+    readings: [],
+    conclusion: null,
+    runnerPid: null,
+    // 🔴 参数落进记录（不只是环境变量）⇒ 手工跑 `__job-run` 也能工作，且三天后仍看得出它在等哪个版本
+    params: { version },
+  }
+  try {
+    writeJob(REPO_ROOT, rec)
+    const { logPath } = spawnRunner({
+      repoRoot: REPO_ROOT,
+      scriptPath: __filename,
+      jobId: id,
+      env: { SERENITY_JOB_TARGET: version },
+    })
+    return { id, logPath }
+  } catch (e) {
+    console.log(`[dsp-develop] ⚠️ 后台续验未能启动（${(e as Error).message}）—— 这不影响"发布已成功"这个结论`)
+    return null
+  }
+}
+
+/**
+ * jobRunLoop — 后台进程本体（`__job-run <id>`）。
+ *
+ * 三条铁律：
+ *   ① **只有它会写 `runnerPid`** ⇒ 「它真跑起来了」的唯一判据就是这一格出现（回执不算）
+ *   ② **到 `deadlineAt` 必自杀** ⇒ 不留孤儿进程空转
+ *   ③ 结论**只落 job 文件**（stdio 已被父进程重定向到日志，没人接管道）
+ */
+function jobRunLoop(id: string): void {
+  const rec = readJob(REPO_ROOT, id)
+  if (rec === null) fail(`job 不存在: ${id}（目录 ${jobsDir(REPO_ROOT)}）`, 2)
+  // 只有本进程写这一格 ⇒ 它就是"后台真跑起来了"的证据（spawn 回的 pid 不算）
+  rec.runnerPid = process.pid
+  writeJob(REPO_ROOT, rec)
+
+  const deadlineMs = Date.parse(rec.deadlineAt)
+  // 目标版本**优先取 job 记录**，环境变量只作覆盖（见 jobs.ts `params` 的注释：第一版只靠 env，手工跑必然失败）
+  const target = rec.params?.version ?? process.env.SERENITY_JOB_TARGET ?? ''
+
+  for (;;) {
+    const now = Date.now()
+    let satisfied = false
+    let reading: JobReading | null = null
+    let hardFailure: string | null = null
+
+    if (rec.kind === 'publish-landing') {
+      if (target === '') {
+        hardFailure = 'job 记录缺少 params.version（无法确定要等哪个版本）'
+      } else {
+        const r = landingRead(target)
+        const pk = packumentHasVersion(target)
+        satisfied = r.record === '200' || r.tarball === '200' || pk.has
+        reading = { at: localIso(), values: { record: r.record, tarball: r.tarball, packument: String(pk.has) } }
+      }
+    } else {
+      hardFailure = `未知 job 种类: ${rec.kind}`
+    }
+
+    if (reading !== null) rec.readings.push(reading)
+    const d = decidePoll({ satisfied, nowMs: now, deadlineMs, hardFailure })
+    if (!d.keepGoing) {
+      rec.state = d.state
+      rec.conclusion = d.conclusion
+      writeJob(REPO_ROOT, rec)
+      return
+    }
+    // 每轮先落盘再睡 ⇒ 即使此刻被杀，读数也是最新的
+    writeJob(REPO_ROOT, rec)
+    run('sleep', [String(Math.round(LANDING_JOB_INTERVAL_MS / 1000))], { cwd: REPO_ROOT, quiet: true })
+  }
+}
+
+/** `job` 子命令：列 / 看 / 清理（**除 `--prune` 外全部只读**）。 */function cmdJob(rest: string[]): void {
+  if (rest.includes('--prune')) {
+    const n = pruneJobs(REPO_ROOT)
+    console.log(`[dsp-develop] 已清理 ${n} 份过期 job（>7 天）`)
+    return
+  }
+  const id = rest.find((a) => !a.startsWith('--'))
+  if (id === undefined) {
+    const jobs = listJobs(REPO_ROOT, 10)
+    if (jobs.length === 0) {
+      console.log(`[dsp-develop] 无 job（目录 ${jobsDir(REPO_ROOT)}）`)
+      return
+    }
+    console.log(`[dsp-develop] 最近 ${jobs.length} 份 job：`)
+    for (const j of jobs) {
+      const mark = j.state === 'running' ? '…' : j.state === 'ok' ? '✓' : '✗'
+      console.log(`  ${mark} ${j.id}  ${j.state}  ${j.what}`)
+    }
+    console.log('  （看详情：dsp-develop job <id>；清理：dsp-develop job --prune）')
+    return
+  }
+  const rec = readJob(REPO_ROOT, id)
+  if (rec === null) fail(`job 不存在: ${id}（目录 ${jobsDir(REPO_ROOT)}）`, 2)
+  for (const line of formatJob(rec)) console.log(`[dsp-develop] ${line}`)
+}
+
+/**
  * verifyPublished — **落地核对**：把「已提交」（npm）与「已传播」（三个读数）分开判。
  *
  * 判据（三层，别退化成单条）：
@@ -686,40 +913,45 @@ function npmReportedSuccess(npmOutput: string, version: string): boolean {
  */
 function verifyPublished(version: string, npmOutput: string): void {
   const reported = npmReportedSuccess(npmOutput, version)
-  const deadline = Date.now() + 90_000
-  let last: { record: string; tarball: string } = { record: '?', tarball: '?' }
-  for (;;) {
-    last = landingRead(version)
-    if (last.record === '200' && last.tarball === '200') {
-      console.log(`[dsh-develop] ✓ 落地核对：版本记录 200 ＋ tarball 200 — ${version}`)
-      return
-    }
-    if (Date.now() >= deadline) break
-    run('sleep', ['3'], { cwd: SCRIPTS_DIR, quiet: true, env: {} })
-  }
+  // 🔴🔴 2026-11-15 重构（owner 令：消灭所有阻塞点）：原实现在这里**同步轮询 90 秒**。
+  //   两个独立缺陷叠在一起：
+  //     ① 循环用的是**无 `--max-time` 的 curl** ⇒ 最坏**无限**等待（B1）
+  //     ② 即便 curl 都很快，传播真实要 16~25 分钟 ⇒ 90 秒**从来等不到**，
+  //        所以这段循环的实际功效 ≈ 「让调用方白等 90 秒」。
+  //   ⇒ 形态改成：**当场取一次读数就返回**；未成立则起后台 job 继续看，调用方拿句柄。
+  //   ⚠️ **不改变任何判据语义**（三读数任一为真 = 上架成立；npm 已报成功 = 未确认不判失败）。
+  const first = landingRead(version)
   const pk = packumentHasVersion(version)
-  const anyFresh = last.record === '200' || last.tarball === '200' || pk.has
+  const anyFresh = first.record === '200' || first.tarball === '200' || pk.has
+
   if (anyFresh) {
-    console.log(`[dsh-develop] ✓ 落地核对：**上架成立**（三个读数任一为真）— ${version}`)
-    console.log(`   读数：record=${last.record} ／ tarball=${last.tarball} ／ packument.has=${pk.has}（${pk.detail}）`)
-    console.log(`   落后者属**滞后**（三者各自独立滞后：v1.51.6 是 packument 先到，v1.52.0 是 record 先到）`
-      + ' ⇒ 若此刻装不上，等几分钟再试；`npm-install` 自带传播重试')
-    // 🔴 2026-10-17（S142 · A65-P3 修复）：原文案把这句统称「传播延迟」。
-    //   但此刻 **至少一个读数为真** ⇒ 落后的那个更可能是**边缘负缓存**，也可能是**各面刷新节奏不同**。
-    //   两者处置相同（等），**但名称不同** —— 而"命名状态"正是本轨判据禁止在无区分读数时做的事
-    //   （D131 / 续 162：吻合度不是区分度）。改用中性词「滞后」，不再断言成因。
+    console.log(`[dsp-develop] ✓ 落地核对：**上架成立**（三个读数任一为真）— ${version}`)
+    console.log(`   读数：record=${first.record} ／ tarball=${first.tarball} ／ packument.has=${pk.has}（${pk.detail}）`)
+    if (first.record !== '200' || first.tarball !== '200') {
+      console.log(`   落后者属**滞后**（三者各自独立滞后：v1.51.6 是 packument 先到，v1.52.0 是 record 先到）`
+        + ' ⇒ 若此刻装不上，等几分钟再试；`npm-install` 自带传播重试')
+    }
     return
   }
-  if (reported) {
-    console.log(`[dsh-develop] ⚠️ 落地核对：**未确认（传播中）** — ${version}`)
-    console.log(`   三个读数此刻都还没有它：record=${last.record} ／ tarball=${last.tarball} ／ packument=${pk.has}（${pk.detail}）`)
-    console.log('   但 **npm 自己报了成功**（stdout 含 `+ @shgroup/dsh-serenity-hooks@' + version + '`）⇒ 视为**已提交、正在传播**。')
-    console.log(`   ⇒ **不判失败**（重跑 publish 只会 409）。复核 = publish-landed ${version}；装 = npm-install（该步自带传播重试）`)
-    return
+  if (!reported) {
+    fail(`landing 核对失败：三个读数都没有 ${version}，**且 npm 也没有报成功**\n`
+      + `  （record=${first.record} ／ tarball=${first.tarball} ／ packument=${pk.has}（${pk.detail}））\n`
+      + '  🔴 形态 = 真没上去。处置：看上方 npm 的实际输出再重跑 publish。', 2)
   }
-  fail(`landing 核对失败：三个读数都没有 ${version}，**且 npm 也没有报成功**\n`
-    + `  （record=${last.record} ／ tarball=${last.tarball} ／ packument=${pk.has}（${pk.detail}））\n`
-    + '  🔴 形态 = 真没上去。处置：看上方 npm 的实际输出再重跑 publish。', 2)
+  // 走到这里 = npm 报了成功、但三读数此刻都还没有它。**这是正常形态**（传播中），
+  // 原实现会在这里同步等 90 秒再放弃 —— 现在改成起后台 job，把"等"交出去。
+  console.log(`[dsp-develop] ⚠️ 落地核对：**未确认（传播中）** — ${version}`)
+  console.log(`   三个读数此刻都还没有它：record=${first.record} ／ tarball=${first.tarball} ／ packument=${pk.has}（${pk.detail}）`)
+  console.log('   但 **npm 自己报了成功**（stdout 含 `+ @shgroup/dsh-serenity-hooks@' + version + '`）⇒ 视为**已提交、正在传播**。')
+  console.log('   ⇒ **不判失败**（重跑 publish 只会 409）。')
+  const job = startLandingJob(version)
+  if (job !== null) {
+    console.log(`   ⇒ 已起后台续验 job \`${job.id}\`（最多看到 ${Math.round(LANDING_JOB_BUDGET_MS / 60_000)} 分钟）`)
+    console.log(`     查看：\`dsp-develop job ${job.id}\`　日志：${job.logPath}`)
+    console.log('     ⛔ 回执只说明"后台进程起来了"，不说明它看完了 —— 结论只在 job 文件里。')
+  } else {
+    console.log(`   ⇒ 复核 = publish-landed ${version}；装 = npm-install（该步自带传播重试）`)
+  }
 }
 
 /**
@@ -790,7 +1022,7 @@ function verifyTarball(): void {
   if (missingLibJs.length > 0) {
     fail(`tarball 缺 lib/ 产物（${missingLibJs.join(', ')}）——package.json files 白名单未覆盖 tsdown 全部输出，中止发布`, 2)
   }
-  console.log(`[dsh-develop] ✓ tarball 核对通过（${tarballFiles.length} 文件，含 lib/index.js + lib/client.js + lib/invariant.js）`)
+  console.log(`[dsp-develop] ✓ tarball 核对通过（${tarballFiles.length} 文件，含 lib/index.js + lib/client.js + lib/invariant.js）`)
   // lib/ 产物清单（验证 chunk 与 .d.ts 齐全——v1.26.15 事故后常驻可见性）
   const libEntries = tarballFiles.filter((f) => f.startsWith('lib/'))
   const dtsCount = tarballFiles.filter((f) => f.endsWith('.d.ts')).length
@@ -801,11 +1033,11 @@ function verifyTarball(): void {
   //    而"清单每一项都在"这件事已经由上面那行 `✓ 核对通过` 的**判据**保证了
   //    （缺任何一个 chunk，`missingLibJs` 早就 fail 退出、根本走不到这里）。
   //    ⇒ 成功面只留「结论 ＋ 计数」；**要看全清单时**显式传 `--list-artifacts` 拿全（人读/排障用）。
-  console.log(`[dsh-develop]   lib/ 共 ${libEntries.length} 项（js ${libJsCount} / d.ts ${libDtsCount}）｜包内 .d.ts 共 ${dtsCount} 个`)
+  console.log(`[dsp-develop]   lib/ 共 ${libEntries.length} 项（js ${libJsCount} / d.ts ${libDtsCount}）｜包内 .d.ts 共 ${dtsCount} 个`)
   if (process.argv.includes('--list-artifacts')) {
     for (const f of libEntries) console.log(`    ${f}`)
   } else {
-    console.log('[dsh-develop]   （要看逐项清单：pack-check --list-artifacts）')
+    console.log('[dsp-develop]   （要看逐项清单：pack-check --list-artifacts）')
   }
 }
 
@@ -821,11 +1053,11 @@ function cmdGithubPushRepo(dir?: string): void {
   if (existing.status !== 0) {
     const add = run('git', ['remote', 'add', target, url], { cwd: abs, quiet: true })
     if (add.status !== 0) fail(`remote add 失败: ${add.stderr}`, 2)
-    console.log(`[dsh-develop] remote ${target} -> ${url}`)
+    console.log(`[dsp-develop] remote ${target} -> ${url}`)
   } else if (existing.stdout.trim() !== url) {
     const set = run('git', ['remote', 'set-url', target, url], { cwd: abs, quiet: true })
     if (set.status !== 0) fail(`remote set-url 失败: ${set.stderr}`, 2)
-    console.log(`[dsh-develop] remote ${target} 更新为 ${url}`)
+    console.log(`[dsp-develop] remote ${target} 更新为 ${url}`)
   }
   const r = run('git', ['push', target, 'HEAD'], {
     cwd: abs,
@@ -836,7 +1068,7 @@ function cmdGithubPushRepo(dir?: string): void {
     console.error(r.stdout + r.stderr)
     fail(`git push ${target} 失败 (exit ${r.status})`, 2)
   }
-  console.log(`[dsh-develop] ✓ pushed ${repoName} -> github (${url})`)
+  console.log(`[dsp-develop] ✓ pushed ${repoName} -> github (${url})`)
 }
 
 function cmdGithubLs(remote?: string): void {
@@ -847,11 +1079,11 @@ function cmdGithubLs(remote?: string): void {
   if (existing.status !== 0) {
     const add = run('git', ['remote', 'add', target, url], { cwd: REPO_ROOT, quiet: true })
     if (add.status !== 0) fail(`git remote add ${target} 失败: ${add.stderr}`, 2)
-    console.log(`[dsh-develop] remote ${target} -> ${url}`)
+    console.log(`[dsp-develop] remote ${target} -> ${url}`)
   } else if (existing.stdout.trim() !== url) {
     const set = run('git', ['remote', 'set-url', target, url], { cwd: REPO_ROOT, quiet: true })
     if (set.status !== 0) fail(`git remote set-url ${target} 失败: ${set.stderr}`, 2)
-    console.log(`[dsh-develop] remote ${target} 更新为 ${url}`)
+    console.log(`[dsp-develop] remote ${target} 更新为 ${url}`)
   }
   const r = run('git', ['ls-remote', '--heads', target], {
     cwd: REPO_ROOT,
@@ -862,7 +1094,7 @@ function cmdGithubLs(remote?: string): void {
     console.error(r.stdout + r.stderr)
     fail(`ls-remote ${target} 失败（SSH key 无权访问或仓库不存在）`, 2)
   }
-  console.log(`[dsh-develop] ✓ ${target} 可达，heads:\n${r.stdout.trim() || '(空，新仓库)'}`)
+  console.log(`[dsp-develop] ✓ ${target} 可达，heads:\n${r.stdout.trim() || '(空，新仓库)'}`)
 }
 
 function cmdInspectDsh(pattern?: string): void {
@@ -875,10 +1107,10 @@ function cmdInspectDsh(pattern?: string): void {
     `find '${join(staging, 'packages')}' '${join(staging, 'apps')}' -type f -name '*.ts' -not -path '*/lib/*' -not -path '*/tests/*' 2>/dev/null | xargs grep -l -E '${pattern}' 2>/dev/null | head -8 | while read f; do echo "== $f"; grep -n -E '${pattern}' "$f" | head -5; done`],
   { cwd: staging, quiet: true })
   if (grep.status !== 0 || !grep.stdout.trim()) {
-    console.log(`[dsh-develop] 无匹配: ${pattern}`)
+    console.log(`[dsp-develop] 无匹配: ${pattern}`)
     return
   }
-  console.log(`[dsh-develop] 匹配 ${pattern}:`)
+  console.log(`[dsp-develop] 匹配 ${pattern}:`)
   console.log(grep.stdout.slice(0, 4000))
 }
 
@@ -892,7 +1124,7 @@ function cmdInspectDsh(pattern?: string): void {
  * 本机 `~/.npm-global/.../@deepseek-ai/dsh` 是**旧版安装**（用户要求先不升级），所以在这里把新版抓到
  * 仓库内 `_tmp/`（gitignore）——解包后 `read`/`grep`/`glob` 可直接读，无需安装、无需改 tsconfig。
  *
- * 用法: dsh-develop host-fetch <version> [pkg...] [--list]
+ * 用法: dsp-develop host-fetch <version> [pkg...] [--list]
  *   包集合 = hooks/package.json 的 peerDependencies（`@deepseek-ai/dsh-*`）+ client 半 ui 包 + 任务专用包
  *            ＋ **两份基准 tsconfig 的 `paths` 派生**（见 `hostPackagesFromTsConfig`）——末项的用途是
  *            让随后那句 `typecheck-host <version>` **一次就能跑到**，不必人工补跑
@@ -986,7 +1218,7 @@ function vendorHostVersion(name: string): string | undefined {
 
 function cmdHostFetch(version?: string, extraArg: string[] = []): void {
   if (!version || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
-    fail('host-fetch 需要版本号: dsh-develop host-fetch <x.y.z[-rc.n]> [pkg...] [--list]')
+    fail('host-fetch 需要版本号: dsp-develop host-fetch <x.y.z[-rc.n]> [pkg...] [--list]')
   }
   const listOnly = extraArg.includes('--list')
   const extra = extraArg.filter((a) => a !== '--list')
@@ -1002,11 +1234,11 @@ function cmdHostFetch(version?: string, extraArg: string[] = []): void {
     if (n.includes('@', 1)) return n
     if (n.startsWith('@deepseek-ai/dsh-')) return n
     const v = vendorHostVersion(n)
-    if (!v) console.log(`[dsh-develop]   ⚠️ ${n} 未在仓库内找到已装版本 ⇒ 按宿主版本号试取（可能失败）`)
+    if (!v) console.log(`[dsp-develop]   ⚠️ ${n} 未在仓库内找到已装版本 ⇒ 按宿主版本号试取（可能失败）`)
     return v ? `${n}@${v}` : n
   })
   if (listOnly) {
-    console.log(`[dsh-develop] host-fetch 默认包集（${specs.length} 项；--list 不抓取）:`)
+    console.log(`[dsp-develop] host-fetch 默认包集（${specs.length} 项；--list 不抓取）:`)
     console.log(specs.join('\n'))
     return
   }
@@ -1014,7 +1246,7 @@ function cmdHostFetch(version?: string, extraArg: string[] = []): void {
   mkdirSync(outRoot, { recursive: true })
   const cache = join(process.env.HOME ?? '', '.cache', 'npm-publish')
   mkdirSync(cache, { recursive: true })
-  console.log(`[dsh-develop] host-fetch ${version} → ${outRoot}（${specs.length} 个包；其中 ${fromBaselines.length} 项由基准 tsconfig 派生）`)
+  console.log(`[dsp-develop] host-fetch ${version} → ${outRoot}（${specs.length} 个包；其中 ${fromBaselines.length} 项由基准 tsconfig 派生）`)
 
   const failed: string[] = []
   let done = 0
@@ -1044,9 +1276,9 @@ function cmdHostFetch(version?: string, extraArg: string[] = []): void {
     if (x.status !== 0) { failed.push(name); continue }
     done += 1
   }
-  console.log(`[dsh-develop] ✓ 解包 ${done} / 跳过（已存在）${skipped} / 失败 ${failed.length}`)
-  if (failed.length) console.log(`[dsh-develop]   失败包: ${failed.join(', ')}`)
-  console.log('[dsh-develop]   下一步：直接 read/grep/glob 读源码与 .d.ts（typecheck 基线仍指向本机安装，未改动）')
+  console.log(`[dsp-develop] ✓ 解包 ${done} / 跳过（已存在）${skipped} / 失败 ${failed.length}`)
+  if (failed.length) console.log(`[dsp-develop]   失败包: ${failed.join(', ')}`)
+  console.log('[dsp-develop]   下一步：直接 read/grep/glob 读源码与 .d.ts（typecheck 基线仍指向本机安装，未改动）')
 }
 
 /**
@@ -1110,15 +1342,15 @@ function runHostTypecheckHalf(
     .map(([key]) => key)
   if (missing.length) {
     fail(`${label}: 派生 paths 指向缺失目录（${missing.length} 条）: ${missing.join(', ')}\n`
-      + `  说明 _tmp/host-${version}/ 解包不全 → 补跑: dsh-develop host-fetch ${version} <pkg...>`, 2)
+      + `  说明 _tmp/host-${version}/ 解包不全 → 补跑: dsp-develop host-fetch ${version} <pkg...>`, 2)
   }
-  console.log(`[dsh-develop] ${label}: 派生 ${basename(outFile)}，paths ${Object.keys(paths).length} 条全部命中`)
+  console.log(`[dsp-develop] ${label}: 派生 ${basename(outFile)}，paths ${Object.keys(paths).length} 条全部命中`)
   const args = ['-p', basename(outFile), '--noEmit']
   const r = run(tscBin, args, { cwd: baseDir, quiet: true })
   const listed = run(tscBin, [...args, '--listFiles'], { cwd: baseDir, quiet: true })
   const hostFiles = listed.stdout.split('\n').filter((l) => l.includes(fileMarker)).length
   if (hostFiles === 0) fail(`${label}: 解包宿主文件命中 0 —— 派生 paths 未生效，结论不可用`, 2)
-  console.log(`[dsh-develop]   ${label}: 实测载入解包宿主 ${hostFiles} 个文件`)
+  console.log(`[dsp-develop]   ${label}: 实测载入解包宿主 ${hostFiles} 个文件`)
   return { status: r.status, output: (r.stdout + r.stderr).trim(), hostFiles }
 }
 
@@ -1132,16 +1364,16 @@ function runHostTypecheckHalf(
  *   - `paths` 指向 `_tmp/host-<version>/@deepseek-ai/*`（host-fetch 解包产物）
  *   - 产物不进仓、不动本机安装、不改正式 tsconfig
  *
- * 用法: dsh-develop typecheck-host <version>
+ * 用法: dsp-develop typecheck-host <version>
  * 退出码: 0 两份全过 / 2 有类型错误（原文打印，即适配清单）
  */
 function cmdTypecheckHost(version?: string): void {
   if (!version || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
-    fail('typecheck-host 需要宿主版本号: dsh-develop typecheck-host <x.y.z[-rc.n]>（先跑 host-fetch）')
+    fail('typecheck-host 需要宿主版本号: dsp-develop typecheck-host <x.y.z[-rc.n]>（先跑 host-fetch）')
   }
   const hostRoot = join(REPO_ROOT, '_tmp', `host-${version}`)
   if (!existsSync(hostRoot)) {
-    fail(`未找到 ${hostRoot} —— 先跑: dsh-develop host-fetch ${version}`, 1)
+    fail(`未找到 ${hostRoot} —— 先跑: dsp-develop host-fetch ${version}`, 1)
   }
   const tscBin = join(REPO_ROOT, 'node_modules', '.bin', 'tsc')
   const marker = `host-${version}/@deepseek-ai/`
@@ -1159,7 +1391,7 @@ function cmdTypecheckHost(version?: string): void {
       prefix: `../../../_tmp/host-${version}`,
     },
   ]
-  console.log(`[dsh-develop] typecheck-host ${version}（解包宿主 → _tmp/host-${version}/）`)
+  console.log(`[dsp-develop] typecheck-host ${version}（解包宿主 → _tmp/host-${version}/）`)
   const failures: string[] = []
   for (const half of halves) {
     if (!existsSync(half.base)) { failures.push(`${half.label}: 基准 tsconfig 缺失`); continue }
@@ -1168,11 +1400,11 @@ function cmdTypecheckHost(version?: string): void {
       console.log(r.output)
       failures.push(`${half.label}: tsc exit ${r.status}`)
     } else {
-      console.log(`[dsh-develop] ✓ ${half.label} 半：新宿主 ${version} 下无类型错误`)
+      console.log(`[dsp-develop] ✓ ${half.label} 半：新宿主 ${version} 下无类型错误`)
     }
   }
   if (failures.length) fail(`typecheck-host 失败（${failures.join(' / ')}）——以上条目即适配清单`, 2)
-  console.log(`[dsh-develop] ✓ typecheck-host 通过（宿主 ${version}，node + client）`)
+  console.log(`[dsp-develop] ✓ typecheck-host 通过（宿主 ${version}，node + client）`)
 }
 
 function cmdReadDsh(relPath?: string, start?: string, end?: string): void {
@@ -1225,7 +1457,7 @@ function cmdDumpConfig(pattern?: string): void {
     }
   })
   if (keep.size === 0) {
-    console.log(`[dsh-develop] --dump-config 无匹配: ${pattern}`)
+    console.log(`[dsp-develop] --dump-config 无匹配: ${pattern}`)
     return
   }
   console.log(all.filter((_, i) => keep.has(i)).join('\n'))
@@ -1257,7 +1489,7 @@ function cmdDumpConfig(pattern?: string): void {
  * `Cannot find module '…/autopilot-chain.js'` 有用得多 —— 后者看着像"环境缺模块"。
  */
 function cmdDiag(): void {
-  console.error('[dsh-develop diag] 🔴 本命令已退役（对象已不存在）')
+  console.error('[dsp-develop diag] 🔴 本命令已退役（对象已不存在）')
 
   console.error('  · 对象 = ACC autopilot 的「唤起条件链」；该机制随 v1.35.0 ACC 侧 autopilot 退场一并删除')
   console.error('    （判据唯一实现 hooks/dsh-serenity-hooks/src/autopilot-chain.ts 已不在仓里，提交 2386f6f）。')
@@ -1306,7 +1538,7 @@ function cmdRestartWeb(): void {
   // 1) 找到旧 web 进程并 kill（含残留：匹配 bin.js web / bin/dsh web）
   const ps = run('bash', ['-c', `ps aux | grep -E 'dsh/lib/bin\\.js web|bin/dsh web' | grep -v grep | awk '{print $2}'`], { cwd: process.cwd(), quiet: true })
   const pids = ps.stdout.trim().split('\n').filter(Boolean)
-  if (pids.length === 0) console.log('[dsh-develop]    无旧 web 进程')
+  if (pids.length === 0) console.log('[dsp-develop]    无旧 web 进程')
   for (const pid of pids) {
     console.log(`    kill ${pid}`)
     run('kill', [pid], { cwd: process.cwd(), quiet: true })
@@ -1321,7 +1553,7 @@ function cmdRestartWeb(): void {
     return false
   }
   if (!waitForPortsFree()) {
-    console.error(`[dsh-develop] ⚠️ 端口 ${PORT}/${GATEWAY_PORT} 15s 内未释放，尝试强杀`)
+    console.error(`[dsp-develop] ⚠️ 端口 ${PORT}/${GATEWAY_PORT} 15s 内未释放，尝试强杀`)
     const hard = run('bash', ['-c', `ss -ltnp 2>/dev/null | grep -E ':(${PORT}|${GATEWAY_PORT}) ' | grep -oP 'pid=\\K[0-9]+' | sort -u`], { cwd: process.cwd(), quiet: true })
     for (const pid of hard.stdout.trim().split('\n').filter(Boolean)) {
       run('kill', ['-9', pid], { cwd: process.cwd(), quiet: true })
@@ -1360,7 +1592,7 @@ function cmdRestartWeb(): void {
     }
   })()
   const log = `/tmp/dsh-web-restart-v${currentVersion().pkg}.log`
-  console.log(`[dsh-develop]    堆上限 --max-old-space-size=${heapMb} MB（按 MemTotal 推导）`)
+  console.log(`[dsp-develop]    堆上限 --max-old-space-size=${heapMb} MB（按 MemTotal 推导）`)
   // 🔴 2026-10-18（owner 令「我们 dsp 占用内存不能过多」）—— 加**按需**诊断报告开关：
   //   进程收到 SIGUSR2 时把 V8 诊断报告写到 `--report-directory`（默认 cwd）。
   //   报告按**堆空间分项**报数（old_space / large_object_space / code_space / external_memory），
@@ -1375,26 +1607,49 @@ function cmdRestartWeb(): void {
     /* 建不出来就不带该 flag（不因诊断能力让宿主起不来） */
   }
   const reportFlags = `--report-on-signal --report-signal=SIGUSR2 --report-directory=${reportDir} --report-filename=heap-${Date.now()}.json`
-  console.log(`[dsh-develop]    诊断报告：kill -USR2 <pid> ⇒ ${reportDir}`)
+  console.log(`[dsp-develop]    诊断报告：kill -USR2 <pid> ⇒ ${reportDir}`)
   // 报告 flag 用环境变量传（Node 认 NODE_OPTIONS 里的诊断类 flag），
   // 这样不必拼进 setsid 的命令串、也不会与 --max-old-space-size 的位置耦合。
   const cmd = `cd ${process.env.HOME ?? ''} && NODE_OPTIONS="${reportFlags}" setsid nohup node --max-old-space-size=${heapMb} ${bin} web > ${log} 2>&1 < /dev/null & disown`
   const r = run('bash', ['-c', cmd], { cwd: process.cwd(), quiet: true })
   if (r.status !== 0) fail(`web 启动失败: ${r.stderr}`, 2)
-  console.log(`[dsh-develop] ✓ web 已重启（bin: ${bin}，日志: ${log}）`)
-  console.log(`[dsh-develop]   等待 18s 后健康检查（curl /serenity/status，端口 ${PORT}）...`)
-  run('sleep', ['18'], { cwd: process.cwd(), quiet: true })
-  // 端口确认（主端口 + gateway 第二端口）
-  const portCheck = run('bash', ['-c', `ss -ltn 2>/dev/null | grep -q ':${PORT} ' && echo LISTENING || echo DOWN`], { cwd: process.cwd(), quiet: true })
-  const gwCheck = run('bash', ['-c', `ss -ltn 2>/dev/null | grep -q ':${GATEWAY_PORT} ' && echo LISTENING || echo DOWN`], { cwd: process.cwd(), quiet: true })
-  const health = run('curl', ['-s', 'http://127.0.0.1:3080/serenity/status?workspace=' + (process.env.SERENITY_CCC_ROOT ?? '')], { cwd: process.cwd(), quiet: true })
-  const statusLine = health.status === 0 && health.stdout ? health.stdout.trim().slice(0, 400) : ''
-  console.log(`[dsh-develop] 端口: 主=${portCheck.stdout.trim()} 网关=${gwCheck.stdout.trim()}`)
-  console.log(statusLine ? `[dsh-develop] ✓ 状态: ${statusLine}` : '[dsh-develop] ⚠️ 健康检查未返回（检查日志）')
+  console.log(`[dsp-develop] ✓ web 已发起重启（bin: ${bin}，日志: ${log}）`)
+
+  // 🔴🔴 2026-11-15 重构（owner 令「消灭所有阻塞点」）：原实现**无条件 `sleep 18`** 硬等。
+  //   18 秒是"一般够用了"的经验值 —— 典型的**把估计写成常量**：
+  //   机器快时白等，机器慢时还是不够（然后健康检查失败，被读成"重启失败"）。
+  //   ⇒ 改成**有界轮询**：每 500ms 探一次 `/serenity/status`，一拿到响应就往下走；
+  //     上限 `RESTART_PROBE_BUDGET_MS`（见常量表）。**总耗时 ≤ 上限，且通常远小于 18s**。
+  //   ⚠️ 判据不变：仍要读到健康响应/端口才算"起来了"；读不到就如实报"未确认"（⛔ 不当成功）。
+  const probeStart = Date.now()
+  let statusLine = ''
+  let portOk = false
+  let gwOk = false
+  for (;;) {
+    const portCheck = run('bash', ['-c', `ss -ltn 2>/dev/null | grep -q ':${PORT} ' && echo LISTENING || echo DOWN`], { cwd: process.cwd(), quiet: true })
+    const gwCheck = run('bash', ['-c', `ss -ltn 2>/dev/null | grep -q ':${GATEWAY_PORT} ' && echo LISTENING || echo DOWN`], { cwd: process.cwd(), quiet: true })
+    portOk = portCheck.stdout.trim() === 'LISTENING'
+    gwOk = gwCheck.stdout.trim() === 'LISTENING'
+    if (portOk && gwOk) {
+      const health = run('curl', ['-s', '--max-time', '5',
+        'http://127.0.0.1:3080/serenity/status?workspace=' + (process.env.SERENITY_CCC_ROOT ?? '')],
+      { cwd: process.cwd(), quiet: true })
+      if (health.status === 0 && health.stdout) {
+        statusLine = health.stdout.trim().slice(0, 400)
+        break
+      }
+    }
+    if (Date.now() - probeStart >= RESTART_PROBE_BUDGET_MS) break
+    run('sleep', ['0.5'], { cwd: process.cwd(), quiet: true })
+  }
+  const waitedMs = Date.now() - probeStart
+  console.log(`[dsp-develop] 端口: 主=${portOk ? 'LISTENING' : 'DOWN'} 网关=${gwOk ? 'LISTENING' : 'DOWN'}`
+    + `（探测 ${(waitedMs / 1000).toFixed(1)}s，上限 ${RESTART_PROBE_BUDGET_MS / 1000}s）`)
+  console.log(statusLine ? `[dsp-develop] ✓ 状态: ${statusLine}` : '[dsp-develop] ⚠️ 健康检查未返回（检查日志）')
   if (statusLine) {
     try {
       const st = JSON.parse(statusLine) as { safeModeOn?: boolean; restrict?: { lastSuccess?: boolean | null; lastError?: string | null; activeKeys?: string[] } }
-      console.log(`[dsh-develop] safeModeOn=${st.safeModeOn} restrict.lastSuccess=${st.restrict?.lastSuccess} activeKeys=${JSON.stringify(st.restrict?.activeKeys ?? [])}${st.restrict?.lastError ? ` lastError=${st.restrict.lastError}` : ''}`)
+      console.log(`[dsp-develop] safeModeOn=${st.safeModeOn} restrict.lastSuccess=${st.restrict?.lastSuccess} activeKeys=${JSON.stringify(st.restrict?.activeKeys ?? [])}${st.restrict?.lastError ? ` lastError=${st.restrict.lastError}` : ''}`)
     } catch { /* 解析失败忽略 */ }
   }
 }
@@ -1433,7 +1688,7 @@ function cmdVersion(): void {
 function cmdRunTrajectoryTest(rest: string[]): void {
   const [trajectoryDir, explicitFile] = rest
   if (!trajectoryDir) {
-    fail('run-trajectory-test 需要轨迹目录名: dsh-develop run-trajectory-test "<AGENT_SESSIONS 下的目录名>" [测试文件名]')
+    fail('run-trajectory-test 需要轨迹目录名: dsp-develop run-trajectory-test "<AGENT_SESSIONS 下的目录名>" [测试文件名]')
   }
   const root = resolve(REPO_ROOT, '../..') // AI_LAB/dsh-serenity-plugin → CCC 根（home-serenity）
   const target = join(root, 'AGENT_SESSIONS', trajectoryDir)
@@ -1493,8 +1748,8 @@ function runTrajectoryTestFile(testPath: string, cwd: string): void {
   const bun = process.env.SERENITY_BUN ?? join(HOME_DIR, '.bun', 'bin', 'bun')
   if (!existsSync(bun)) fail(`找不到 bun: ${bun}（可用 SERENITY_BUN 覆盖）`)
 
-  console.log(`[dsh-develop] run-trajectory-test: ${testPath}`)
-  console.log(`[dsh-develop] bun: ${bun}（cwd = ${cwd}；只读，不改该目录任何文件）`)
+  console.log(`[dsp-develop] run-trajectory-test: ${testPath}`)
+  console.log(`[dsp-develop] bun: ${bun}（cwd = ${cwd}；只读，不改该目录任何文件）`)
   // ⚠️ 用 pipe 再回放：要拿到 exit code，同时把被测程序的原话**逐字**透出（不夹杂工具噪音）
   const r = spawnSync(bun, [testPath], {
     cwd,
@@ -1505,19 +1760,19 @@ function runTrajectoryTestFile(testPath: string, cwd: string): void {
   if (r.stdout) process.stdout.write(r.stdout)
   if (r.stderr) process.stderr.write(r.stderr)
   if (r.error) fail(`执行失败: ${String(r.error.message ?? r.error)}`)
-  console.log(`[dsh-develop] ${r.status === 0 ? '✓ 自测通过' : `✗ 自测失败（exit ${r.status}）`}`)
+  console.log(`[dsp-develop] ${r.status === 0 ? '✓ 自测通过' : `✗ 自测失败（exit ${r.status}）`}`)
   if (r.status !== 0) process.exit(r.status ?? 2)
 }
 
 function cmdBump(version?: string): void {
-  if (!version || !/^\d+\.\d+\.\d+$/.test(version)) fail('bump 需要版本号: dsh-develop bump <x.y.z>')
+  if (!version || !/^\d+\.\d+\.\d+$/.test(version)) fail('bump 需要版本号: dsp-develop bump <x.y.z>')
   for (const f of ['package.json', 'dsh.plugin.json']) {
     const p = join(HOOKS_DIR, f)
     const j = readJson(p)
     j.version = version
     writeFileSync(p, JSON.stringify(j, null, 2) + '\n', 'utf-8')
   }
-  console.log(`[dsh-develop] ✓ version → ${version}（package.json + dsh.plugin.json；CHANGELOG 需手动补条目）`)
+  console.log(`[dsp-develop] ✓ version → ${version}（package.json + dsh.plugin.json；CHANGELOG 需手动补条目）`)
 }
 
 /**
@@ -1680,7 +1935,7 @@ function cmdDeploy(opts: { listCopySet?: boolean } = {}): void {
   // 用途：① 让"副本 = 发布物"成为**可查询的事实**（而不是文档里的形容词）；② 可被测试机械断言。
   if (opts.listCopySet) {
     const files = publishFileList().slice().sort()
-    console.log(`[dsh-develop] 发布物清单（deploy 的复制集合；判据 = npm pack --dry-run --json --ignore-scripts）：${files.length} 文件`)
+    console.log(`[dsp-develop] 发布物清单（deploy 的复制集合；判据 = npm pack --dry-run --json --ignore-scripts）：${files.length} 文件`)
     for (const f of files) console.log(`  ${f}`)
     return
   }
@@ -1769,7 +2024,7 @@ function cmdDeploy(opts: { listCopySet?: boolean } = {}): void {
     ...profileTargets]) {
     for (const [spec, target] of Object.entries(runtimeDepShims)) {
       if (!existsSync(target)) {
-        console.log(`    !! 运行时依赖 shim 目标缺失: ${spec} -> ${target}（先 dsh-develop npm-install-dev ${spec}）`)
+        console.log(`    !! 运行时依赖 shim 目标缺失: ${spec} -> ${target}（先 dsp-develop npm-install-dev ${spec}）`)
         continue
       }
       const link = join(dst, 'node_modules', spec)
@@ -1854,7 +2109,7 @@ function cmdDeploy(opts: { listCopySet?: boolean } = {}): void {
  * 仍从 Nexus 拉取并失败（pnpm 的源解析被更高优先级来源压过，疑似 DSH 以显式参数传入）。
  * 故本参数**只能**修正版本发现（`latest` 分支），**不能**救活 `dsh plugin add`。
  * 本地装新版的可行出路（按成本排序）：
- *   ① **`dsh-develop deploy`**（本地构建直写 profile，**不碰 npm**）← 2026-09-10 两次实际走通的路
+ *   ① **`dsp-develop deploy`**（本地构建直写 profile，**不碰 npm**）← 2026-09-10 两次实际走通的路
  *   ② 用户级操作：在 `~/.dsh/profiles/<p>/` 建 `.npmrc` 写 `registry=https://registry.npmjs.org/`（CCC 边界外）
  *   ③ 刷 Nexus 缓存（需管理权限）/ 等 ~24h TTL 过期
  */
@@ -1895,27 +2150,27 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
       fail(`registry 上取不到本仓版本 ${repoVer} —— 无法确定该装哪个。\n`
         + `  两种情形，处置不同：\n`
         + `    · 刚 publish 完（传播中）⇒ 等 1~2 分钟重跑本命令（缺省路径即可）\n`
-        + `    · 本仓还没发布（bump 了没 publish）⇒ 先 \`dsh-develop publish\`；`
-        + `或**显式**要最新已发布版：\`dsh-develop npm-install ${profile} latest\``, 2)
+        + `    · 本仓还没发布（bump 了没 publish）⇒ 先 \`dsp-develop publish\`；`
+        + `或**显式**要最新已发布版：\`dsp-develop npm-install ${profile} latest\``, 2)
     }
     target = repoVer
-    console.log(`[dsh-develop] 目标 = 本仓版本 ${target}（缺省语义；已确认 registry 上有它）`)
+    console.log(`[dsp-develop] 目标 = 本仓版本 ${target}（缺省语义；已确认 registry 上有它）`)
   }
   if (target === 'latest') {
     const latest = viewVersion('@shgroup/dsh-serenity-hooks')
     if (latest === null) fail('npm view 最新版本失败', 2)
     target = latest
-    console.log(`[dsh-develop] registry 最新版本: ${target}`)
+    console.log(`[dsp-develop] registry 最新版本: ${target}`)
     // 显式要 latest 时，若它落后于本仓 ⇒ 说一句（不是错，只是"最新"此刻指谁）
     const repoVer = currentVersion().pkg
     if (repoVer !== '' && repoVer !== target) {
-      console.log(`[dsh-develop] ⚠️ 本仓 package.json = ${repoVer}，而 registry latest = ${target}`
+      console.log(`[dsp-develop] ⚠️ 本仓 package.json = ${repoVer}，而 registry latest = ${target}`
         + ` ⇒ \`latest\` 的传播可能还没到（发布链里应缺省调用或显式给 ${repoVer}）`)
     }
   }
   const pkgSpec = `@shgroup/dsh-serenity-hooks@${target}`
   console.log(
-    `[dsh-develop] npm 安装 ${pkgSpec} 到 profile '${profile}'（官方 dsh plugin add 路径）` +
+    `[dsp-develop] npm 安装 ${pkgSpec} 到 profile '${profile}'（官方 dsh plugin add 路径）` +
       (registry ? `｜源覆盖: ${registry}` : ''),
   )
   // 🔴 store 位置必须与 `node_modules` 里记录的一致（2026-11-09 实测 ERR_PNPM_UNEXPECTED_STORE）。
@@ -1923,9 +2178,9 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
   //    这里 pnpm 由 `dsh plugin add` 内部起，我们只能经环境变量传。
   const storeDir = storeDirForProfile(profile)
   if (storeDir === null) {
-    console.log(`[dsh-develop] ⚠️ 读不到 profile '${profile}' 的 node_modules/.modules.yaml ⇒ 不指定 store（用 pnpm 默认）`)
+    console.log(`[dsp-develop] ⚠️ 读不到 profile '${profile}' 的 node_modules/.modules.yaml ⇒ 不指定 store（用 pnpm 默认）`)
   } else {
-    console.log(`[dsh-develop] store = ${storeDir}（取自该 profile 的 .modules.yaml，⛔ 不猜）`)
+    console.log(`[dsp-develop] store = ${storeDir}（取自该 profile 的 .modules.yaml，⛔ 不猜）`)
   }
   // 🔴 **变量名是 `pnpm_config_store_dir`，⛔ 不是 `npm_config_store_dir`** —— 2026-11-09 实测：
   //    同一个值喂两个名字，`pnpm store path` 逐字给出
@@ -1938,12 +2193,27 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
   // 🔴 tarball 传播重试（2026-10-11 v1.51.6 实测）：publish 成功后 packument **立刻**含该版本，
   //   但 tarball 的 404 会被**边缘负缓存** ⇒ 紧跟发布的 npm-install 会吃到 ERR_PNPM_FETCH_404
   //   （实测：发布后约 5 分钟 pnpm 仍报 ERR_PNPM_FETCH_404，而版本记录与 integrity 都已齐）。
-  //   ⇒ **只对这一种错误**做有界重试（其余失败原样立刻报错，不掩盖真问题）。
-  //   ⚠️ 总预算须留在 msm 的 600s 执行超时内 ⇒ 6 轮 × 60s ≈ 5 分钟；更长的传播延迟要手动重跑。
-  const TARBALL_WAIT_ATTEMPTS = 6
-  const TARBALL_WAIT_MS = 60_000
+  //
+  // 🔴🔴 2026-11-15 重构（owner 令「消灭所有阻塞点」）：原实现是 **6 轮 × 60s = 360 s 原地睡**。
+  //   两个问题：
+  //     ① 它把"等"和"装"焊死 ⇒ 调用方**必然**陪着等满（哪怕第 2 轮就好了）
+  //     ② 上界藏在「轮数 × 秒数」的乘法里 ⇒ 读代码算不出总时间（B1 同一个病根）
+  //   ⇒ 新形态：**先探一次可达性**（带超时的 curl，秒级），
+  //     · 可达 ⇒ 直接装（绝大多数情况走这条，耗时 = 原本一次安装）
+  //     · 不可达 ⇒ **当场返回**并给「再等多久 / 怎么自己重试」，⛔ 不再原地睡
+  //   ⚠️ **判据语义不变**：仍只把 pnpm 的两个传播错误码当"尚未传播"，其余失败照原样响亮报错。
+  const TARBALL_PROBE_TIMEOUT_S = '8'
+  const tarballReachable = probeTarballReachable(target, TARBALL_PROBE_TIMEOUT_S)
+  if (!tarballReachable.reachable) {
+    const pk = packumentHasVersion(target)
+    console.log(`[dsp-develop] ⚠️ 未就绪：registry 上的 tarball 此刻取不到（${tarballReachable.detail}）`)
+    console.log(`   packument 含 ${target} = **${pk.has ? 'yes' : 'no'}**（${pk.detail}）`)
+    console.log('   ⇒ 这是**传播延迟／边缘负缓存**，⛔ 不是"发布失败"、也不是"装不上"。')
+    console.log(`   ⇒ 处置：等几分钟后重跑 \`dsp-develop npm-install ${profile} ${target}\`（本轮**没有**装上，也**没有**在原地等待）`)
+    fail(`tarball 尚未传播到 —— 本轮未安装（等几分钟重试即可）`, 2)
+  }
   let r: { status: number; stdout: string; stderr: string } = { status: 0, stdout: '', stderr: '' }
-  for (let attempt = 1; ; attempt++) {
+  {
     r = run(bin, ['plugin', '--profile', profile, 'add', pkgSpec], {
       cwd: process.cwd(),
       quiet: true,
@@ -1958,40 +2228,36 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
         ...registryEnv,
       },
     })
-    if (r.status === 0) break
-    const out = r.stdout + r.stderr
-    // 🔴 2026-10-11（S142 实测）：传播延迟在 pnpm 侧有**两种**报错形态，**都要重试**——
-    //   ① `ERR_PNPM_FETCH_404`（packument 已知该版本，但 tarball 还没到边缘）—— 走 `latest` 时常见
-    //   ② `ERR_PNPM_NO_MATCHING_VERSION`（**packument 本身还没列出该版本**）—— **指定精确版本**时常见
-    //   实测：`npm-install web 1.52.3` 在发布后 ~1 分钟报 ② 而**当场退出、一轮都不等**；
-    //   同一时刻走 ① 的路径（`latest` 还是上一版）反倒能装上 ⇒ 只认 ① 会把
-    //   "指定版本的正常传播等待"误判成失败（同族：把"传播"当"没上去"）。
-    const isPropagation = (/ERR_PNPM_FETCH_404/.test(out) && /dsh-serenity-hooks[-\d.]*\.tgz/.test(out))
-      || /ERR_PNPM_NO_MATCHING_VERSION/.test(out)
-    if (!isPropagation) {
-      console.error(out)
-      fail(`dsh plugin add 失败 (exit ${r.status})`, 2)
-    }
-    if (attempt >= TARBALL_WAIT_ATTEMPTS) {
-      console.error(out)
+    if (r.status !== 0) {
+      const out = r.stdout + r.stderr
+      // 🔴 2026-10-11（S142 实测）：传播延迟在 pnpm 侧有**两种**报错形态，**都要**识别为传播而非失败——
+      //   ① `ERR_PNPM_FETCH_404`（packument 已知该版本，但 tarball 还没到边缘）—— 走 `latest` 时常见
+      //   ② `ERR_PNPM_NO_MATCHING_VERSION`（**packument 本身还没列出该版本**）—— **指定精确版本**时常见
+      //   实测：`npm-install web 1.52.3` 在发布后 ~1 分钟报 ② 而**当场退出、一轮都不等**；
+      //   同一时刻走 ① 的路径（`latest` 还是上一版）反倒能装上 ⇒ 只认 ① 会把
+      //   "指定版本的正常传播等待"误判成失败（同族：把"传播"当"没上去"）。
+      //   🔵 重构后：**探测通过仍报传播错** ⇒ 说明探测与 pnpm 看到的面不同（负缓存按边缘分片），
+      //      同样**不判失败**，只如实说明并给重试命令。
+      const isPropagation = (/ERR_PNPM_FETCH_404/.test(out) && /dsh-serenity-hooks[-\d.]*\.tgz/.test(out))
+        || /ERR_PNPM_NO_MATCHING_VERSION/.test(out)
+      if (!isPropagation) {
+        console.error(out)
+        fail(`dsh plugin add 失败 (exit ${r.status})`, 2)
+      }
       // 🔴 2026-10-17（S142 · A65-P1 修复）：**这里曾写死一句「packument 已含 ${target}」** ——
       //   而该分支**根本没有查过 packument**（它只由 pnpm 的两个错误码触发）。
       //   实测反证：2026-10-17 报同一句话时，权威读数逐字是 `no`（latest 仍 1.59.2）
       //   ⇒ 照它信会得出「已上架、是安装端坏了」这个**反向结论**。已发作 3 次。
       //   修法（判据：**要印的处置建议，其状态断言必须当场取读数**）：先真查一次，再据实印。
       const pk = packumentHasVersion(target)
-      const landed = pk.has
-      fail(`dsh plugin add 失败 (exit ${r.status})：tarball 仍取不到 —— 已等 ${attempt} 轮 × 60s。\n`
-        + `  实测读数（当场查，非推测）：packument 含 ${target} = **${landed ? 'yes' : 'no'}**（${pk.detail}）\n`
-        + (landed
-          ? `  ⇒ 包已上架但 tarball 取不到 ⇒ **传播延迟／边缘负缓存**。处置：等几分钟后重跑 \`dsh-develop npm-install\`。\n`
+      console.error(out)
+      fail(`dsh plugin add 失败 (exit ${r.status})：pnpm 报传播类错误（tarball 取不到）。\n`
+        + `  实测读数（当场查，非推测）：packument 含 ${target} = **${pk.has ? 'yes' : 'no'}**（${pk.detail}）\n`
+        + (pk.has
+          ? `  ⇒ 包已上架但 tarball 取不到 ⇒ **传播延迟／边缘负缓存**。处置：等几分钟后重跑 \`dsp-develop npm-install ${profile} ${target}\`。\n`
           : `  ⇒ 🔴 **该版本此刻还不在 registry 的权威面上** —— 这**不等于**"发布失败"（三读数可滞后，实测有慢到 ≈10 小时的样本）。\n`
             + `  ⇒ 处置：**不要重跑 publish**（同版本只会 409）。先用 \`msm("npm-registry-doctor", ["status", "${target}"])\` 取权威读数；仍为档② ⇒ 继续等。\n`), 2)
     }
-    const shape = /ERR_PNPM_NO_MATCHING_VERSION/.test(out) ? 'ERR_PNPM_NO_MATCHING_VERSION' : 'ERR_PNPM_FETCH_404'
-    console.log(`[dsh-develop] ⏳ 尚未传播（第 ${attempt}/${TARBALL_WAIT_ATTEMPTS} 轮；60s 后重试）`
-      + ` —— ${shape}，非真失败`)
-    run('sleep', ['60'], { cwd: process.cwd(), quiet: true })
   }
   console.log(r.stdout.trim() || r.stderr.trim())
 
@@ -2011,7 +2277,7 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
     }
   }
   if (installed === null) {
-    console.log(`[dsh-develop] ⚠️ 装机核对：读不到 ${installedPkg} —— **无法确认**装的是 ${target}（不当成失败）`)
+    console.log(`[dsp-develop] ⚠️ 装机核对：读不到 ${installedPkg} —— **无法确认**装的是 ${target}（不当成失败）`)
   } else if (installed !== target) {
     // 处置按"该装哪个"给，不按 target 复读（target 可能就是错的那个）：
     // 本仓 package.json 与 target 不等 ⇒ 该装的是本仓那个版本；相等 ⇒ 只能等传播。
@@ -2024,8 +2290,8 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
     const want = currentVersion().pkg
     const pk = packumentHasVersion(target)
     const remedy = want !== '' && want !== target
-      ? `用**显式版本**重跑（该路径自带传播重试）—— \`dsh-develop npm-install ${profile} ${want}\``
-      : `registry 侧尚未传播到位：等 2~5 分钟后重跑 \`dsh-develop npm-install ${profile} ${target}\``
+      ? `用**显式版本**重跑（该路径自带传播重试）—— \`dsp-develop npm-install ${profile} ${want}\``
+      : `registry 侧尚未传播到位：等 2~5 分钟后重跑 \`dsp-develop npm-install ${profile} ${target}\``
     fail(`装机核对失败：目标是 ${target}，而装机副本是 ${installed}。\n`
       + `  实测读数（当场查）：packument 含 ${target} = **${pk.has ? 'yes' : 'no'}**（${pk.detail}）\n`
       + (pk.has
@@ -2033,9 +2299,9 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
         : `  ⇒ 该版本此刻还不在 registry 的权威面上 ⇒ **传播未到位**（不是"装不上"，也不是"发布失败"）。\n`)
       + `  处置：${remedy}。`, 2)
   } else {
-    console.log(`[dsh-develop] ✓ 装机核对：装机副本版本 = ${installed}`)
+    console.log(`[dsp-develop] ✓ 装机核对：装机副本版本 = ${installed}`)
   }
-  console.log(`[dsh-develop] ✓ 已安装 ${pkgSpec}（npm registry）→ 重启 dsh web 生效（restart-web）`)
+  console.log(`[dsp-develop] ✓ 已安装 ${pkgSpec}（npm registry）→ 重启 dsh web 生效（restart-web）`)
 }
 
 /**
@@ -2053,7 +2319,7 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
  *     `--registry <url>` 可覆盖
  *   · `--dry-run` 只打印将执行的命令，不落盘
  *
- * 用法: dsh-develop host-upgrade <version|dist-tag> [--registry <url>] [--dry-run]
+ * 用法: dsp-develop host-upgrade <version|dist-tag> [--registry <url>] [--dry-run]
  */
 // ── host-probe（2026-10-17，升级适配标准流程 §5.0 的第 1、2 步机械化）──
 //
@@ -2074,7 +2340,8 @@ function cmdNpmInstall(profile = 'web', version?: string, registry?: string): vo
  */
 function readDshDistTags(registry: string): Record<string, string> | null {
   const url = `${registry.replace(/\/$/, '')}/@deepseek-ai%2Fdsh`
-  const r = run('curl', ['-s', url], { cwd: SCRIPTS_DIR, quiet: true })
+  // 🔴 `--max-time`：本轮 `curl-timeout.test.ts` 抓到的第二处（见 landingRead 的同类注释）
+  const r = run('curl', ['-s', '--max-time', LANDING_CURL_TIMEOUT_S, url], { cwd: SCRIPTS_DIR, quiet: true })
   if (r.status !== 0 || !r.stdout.trim()) return null
   try {
     const doc = JSON.parse(r.stdout) as { 'dist-tags'?: Record<string, string> }
@@ -2087,7 +2354,8 @@ function readDshDistTags(registry: string): Record<string, string> | null {
 /** 核一个版本的 tarball 是否真能下载（HTTP 状态码 = 唯一判据） */
 function probeTarballCode(registry: string, version: string): string {
   const url = `${registry.replace(/\/$/, '')}/@deepseek-ai/dsh/-/dsh-${version}.tgz`
-  const r = run('curl', ['-s', '-o', '/dev/null', '-w', '%{http_code}', url], { cwd: SCRIPTS_DIR, quiet: true })
+  const r = run('curl', ['-s', '--max-time', LANDING_CURL_TIMEOUT_S, '-o', '/dev/null', '-w', '%{http_code}', url],
+    { cwd: SCRIPTS_DIR, quiet: true })
   return (r.stdout.trim() || '(无响应)')
 }
 
@@ -2117,15 +2385,15 @@ function cmdHostProbe(argv: string[]): void {
   }
   const installedJson = join(HOME_DIR, '.npm-global', 'lib', 'node_modules', '@deepseek-ai', 'dsh', 'package.json')
   const current = existsSync(installedJson) ? String(readJson(installedJson).version ?? '?') : '(未安装)'
-  console.log(`[dsh-develop] host-probe ｜ 源: ${registry}`)
-  console.log(`[dsh-develop] 本机现值: ${current}`)
+  console.log(`[dsp-develop] host-probe ｜ 源: ${registry}`)
+  console.log(`[dsp-develop] 本机现值: ${current}`)
 
   const tags = readDshDistTags(registry)
   if (tags === null) {
     fail(`读不到 @deepseek-ai/dsh 的 dist-tags（源不可达或响应非 JSON）`, 2)
   }
   // 🔴 全量打印 —— 这正是本命令存在的理由：rc 常常只在 next/alpha 上
-  console.log('[dsh-develop] dist-tags（**全量**，不是只 latest）:')
+  console.log('[dsp-develop] dist-tags（**全量**，不是只 latest）:')
   for (const [tag, ver] of Object.entries(tags)) console.log(`    ${tag.padEnd(8)} → ${ver}`)
 
   const latest = tags['latest']
@@ -2137,20 +2405,20 @@ function cmdHostProbe(argv: string[]): void {
 
   if (latest !== undefined && newest !== '' && cmpVer(newest, latest) > 0) {
     const ownerTags = Object.entries(tags).filter(([, v]) => cmpVer(v, latest) > 0).map(([t]) => t)
-    console.log(`[dsh-develop] 🔴 检出比 latest 更新的版本: ${newest}（在 ${ownerTags.join(' / ')} 标签上）`)
+    console.log(`[dsp-develop] 🔴 检出比 latest 更新的版本: ${newest}（在 ${ownerTags.join(' / ')} 标签上）`)
   } else {
-    console.log(`[dsh-develop] 最新可见版本 = ${latest ?? '(无)'}（无更高标签）`)
+    console.log(`[dsp-develop] 最新可见版本 = ${latest ?? '(无)'}（无更高标签）`)
   }
 
   // 🔴 "可下载"的唯一判据：HTTP 状态码。⛔ 不用 release notes / README 代替
-  console.log('[dsh-develop] tarball 可达性（这才是"可下载"的证据）:')
+  console.log('[dsp-develop] tarball 可达性（这才是"可下载"的证据）:')
   for (const v of [current, newest].filter((v) => v !== '' && v !== '(未安装)')) {
     console.log(`    ${v.padEnd(14)} → ${probeTarballCode(registry, v)}`)
   }
   console.log('')
-  console.log(`[dsh-develop] 下一步（若决定适配）: dsh-develop host-fetch ${newest}`)
-  console.log(`[dsh-develop]                             dsh-develop typecheck-host ${newest}`)
-  console.log('[dsh-develop] 流程与禁止项: skill dsh-serenity-plugin-development → references/20-host-compat.md §5.0')
+  console.log(`[dsp-develop] 下一步（若决定适配）: dsp-develop host-fetch ${newest}`)
+  console.log(`[dsp-develop]                             dsp-develop typecheck-host ${newest}`)
+  console.log('[dsp-develop] 流程与禁止项: skill dsh-serenity-plugin-development → references/20-host-compat.md §5.0')
 }
 
 function cmdHostUpgrade(argv: string[]): void {
@@ -2175,10 +2443,10 @@ function cmdHostUpgrade(argv: string[]): void {
   const installedJson = join(dshDir, 'package.json')
   const before = existsSync(installedJson) ? String(readJson(installedJson).version ?? '?') : '(未安装)'
   const spec = `@deepseek-ai/dsh@${target}`
-  console.log(`[dsh-develop] 当前宿主: ${before}（${dshDir}）`)
-  console.log(`[dsh-develop] 目标: ${spec}｜源: ${registry}`)
+  console.log(`[dsp-develop] 当前宿主: ${before}（${dshDir}）`)
+  console.log(`[dsp-develop] 目标: ${spec}｜源: ${registry}`)
   if (dryRun) {
-    console.log(`[dsh-develop] --dry-run：将执行 npm install -g --registry ${registry} ${spec}`)
+    console.log(`[dsp-develop] --dry-run：将执行 npm install -g --registry ${registry} ${spec}`)
     return
   }
   // 先解析目标版本（失败信息比 npm install 的报错更直白：源不对 / 版本不存在）
@@ -2188,7 +2456,7 @@ function cmdHostUpgrade(argv: string[]): void {
     fail(`npm view ${spec} 解析失败（源 ${registry}；版本不存在或源不可达）`, 2)
   }
   const resolved = view.stdout.trim().split('\n').pop() ?? ''
-  console.log(`[dsh-develop] 解析结果: ${resolved || '(空)'}`)
+  console.log(`[dsp-develop] 解析结果: ${resolved || '(空)'}`)
   const r = run('npm', ['install', '-g', '--registry', registry, spec], { cwd: SCRIPTS_DIR, quiet: true })
   if (r.status !== 0) {
     console.error(r.stdout + r.stderr)
@@ -2197,9 +2465,9 @@ function cmdHostUpgrade(argv: string[]): void {
   console.log((r.stdout + r.stderr).trim() || '(no output)')
   if (!existsSync(installedJson)) fail(`安装后仍找不到 ${installedJson}`, 2)
   const after = String(readJson(installedJson).version ?? '?')
-  console.log(`[dsh-develop] ✓ 宿主已升级: ${before} → ${after}`)
-  if (after === before) console.log('[dsh-develop] ⚠️ 版本未变——确认目标参数是否写错')
-  console.log('[dsh-develop] 下一步: restart-web → dashboard health 的 dshVersion 应变为新版本')
+  console.log(`[dsp-develop] ✓ 宿主已升级: ${before} → ${after}`)
+  if (after === before) console.log('[dsp-develop] ⚠️ 版本未变——确认目标参数是否写错')
+  console.log('[dsp-develop] 下一步: restart-web → dashboard health 的 dshVersion 应变为新版本')
 }
 
 // ── session-doctor（v1.31.13，S142 §24「会话损坏」调查的常备诊断）──
@@ -2231,7 +2499,7 @@ function cmdHostUpgrade(argv: string[]): void {
  * （`~/.npm-global/.../dsh-session/lib/types/`），失败时回落到 hooks 的 devDependencies 副本；
  * 命令会打印实际用了哪一份。
  *
- * 用法: dsh-develop session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--probe] [--limit <n>]
+ * 用法: dsp-develop session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--probe] [--limit <n>]
  */
 interface DoctorOffence { type: string; seq: number | null }
 
@@ -2638,7 +2906,7 @@ function collectTs(dir: string, out: string[] = []): string[] {
  * - **不碰注释行**（`//` / `*` / `/*` 开头）—— 那里的 `.js` 是散文，不是依赖；
  * - 不碰包名（`@deepseek-ai/…`）、不碰非 `.js` 字面量、不改任何导出符号名。
  *
- * 用法: dsh-develop refactor-move --map <json> [--apply]
+ * 用法: dsp-develop refactor-move --map <json> [--apply]
  *   json 形态（相对 HOOKS_DIR）: { "src/old.ts": "src/new/old.ts", ... }
  */
 function cmdRefactorMove(argv: string[]): void {
@@ -2723,7 +2991,7 @@ function cmdRefactorMove(argv: string[]): void {
  * 4. **dry-run 先看数**，apply 后自动复扫，残留必须为 0（残留里排除保护段）；
  * 5. 🔴 **改完必须 typecheck** —— 预演通过 ≠ 改名成立（D132）。
  *
- * 用法: dsh-develop rename-symbols --map <json> [--apply]
+ * 用法: dsp-develop rename-symbols --map <json> [--apply]
  *   json 形态: { "SkiffProfile": "TrajectoryConstraint", "skiff.json": "trajectory-constraint.json", ... }
  */
 function cmdRenameSymbols(argv: string[]): void {
@@ -2878,7 +3146,7 @@ function collectByExt(dir: string, exts: string[], out: string[] = []): string[]
  *    会被误换（这是本机第一版就会踩的坑）；
  * 4. apply 后**自动复扫**，残留必须为 0（否则点名打印）。
  *
- * 用法: dsh-develop rename-mentions --map <json> [--apply]
+ * 用法: dsp-develop rename-mentions --map <json> [--apply]
  *   json 形态: { "旧文件名.ts": "新路径/文件名.ts", ... }
  */
 function cmdRenameMentions(argv: string[]): void {
@@ -3175,7 +3443,7 @@ async function cmdSessionDoctor(argv: string[]): Promise<void> {
  *   - 每次 `--apply` 必先落备份；备份含会话原文 ⇒ `_tmp/` 下（gitignore，仅本地）
  *   - `--probe` 用宿主真实读取路径 (`open(id,'read')`) 复验，不靠"应该好了"
  *
- * 用法: dsh-develop session-repair [--root <dir>] [--session <id,...>] [--apply]
+ * 用法: dsp-develop session-repair [--root <dir>] [--session <id,...>] [--apply]
  *       [--backup-dir <dir>] [--min-age-min <n>] [--force] [--probe] [--json]
  */
 async function cmdSessionRepair(argv: string[]): Promise<void> {
@@ -3282,7 +3550,7 @@ async function cmdSessionRepair(argv: string[]): Promise<void> {
  * 为什么需要（§7-8 宿主类型基准落地）：要一次装 32 个宿主包（`@deepseek-ai/dsh-*`），
  * 而 hooks 目录自身没有 .npmrc——registry 会回落到用户级 `~/.npmrc`（内网 Nexus）。
  * 显式传官方源可绕开代理缓存（同 host-fetch 的做法），**且不改任何 .npmrc**。
- * 用法: dsh-develop npm-install-dev [--registry <url>] <pkg[@version]>...
+ * 用法: dsp-develop npm-install-dev [--registry <url>] <pkg[@version]>...
  */
 function cmdNpmInstallDev(argv: string[]): void {
   let registry: string | undefined
@@ -3295,8 +3563,8 @@ function cmdNpmInstallDev(argv: string[]): void {
     pkgs = argv.slice(1)
   }
   if (registry !== undefined && !/^https?:\/\//.test(registry)) fail(`--registry 必须是 http(s) URL: ${registry}`, 2)
-  if (pkgs.length === 0) fail('npm-install-dev 需要包名: dsh-develop npm-install-dev [--registry <url>] <pkg>[@version]...')
-  console.log(`[dsh-develop] pnpm install --save-dev ${pkgs.length} 个包（hooks）${registry ? `｜源覆盖: ${registry}` : ''}`)
+  if (pkgs.length === 0) fail('npm-install-dev 需要包名: dsp-develop npm-install-dev [--registry <url>] <pkg>[@version]...')
+  console.log(`[dsp-develop] pnpm install --save-dev ${pkgs.length} 个包（hooks）${registry ? `｜源覆盖: ${registry}` : ''}`)
   // store-dir 必须与既有 node_modules 链接一致（hooks/.pnpm-store/v11）——
   // pnpm 默认全局 store（~/.local/bin/store）与本地 store 冲突会 ERR_PNPM_UNEXPECTED_STORE
   const storeDir = join(HOOKS_DIR, '.pnpm-store')
@@ -3312,7 +3580,7 @@ function cmdNpmInstallDev(argv: string[]): void {
     fail(`pnpm install --save-dev 失败 (exit ${r.status})`, 2)
   }
   console.log(r.stdout.trim() || r.stderr.trim())
-  console.log(`[dsh-develop] ✓ 已安装 devDeps（${pkgs.length} 个，hooks/package.json）`)
+  console.log(`[dsp-develop] ✓ 已安装 devDeps（${pkgs.length} 个，hooks/package.json）`)
 }
 
 /**
@@ -3334,9 +3602,9 @@ function verifyLockfile(): void {
   const r = run(PNPM, ['install', '--lockfile-only', '--frozen-lockfile', '--store-dir', storeDir], { cwd: HOOKS_DIR, quiet: true })
   if (r.status !== 0) {
     console.error(r.stdout + r.stderr)
-    fail('锁文件与 package.json 不一致 → 先跑 `dsh-develop lockfile` 并提交锁文件（否则安装/CI 会失败）', 2)
+    fail('锁文件与 package.json 不一致 → 先跑 `dsp-develop lockfile` 并提交锁文件（否则安装/CI 会失败）', 2)
   }
-  console.log('[dsh-develop] ✓ 锁文件与 package.json 一致')
+  console.log('[dsp-develop] ✓ 锁文件与 package.json 一致')
 }
 
 /**
@@ -3355,20 +3623,20 @@ function verifyLockfile(): void {
  *   ② `verifyLockfile()` —— CI 该步的**本地等价判定**（同一函数被 publish 前置复用）
  *
  * 纪律：改完 package.json 依赖后**必须**跑本命令并提交锁文件（ci.yml 文件头同款要求）。
- * 用法：dsh-develop lockfile
+ * 用法：dsp-develop lockfile
  */
 function cmdLockfile(): void {
   // store-dir 与既有 node_modules 链接保持一致（同 npm-install-dev 的理由：
   // 全局 store 与 hooks/.pnpm-store 冲突会 ERR_PNPM_UNEXPECTED_STORE）
   const storeDir = join(HOOKS_DIR, '.pnpm-store')
-  console.log('[dsh-develop] ① pnpm install --lockfile-only（hooks，不动 node_modules）')
+  console.log('[dsp-develop] ① pnpm install --lockfile-only（hooks，不动 node_modules）')
   const r = run(PNPM, ['install', '--lockfile-only', '--store-dir', storeDir], { cwd: HOOKS_DIR, quiet: true })
   if (r.status !== 0) {
     console.error(r.stdout + r.stderr)
     fail(`pnpm install --lockfile-only 失败 (exit ${r.status})`, 2)
   }
   console.log((r.stdout + r.stderr).trim() || '(no output)')
-  console.log('[dsh-develop] ② 自检：--frozen-lockfile --lockfile-only（= CI Install (hooks) 同款判定；publish 前置复用同一函数）')
+  console.log('[dsp-develop] ② 自检：--frozen-lockfile --lockfile-only（= CI Install (hooks) 同款判定；publish 前置复用同一函数）')
   verifyLockfile()
 }
 
@@ -3412,15 +3680,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         const v = rest[0] ?? currentVersion().pkg
         const read = landingRead(v)
         const pk = packumentHasVersion(v)
-        console.log(`[dsh-develop] publish-landed ${v}`)
+        console.log(`[dsp-develop] publish-landed ${v}`)
         console.log(`  版本记录（${v}?write=true） = ${read.record}`)
         console.log(`  tarball（-/${v}.tgz）        = ${read.tarball}`)
         console.log(`  packument 含该版本           = ${pk.has}（${pk.detail}）`)
         const fresh = read.record === '200' || read.tarball === '200' || pk.has
         if (fresh) {
-          console.log('[dsh-develop] ✓ **上架成立**（三读数任一为真）')
-          if (read.tarball === '200') console.log('[dsh-develop] ✓ 且包体此刻可下载（tarball 200）')
-          else console.log(`[dsh-develop] ⚠️ 包体此刻仍取不到（tarball=${read.tarball}）⇒ 传播延迟／边缘负缓存，`
+          console.log('[dsp-develop] ✓ **上架成立**（三读数任一为真）')
+          if (read.tarball === '200') console.log('[dsp-develop] ✓ 且包体此刻可下载（tarball 200）')
+          else console.log(`[dsp-develop] ⚠️ 包体此刻仍取不到（tarball=${read.tarball}）⇒ 传播延迟／边缘负缓存，`
             + '不是"没上架"；装不上就等几分钟重试')
         } else {
           fail(`**三读数都没有 ${v}**（record=${read.record} / tarball=${read.tarball} / packument=${pk.has}）\n`
@@ -3433,6 +3701,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         break
       }
       case 'pack-check': verifyTarball(); break
+      // 🔴 内部子命令：**只由 `spawnRunner` 调用**，⛔ 不要人手跑（它会阻塞到 job 到点）。
+      //    名字带 `__` 前缀 = 内部面，不列进 --help / --list。
+      case '__job-run': {
+        const id = rest[0]
+        if (id === undefined) fail('__job-run 需要 job id（内部命令，由 spawnRunner 调用）', 2)
+        jobRunLoop(id)
+        break
+      }
+      case 'job': cmdJob(rest); break
       case 'readme-sync': syncPackageReadme(); break
       case 'github-push-repo': cmdGithubPushRepo(rest[0]); break
       case 'github-ls': cmdGithubLs(rest[0]); break
@@ -3474,13 +3751,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       case 'dump-config': cmdDumpConfig(rest[0]); break
       case '--list':
       case 'list':
-        console.log('typecheck | typecheck-scripts | typecheck-cli（🔴 已退役） | typecheck-host <ver> | test [--filter] | coverage | build | status | commit <msg> | push | version | bump <ver> | deploy [--list-copy-set] | npm-install [<profile>] [<version>] [<registry>] | restart-web | host-probe [--registry <url>] | host-upgrade <ver|tag> [--registry <url>] [--dry-run] | session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--limit <n>] | session-repair [--root <dir>] [--session <id,...>] [--apply] [--backup-dir <dir>] [--min-age-min <n>] [--force] [--probe] [--json] | diag（🔴 已退役） | squash-history [<msg>] | github-push [--force] | pack-check | readme-sync | publish | inspect-dsh <pattern> | host-fetch <ver> [pkg[@ver]] [--list]')
+        console.log('typecheck | typecheck-scripts | typecheck-cli（🔴 已退役） | typecheck-host <ver> | test [--filter] | coverage | build | status | commit <msg> | push | version | bump <ver> | deploy [--list-copy-set] | npm-install [<profile>] [<version>] [<registry>] | restart-web | job [<id>|--prune] | host-probe [--registry <url>] | host-upgrade <ver|tag> [--registry <url>] [--dry-run] | session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--limit <n>] | session-repair [--root <dir>] [--session <id,...>] [--apply] [--backup-dir <dir>] [--min-age-min <n>] [--force] [--probe] [--json] | diag（🔴 已退役） | squash-history [<msg>] | github-push [--force] | pack-check | readme-sync | publish | inspect-dsh <pattern> | host-fetch <ver> [pkg[@ver]] [--list]')
         break
       case '--schema': {
-        const target = rest[0] ?? 'dsh-develop'
+        const target = rest[0] ?? 'dsp-develop'
         console.log(JSON.stringify({
-          name: 'dsh-develop',
-          path: 'AI_LAB/dsh-serenity-plugin/scripts/dsh-develop.ts',
+          name: 'dsp-develop',
+          path: 'AI_LAB/dsh-serenity-plugin/scripts/dsp-develop.ts',
           flags: [
             { name: 'filter', type: 'string', description: 'vitest 过滤（test）' },
             { name: 'message', type: 'string', description: 'commit 消息' },
@@ -3492,8 +3769,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       case '--help':
       case '-h':
       case undefined:
-        console.log(`dsh-develop — dsh-serenity-plugin 开发操作 MSM（safe-mode 白名单通道）
-用法: dsh-develop <typecheck|typecheck-scripts|typecheck-cli（🔴 已退役）|test|coverage|build|status|commit|push|version|bump|deploy|npm-install|lockfile|restart-web|pack-check|readme-sync|publish|github-push|squash-history> [args]
+        console.log(`dsp-develop — dsh-serenity-plugin 开发操作 MSM（safe-mode 白名单通道）
+用法: dsp-develop <typecheck|typecheck-scripts|typecheck-cli（🔴 已退役）|test|coverage|build|status|commit|push|version|bump|deploy|npm-install|lockfile|restart-web|job|pack-check|readme-sync|publish|github-push|squash-history> [args]
   typecheck             tsc --noEmit（hooks 的 node + client 两面）
   typecheck-scripts [--no-strict]  tsc --noEmit 覆盖 scripts/*.ts（开发工具面；默认 strict。A26-c）
   typecheck-cli         🔴 已退役（恒 exit 2）：对象 = 仓库根包 src/（安装器 CLI ／ init 向导 ／ 技能模板），2026-09-28 随该族整体删除
@@ -3506,10 +3783,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   version               三处版本一致性
   bump <x.y.z>          package.json + dsh.plugin.json 版本同步
   deploy [--list-copy-set]  load-plugin.sh 全流程（构建+双锚+shim+profile+预检）；复制集合 = 发布物清单（白名单驱动，副本逐条 = 发布物）；--list-copy-set 只读印清单
-  npm-install [profile] [version] 官方 npm 安装：缺省/latest=registry 最新（**发布链里请显式给版本**）；装完回读装机副本核对版本
+  npm-install [profile] [version] 官方 npm 安装：缺省=本仓版本；🔴 **先探 tarball 可达性（≤8s），不可达就当场返回**（⛔ 不再原地睡 6 分钟）；装完回读装机副本核对版本
   npm-install-dev <pkg...> hooks 开发依赖安装（npm install --save-dev；client bundle 内联）
   lockfile              重生成 hooks pnpm-lock.yaml + 用 --frozen-lockfile 自检（CI 同款判定）
-  restart-web           kill + setsid 重启 dsh web（健康检查）
+  restart-web           kill + setsid 重启 dsh web；🔴 **有界轮询**健康检查（≤15s，拿到即走；原先是固定 sleep 18）
+  job [<id> | --prune]  🔴 **后台续验**：看某份 job 的进度/结论；无参列最近 10 份；--prune 清 7 天前。
+                        job 由"需要等很久"的动作自动创建（如 publish 的落地核对）⇒ 回执给 job id，结论只在 job 文件里
   host-upgrade <ver|tag> 全局升级 DSH 宿主 CLI（包名硬编码 @deepseek-ai/dsh；默认官方源；--dry-run 预览）
   session-doctor        会话日志体检（只读）：逐份判定宿主读取门（未知事件词表/格式版本/结构），列出会被拒的会话
   session-repair        会话日志治疗（缺省 dry-run）：补 rebuild 写坏的 user/message 缺 id/role；--apply 才备份+原子替换+自检
@@ -3519,6 +3798,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   readme-sync           包内 README ← 仓库 README（机械同步，相对链接转绝对 URL）
   dump-config [pattern] dsh --dump-config（合成后的 profile 条目树；pattern 过滤）
   publish               npm publish @shgroup/dsh-serenity-hooks（凭据走 ~/.npmrc）
+                        🔴 尾部**自动推远端**（github ＋ omdsh）；推送失败**不阻断**、不判发布失败（npm 已成功）
+                        🔴 落地核对**不再同步轮询 90s**：未成立就起后台 job，回执给 job id
   github-push [--force] push 到 GitHub 公开仓库（tellmewhattodo）
   run-trajectory-test <轨迹目录名> [测试文件名]  跑某条轨迹自己的 *.dev.test.ts（只读；bun 缺省 ~/.bun/bin/bun，可用 SERENITY_BUN 覆盖）`)
         break

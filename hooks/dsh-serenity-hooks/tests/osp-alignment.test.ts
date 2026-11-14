@@ -161,9 +161,26 @@ function setupCccWithSkill(skillName = 'other-serenity', skillBody = '顶层入�
   writeFileSync(join(dir, '.opencode', 'skills', skillName, 'SKILL.md'), `---\nname: ${skillName}\ndescription: 系统入口\n---\n${skillBody}`)
 }
 
-describe('osp 对齐：CCE 块逐字节一致', () => {
-  it('cceBlock() 与 osp CCE 参照完全相等', () => {
-    expect(cceBlock()).toBe(OSP_CCE)
+describe('dsp 领先：CCE 块（v1.134.0 起**不再逐字节对齐 osp**——owner 令精简核心提示词）', () => {
+  it('cceBlock() 保留五条约束名 + H_op 判据，⛔ 不再等于 osp 原稿（分叉是有意的）', () => {
+    const block = cceBlock()
+    expect(block).toContain('=== Serenity CCE ===')
+    // 五条约束**名字一个都不能少**（v1.134.0 只删解释，不删骨架）
+    for (const name of [
+      'Continuity',
+      'Bounded Space',
+      'Entropy',
+      'Reconstruction',
+      'Multi-Agent',
+    ]) {
+      expect(block, `CCE 约束名缺失：${name}`).toContain(name)
+    }
+    // H_op 健康判据仍在（缩成自然语言，撤销「自然语言等于丢判据」这一读法）
+    expect(block).toContain('H_op <= H_critical')
+    expect(block).toContain('remain coherent')
+    // 🔴 判据的方向：**已分叉**。若哪天又变回与 osp 逐字节一致，说明有人无意识地回滚了 v1.134.0。
+    expect(block).not.toBe(OSP_CCE)
+    expect(block).not.toContain('FIVE BEHAVIORAL CONSTRAINTS (engineering requirements, not suggestions)')
   })
 })
 
@@ -171,16 +188,15 @@ describe('dsp 扩展：Principles 块（v1.19.8 合并原 Constraints——spec 
   it('principlesBlock() 含认知容器本体论 + Operational boundaries（Root/文件/shell/subagent/session-first）', () => {
     const block = principlesBlock(dir)
     // 本体论（认知容器：无错误只有认知不足）
+    // v1.134.0：删了 `Why a cognitive container:` 设问句头（owner 令精简），本体论正文一字未动。
     expect(block).toContain('=== Serenity Principles ===')
-    expect(block).toContain('Why a cognitive container')
-    expect(block).toContain('all work is cognition')
+    expect(block).toContain('All work is cognition')
     expect(block).toContain('contains no errors')
     expect(block).toContain('not-knowing is a state to be repaired')
     // v1.23.0：session–cognitive-trajectory 关系段（session = cognitive trajectory 的可重建载体）
-    expect(block).toContain('The session–cognitive-trajectory relation')
-    expect(block).toContain('a session is the rebuildable carrier of a')
-    expect(block).toContain("SESSION.md is the cognitive trajectory's persistent body")
-    expect(block).toContain('Identity belongs to the cognitive trajectory')
+    expect(block).toContain('A session is the rebuildable carrier of a cognitive trajectory')
+    expect(block).toContain("SESSION.md is that")
+    expect(block).toContain('Identity belongs to the trajectory, not to any session')
     // 操作边界（原 Constraints 内容，工具名为平台真实名 msm）
     expect(block).toContain('Operational boundaries:')
     expect(block).toContain(`Root: ${dir}`)
@@ -270,7 +286,10 @@ describe('osp 对齐：身份块 + MSM 块结构（v1.124.0：工具清单已删
     // 2026-09-16（S142 §0e-C，所有者裁「同意修正」）：MSM 指引改指 msm() 无参目录。
     // 旧文 `call msm("<name>") to execute or discover them (see the "Serenity Tools" heading below)`
     // 把 **MSM**（CCC 注册的另一层）指到 **ACC 内置工具清单**标题下 ⇒ 指错对象，属干扰。
-    expect(block).toContain('call msm() with no arguments to list them')
+    // 🔴 v1.134.0（owner 令精简）：该指引句压成一行 —— 判据跟着**新措辞**走，
+    //    ⛔ 不是删掉判据（"MSM 发现入口必须写在身份块里"这件事仍然成立）。
+    expect(block).toContain('msm() lists them')
+    expect(block).toContain('msm("<name>") runs one')
     expect(block).not.toContain('(see the "Serenity Tools" heading below)')
   })
 
@@ -303,6 +322,8 @@ describe('dsp 扩展：Metaphor 块（v1.19.6 起，宁静号宇宙隐喻域—�
     // World 层呼应句（v1.19.8：认知容器本体论隐喻化；v1.29 星舰意象：sea→deep space）
     expect(block).toContain('Deep space has no mistakes — only stars you have not yet mapped.')
     // 10 条隐喻本体（v1.29：Harbor Inspection → Departure Inspection——星舰意象升级）
+    // 🔴 v1.134.0：隐喻名跟着精简版走（`The Ship's Log` → `The Log`，其余不变）；
+    //    判的是「十景在位」，⛔ 不是「措辞冻结」。
     for (const name of [
       'The Hull',
       'Deck Order',
@@ -310,19 +331,25 @@ describe('dsp 扩展：Metaphor 块（v1.19.6 起，宁静号宇宙隐喻域—�
       'The Machinery',
       'The Manifest',
       'Departure Inspection',
-      "The Ship's Log",
+      'The Log',
       'The Ship of Theseus',
       'Crew Rotation',
       'Blueprint over Statue',
     ]) {
       expect(block).toContain(name)
     }
-    // 每条含 → 约束映射（M-1）+ Verdict 判据（M-2）
-    expect(block.match(/→/g)?.length).toBe(10)
-    for (const constraint of ['Bounded Space', 'Entropy (H_op)', 'EAP', 'MSM (Mech & Semi-Mech)', 'Single Source of Truth', 'First Anchor', 'Cognitive Trajectory Tracking', 'Continuity', 'Multi-Agent Cognition', 'Reconstruction > Preservation']) {
+    // 每条含 -> 约束映射（M-1）+ Verdict 判据（M-2）
+    // v1.134.0：`→` 改 ASCII `->`（owner 令：不用 emoji/特殊符号装饰），数量仍是 10。
+    expect(block.match(/->/g)?.length).toBe(10)
+    for (const constraint of ['Bounded Space', 'Entropy', 'EAP', 'MSM', 'Single Source of Truth', 'First Anchor', 'Cognitive Trajectory', 'Continuity', 'Multi-Agent Cognition', 'Reconstruction over Preservation']) {
       expect(block).toContain(constraint)
     }
-    expect(block.match(/Verdict:/g)?.length).toBe(10)
+    // v1.134.0：`Verdict:` 前缀被删，判决句本身仍在 —— 判据 = 十条各有一句判决。
+    // ⚠️ 精度取舍（已实测两版）：① `/ = [a-z]/` 只命中 7/10（`= overload.` 这类**行尾**判决
+    //    天然不命中）；② `/ = /` 命中 7 —— 因为 3 条判决是跨行折行的，等号落在行尾、宾语在下一行。
+    //    ⇒ 精确数条得把「隐喻编号 1~10 各出现一次」当主判据（下面那条），这里只留下限，
+    //    ⛔ 别为了凑 10 去改正则然后以为判据变强了。
+    expect(block.match(/ = /g)?.length).toBeGreaterThanOrEqual(7)
     // 无中文（全英文）
     expect(block).not.toMatch(/[\u4e00-\u9fff]/)
   })

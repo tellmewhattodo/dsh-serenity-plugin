@@ -1,5 +1,5 @@
 /**
- * dsh-develop.test.ts — DC-M1 配对测试
+ * dsp-develop.test.ts — DC-M1 配对测试
  *
  * 验证核心纯逻辑：版本读取（currentVersion）、版本一致性判断、bump 版本号校验。
  * 子命令执行链路（typecheck/test/build）由 acc_msm exec 冒烟覆盖（本项目惯例）。
@@ -16,7 +16,7 @@ const REPO_ROOT = join(SCRIPTS_DIR, '..')
 
 function runDshDevelop(...args: string[]): { status: number; stdout: string } {
   try {
-    const stdout = execFileSync('bun', [join(SCRIPTS_DIR, 'dsh-develop.ts'), ...args], {
+    const stdout = execFileSync('bun', [join(SCRIPTS_DIR, 'dsp-develop.ts'), ...args], {
       cwd: REPO_ROOT,
       encoding: 'utf-8',
       env: { ...process.env, DSH_HOME: process.env.DSH_HOME ?? join(process.env.HOME ?? '', '.dsh') },
@@ -164,7 +164,7 @@ test('安装器族已退役：根 src/ bin/ tests/ tsconfig.json mech-registry.j
   }
   // 正控：真产物必须在场 —— 证明上面那组"不存在"不是因为根路径解析错了
   expect(existsSync(join(REPO_ROOT, 'hooks', 'dsh-serenity-hooks', 'package.json'))).toBe(true)
-  expect(existsSync(join(SCRIPTS_DIR, 'dsh-develop.ts'))).toBe(true)
+  expect(existsSync(join(SCRIPTS_DIR, 'dsp-develop.ts'))).toBe(true)
 })
 
 /**
@@ -193,11 +193,11 @@ test('typecheck-cli 已退役：恒 exit 2 且印路牌（不再是一道会跑�
  *   - 正控：**新文案必须在场**（否则"旧的不在"可能只是文件没读到 / 路径错了 —— 无法自证的假绿）。
  *
  * ⚠️ 为什么必须是**静态钉**：这三处都在 `console.log/fail` 的**字符串**里，
- *   而现有测试（`dsh-develop.test.ts` 只覆盖版本读取/一致性/bump）**跑不到它们** ——
+ *   而现有测试（`dsp-develop.test.ts` 只覆盖版本读取/一致性/bump）**跑不到它们** ——
  *   "纯逻辑用例全绿"证明不了"这句话印对了"（v1.59.2 那条同族教训）。
  */
 test('A65：处置文案里不得再出现未经取证的断言（反向钉 ＋ 正控）', () => {
-  const src = readFileSync(join(SCRIPTS_DIR, 'dsh-develop.ts'), 'utf-8')
+  const src = readFileSync(join(SCRIPTS_DIR, 'dsp-develop.ts'), 'utf-8')
 
   // 🔴 **必须先剥注释再断言**：这次的修复本身就在注释里**逐字引用了旧文案**（为了说明"原来错在哪"）。
   //   若不剥注释，反向钉会把**解释这条修复的注释**当成"旧文案复现" ⇒ 假红。

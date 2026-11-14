@@ -163,10 +163,10 @@ pnpm test        # 全量测试（vitest）
 pnpm build       # 打包（lib/index.js + client.js）
 ```
 
-- 一条龙开发脚本 = `scripts/dsh-develop.ts`（typecheck / test / build / commit / push / version / bump / deploy / lockfile / host-upgrade / restart-web / publish / pack-check / github-push），子命令看 `--help`。
+- 一条龙开发脚本 = `scripts/dsp-develop.ts`（typecheck / test / build / commit / push / version / bump / deploy / lockfile / host-upgrade / restart-web / publish / pack-check / github-push），子命令看 `--help`。
 - 🔴 **改完 `package.json` 依赖必须跑 `lockfile` 并提交锁文件** —— 漏过一次，CI 从此一直红在「测试根本没跑」。
 - **宿主类型基准 = devDependencies**：两份 `tsconfig` 的 `paths` 指向仓库内 `node_modules/@deepseek-ai/*`，由钉版 devDeps 提供 ⇒ **新增 `paths` 条目必须同时加 devDependency**；闸门是 `tests/compliance.test.ts`。
-- **包内 README 是生成物**：仓根 `README.md` → `hooks/dsh-serenity-hooks/README.md`（`dsh-develop readme-sync`，相对链接转绝对 URL）。**不要手改包内那份。**
+- **包内 README 是生成物**：仓根 `README.md` → `hooks/dsh-serenity-hooks/README.md`（`dsp-develop readme-sync`，相对链接转绝对 URL）。**不要手改包内那份。**
 
 ## 许可
 

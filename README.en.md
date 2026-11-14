@@ -85,11 +85,11 @@ pnpm test        # full test suite (vitest)
 pnpm build       # bundle (lib/index.js + client.js)
 ```
 
-- One-stop dev script: `scripts/dsh-develop.ts` (typecheck / test / build / commit / push / version /
+- One-stop dev script: `scripts/dsp-develop.ts` (typecheck / test / build / commit / push / version /
   bump / deploy / lockfile / host-upgrade / restart-web / publish / pack-check / github-push).
 - 🔴 After touching dependencies in `package.json`, run `lockfile` and commit the lockfile.
 - Host type baseline = devDependencies (`paths` in both tsconfigs point inside the repo).
-- The package README is **generated** from the repo-root README (`dsh-develop readme-sync`).
+- The package README is **generated** from the repo-root README (`dsp-develop readme-sync`).
 
 ## License
 
