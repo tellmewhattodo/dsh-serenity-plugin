@@ -27,10 +27,20 @@ import { resolve, dirname, join, basename, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { spawnSync, execFileSync, spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+// 🔴🔴 **必须是 `./jobs.ts`，⛔ 不是 `./jobs.js`** —— 2026-11-15 真机踩到，形态极坏：
+//   本脚本由**两种解释器**跑：
+//     · `bun scripts/dsp-develop.ts`（人手动 / dev）
+//     · `node --experimental-strip-types scripts/dsp-develop.ts`（**后台 job 进程**，见 spawnRunner）
+//   `./jobs.js` 在 bun 下会被映射到 `jobs.ts`（TS 的 ESM 后缀约定），但 **node 的 strip-types
+//   不做这个映射** ⇒ 后台进程一启动就 `ERR_MODULE_NOT_FOUND` 崩掉。
+//   🔴 **最坏的部分是它静默**：`unref()` + stdio 重定向到文件 ⇒ 父进程拿不到任何错误，
+//   回执照样打印「已起后台续验 job」⇒ 而它根本没跑。
+//   （实测：job 文件停在创建时刻、日志里一行 ERR_MODULE_NOT_FOUND、job 状态永远 running。）
+//   ⇒ 判据：**凡 `.ts` 脚本要被 node strip-types 跑，import 必须写 `.ts` 后缀**（node 认它，bun 也认）。
 import {
   jobsDir, readJob, writeJob, listJobs, pruneJobs, makeJobId, localIso,
   spawnRunner, formatJob, decidePoll, type JobRecord, type JobReading,
-} from './jobs.js'
+} from './jobs.ts'
 
 const __filename = fileURLToPath(import.meta.url)
 const SCRIPTS_DIR = dirname(__filename)

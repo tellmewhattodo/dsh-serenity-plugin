@@ -91,13 +91,13 @@ describe('两层披露树 · 第二层索引', () => {
     ref('a.md', '# A\n')
     const withoutOnto = buildResourceIndex(dir)
     expect(withoutOnto).not.toContain('🧬')
-    expect(withoutOnto).not.toContain('已建模')
+    expect(withoutOnto).not.toContain('This skill is modeled')
 
     writeFileSync(join(dir, SKILL_ONTOLOGY_FILE), '@prefix sr: <x> .\n')
     expect(hasSkillOntology(dir)).toBe(true)
     const withOnto = buildResourceIndex(dir)
-    expect(withOnto).toContain('已建模')
-    expect(withOnto).toContain('🧬 本 skill 的本体约束')
+    expect(withOnto).toContain('This skill is modeled')
+    expect(withOnto).toContain("🧬 This skill's ontology constraints")
   })
 
   // ── 裁决 Q6：旧名 ttl 当**普通参考件**（不特殊对待、不告警）──────────────
@@ -106,7 +106,7 @@ describe('两层披露树 · 第二层索引', () => {
     const out = buildResourceIndex(dir)
     expect(out).toContain('references/home-x-domain.ttl')
     expect(out).not.toContain('🧬')
-    expect(out).not.toContain('已建模')
+    expect(out).not.toContain('This skill is modeled')
     // 固定名才是本体：**只有 skill.ttl 命中**
     expect(hasSkillOntology(dir)).toBe(false)
   })
@@ -153,7 +153,7 @@ describe('两层披露树 · 第二层索引', () => {
   it('🔴 规则③：超条数上限 ⇒ **响亮**写出还剩多少项（J6 正控）', () => {
     for (let i = 0; i < 5; i++) ref(`${i}0-f.md`, `# F${i}\n`)
     const out = buildResourceIndex(dir, { maxItems: 2 })
-    expect(out).toContain('**还有 3 项未列出**')
+    expect(out).toContain('**3 more item(s) not listed**')
   })
 
   it('🔴 规则③：未超限 ⇒ **不得**出现"未列出"那句（J6 负控 —— 否则"响亮"退化成噪声）', () => {
@@ -164,7 +164,7 @@ describe('两层披露树 · 第二层索引', () => {
   it('规则③：超字符上限 ⇒ 截断可见（含"已按 … 上限截断"）', () => {
     for (let i = 0; i < 20; i++) ref(`${i}0-f.md`, `# 标题${i}\n`)
     const out = buildResourceIndex(dir, { maxChars: 300 })
-    expect(out).toContain('上限截断')
+    expect(out).toContain('second-layer index truncated at the')
   })
 
   // ── 规则⑥：子目录**给名字＋计数，但不展开**（真实输入逼出的修订）──────────
@@ -175,7 +175,7 @@ describe('两层披露树 · 第二层索引', () => {
     ref('00-a.md', '# A\n')
     const out = buildResourceIndex(dir)
     // 正控：子目录被列出来（**可行动** —— 模型据此可去 read 里面）
-    expect(out).toContain('| references/sub/ | 子目录 · 2 个文件 |')
+    expect(out).toContain('| references/sub/ | subdirectory · 2 file(s) |')
     expect(out).toContain('references/00-a.md')
     // 负控：内层文件**不**被展开（本层仍不是递归列表）
     expect(out).not.toContain('inner-one.md')
@@ -186,7 +186,7 @@ describe('两层披露树 · 第二层索引', () => {
     mkdirSync(join(dir, REFERENCE_DIR, 'sub', 'deeper'), { recursive: true })
     writeFileSync(join(dir, REFERENCE_DIR, 'sub', 'deeper', 'x.md'), 'x'.repeat(1000))
     const out = buildResourceIndex(dir)
-    expect(out).toContain('| references/sub/ | 子目录 · 1 个文件 | 1,000 |')
+    expect(out).toContain('| references/sub/ | subdirectory · 1 file(s) | 1,000 |')
   })
 
   // ── 字节列的千分位**不依赖 locale** ─────────────────────────────────────

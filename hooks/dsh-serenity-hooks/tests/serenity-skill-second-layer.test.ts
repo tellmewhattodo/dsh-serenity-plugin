@@ -21,7 +21,7 @@ import { buildResourceIndex } from '../src/skills/resource-index.js'
 const BODY_SENTINEL = 'REFERENCE-BODY-MUST-NOT-LEAK-9c1f'
 
 /** 索引块的标题行（三处都应含它；普通 skill 应全无） */
-const INDEX_HEADING = '### 本 skill 的参考件（第二层 · 按需读取）'
+const INDEX_HEADING = '### Reference files for this skill (second layer — read on demand)'
 
 let root: string
 
@@ -87,7 +87,7 @@ describe('P1b · 三个消费点都带第二层（J7）', () => {
     expect(text).toContain('references/00-a.md')
     expect(text).toContain('references/20-b.md')
     expect(text).toContain('🧬')
-    expect(text).toContain('已建模')
+    expect(text).toContain('This skill is modeled')
     // 🔴 J4：参考件**正文一个字都不许漏进注入**
     expect(text).not.toContain(BODY_SENTINEL)
   })

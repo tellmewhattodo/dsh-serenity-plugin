@@ -22,7 +22,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname, basename } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -217,6 +217,84 @@ describe('rebuild-executor：queueRebuild 的门与回落', () => {
     // 生产里 `use` 写活跃存储的 `sessionId` 正是 `extractSessionId(dirName)`，两者天然一致）。
     // ⇒ 错配时以**目录**为准；锚点仍用活跃存储（那是"这次重建叫它什么"的运行时事实，两件事分开）。
     expect(readLastBound(session)?.sessionId2).toBe('no-id-here')
+  })
+})
+
+// ── v1.136.0：LOG 轮转挂在 rebuild 路径上（owner 2026-11-15 令） ─────────────────
+//
+// 判据的来源：原型（S142 的 PROMPT.md 纪律）**验证过效果**，但它是 soft 的 ⇒
+// 失效形态 = 「agent 忘了轮转、LOG 无限长、代数不增、**且无信号**」。
+// 升级到 ACC 层的全部意义 = **忘不忘都一样** ⇒ 本组钉的正是"从 rebuild 走一遍就会轮转"。
+//
+// 🔴 另一条判据（D23 同族：失败不构成阻断）：
+// 轮转失败**不得**让 rebuild 不排队 —— 用秩序换可用性是反方向。
+
+describe('rebuild-executor：LOG 轮转的接线（v1.136.0）', () => {
+  function writeLog(mdPath: string, text: string): void {
+    const d = join(dirname(mdPath), 'LOG')
+    mkdirSync(d, { recursive: true })
+    writeFileSync(join(d, 'LOG.md'), text, 'utf-8')
+  }
+
+  function frozenLogs(mdPath: string): string[] {
+    const d = join(dirname(mdPath), 'LOG')
+    // ⚠️ `existsSync` 对"是个文件"也返回 true ⇒ 必须真 catch（W3 的夹具刻意让 LOG 是文件）
+    try {
+      return readdirSync(d).filter((n) => n.startsWith('LOG-')).sort()
+    } catch {
+      return []
+    }
+  }
+
+  it('W1 rebuild 排队 ⇒ 当前代被冻结、新代出生（**走 queueRebuild，不是直接调 rotate**）', async () => {
+    const session = fakeSession([10, 11])
+    const md = mkSessionDir('2026-11-15--S200--log-rotate')
+    writeLog(md, '# LOG — generation 1\n\n- 有真内容\n')
+    bindSession(session, md)
+
+    await queueRebuild(qctx(session), { root: dir, summary: 'x', agentCwd: dir, dshSessionId: 's1' })
+
+    const frozen = frozenLogs(md)
+    expect(frozen).toHaveLength(1) // 轮转真的发生了
+    expect(frozen[0]).toMatch(/^LOG-\d{4}-\d{2}-\d{2}T\d{4}\.md$/)
+    // 新代存在且**非空**（下一个人打开不是白板）
+    const live = join(dirname(md), 'LOG', 'LOG.md')
+    expect(existsSync(live)).toBe(true)
+    expect(statSync(live).size).toBeGreaterThan(0)
+    // 归档件保留原内容（⛔ 不是被"新代"顶掉）
+    expect(readFileSync(join(dirname(md), 'LOG', frozen[0]!), 'utf-8')).toContain('有真内容')
+  })
+
+  it('W2 没有 LOG 目录 ⇒ 轮转是空操作，**rebuild 照常排队**（⛔ 不为没有日志的轨迹造假归档）', async () => {
+    const session = fakeSession([10, 11])
+    const md = mkSessionDir('2026-11-15--S200--no-log')
+    bindSession(session, md)
+
+    const r = await queueRebuild(qctx(session), { root: dir, summary: 'x', agentCwd: dir, dshSessionId: 's1' })
+    expect(r.queued).toBe(true)
+    expect(pendingRebuildSnapshot().has('s1')).toBe(true)
+    expect(frozenLogs(md)).toHaveLength(0)
+  })
+
+  it('🔴 W3 轮转失败（LOG 位置被一个文件占住）⇒ **rebuild 不被阻断**，队列照写、绑定照记', async () => {
+    const session = fakeSession([10, 11])
+    const md = mkSessionDir('2026-11-15--S200--log-broken')
+    // 让 `LOG` 是个**文件**而不是目录 ⇒ rotateCarrierLog 必抛 ENOTDIR
+    writeFileSync(join(dirname(md), 'LOG'), 'not a directory', 'utf-8')
+    bindSession(session, md)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const r = await queueRebuild(qctx(session), { root: dir, summary: 'x', agentCwd: dir, dshSessionId: 's1' })
+
+    // 判据：主流程（排队 ＋ 绑定）一切正常 —— 这是 D157 的"只有成功才会产生的副作用"那一侧
+    expect(r.queued).toBe(true)
+    expect(pendingRebuildSnapshot().has('s1')).toBe(true)
+    expect(r.sessionMdPath).toBe(md)
+
+    // 🔴 且失败**被说出来**（⛔ 不静默）—— 静默的失败等于"看起来像没轮转"，下一个人无从发现
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('LOG 轮转未执行'))).toBe(true)
+    // 仍然没有归档产物（不是"轮转成了"）
+    expect(frozenLogs(md)).toHaveLength(0)
   })
 })
 

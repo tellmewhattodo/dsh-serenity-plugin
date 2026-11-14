@@ -93,7 +93,7 @@ function viewConfigSummary(root: string): JsonValue {
     cccRoot: root,
     sections: Object.keys(cfg),
     values: toJson(cfg),
-    note: '这是**现值摘要**（只报有值的键、超长已截断）。每段怎么填、填错会怎样 ⇒ container_admin config docs config',
+    note: 'This is a **current-value summary** (only keys with values are shown; long values truncated). How to fill each section, and what a wrong value does ⇒ container_admin config docs config',
   }
 }
 
@@ -113,7 +113,7 @@ const DOMAIN_ALIASES: Record<string, AdminDomain> = {
 const DOMAIN_INTRO: Record<AdminDomain, string> = {
   config:
     'CCC configuration: docs (usage-manual index) / docs <chapter> (one chapter in full) / view (current values) ' +
-    '+ 轨迹约束 (guide/validate/apply/list — the old role domain, merged here)',
+    '+ trajectory constraint (guide/validate/apply/list — the old role domain, merged here)',
   msm: 'MSM registry management: register / deregister / check (DC-M1~M4 quality) / guide (dev manual) / catalog (ACC capability directory) / ccc-config (CCC config reference)',
 }
 
@@ -156,7 +156,7 @@ export function createContainerAdminTool(ctx: Context) {
     description:
       'Container administration (the ship\'s maintenance bay — one entry for managing the CCC): ' +
       'config — CCC configuration: docs (usage-manual index) / docs <chapter> (one chapter in full) / view (current values) ' +
-      '+ 轨迹约束 (guide/validate/apply/list); ' +
+      '+ trajectory constraint (guide/validate/apply/list); ' +
       'msm — MSM registry management (register/deregister/check quality DC-M1~M4) + manuals (guide dev manual / catalog ACC capability directory / ccc-config CCC configuration reference). ' +
       // 🔴 2026-10-20：把两个"轨迹自己的手册"提到顶层描述里。
       //    为什么必须在这里（R↓）：此前「怎么写章程／怎么声明常驻」藏在 config docs 的第二章，
@@ -175,7 +175,7 @@ export function createContainerAdminTool(ctx: Context) {
         type: 'string',
         enum: DOMAIN_NAMES,
         required: true,
-        description: 'Management domain: config (CCC configuration + 轨迹约束) / msm (MSM registry + manuals)',
+        description: 'Management domain: config (CCC configuration + trajectory constraint) / msm (MSM registry + manuals)',
       },
       action: {
         type: 'string',
@@ -250,12 +250,12 @@ export function createContainerAdminTool(ctx: Context) {
           case '': {
             return {
               config: viewConfigSummary(root),
-              docs: '完整配置说明（每段怎么填、填错会怎样）→ container_admin config docs config',
+              docs: 'Full configuration reference (how to fill each section, what a wrong value does) → container_admin config docs config',
             }
           }
           // ── 原 role 域四动作（并入本域） ──
           // `guide` 降为指针（v1.75.0，owner 裁 Q3）：正文唯一入口 = `docs trajectory-constraint`
-          case 'guide': return { guide: docsPointer('trajectory-constraint', '轨迹约束教程') }
+          case 'guide': return { guide: docsPointer('trajectory-constraint', 'trajectory constraint guide') }
           case 'validate': return validateTrajectoryConstraint(root)
           case 'apply': return applyTrajectoryConstraint(root)
           case 'list': return listTrajectoryConstraintSummary(root)

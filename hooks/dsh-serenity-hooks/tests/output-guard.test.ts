@@ -251,16 +251,17 @@ describe('output-guard-seam: turn-stopping 接线（v1.26.3）', () => {
     expect(f.steers).toEqual([])
   })
 
-  it('🔴 `acp-` 前缀会话仍被判为外部面（**死判据但契约仍在**，2026-10-15 面 E 退役后仍钉）', () => {
-    // ⚠️ 该前缀**从无生产者**（历史 acp-core 建的是 轨迹约束- 前缀会话），面 E 退役后更不会出现。
-    //    本用例**刻意保留**：它钉的是 isExternalFaceSession 的**契约**（前缀命中即算外部面），
-    //    而非"某处真的会产生这种 id"。若将来裁掉该分支（见 §当前状态「观察」的孤儿项），
-    //    本用例应**同批删除**——它正是那条待裁项的机械锚点。
+  it('🔴 反向钉：`acp-` 前缀会话**不再**被特殊对待（2026-11-15 owner 令清除所有 ACP 代码）', () => {
+    // 历史：`isExternalFaceSession` 曾有一条 `sessionId.startsWith('acp-')` —— 那是**死判据**
+    // （该前缀从无生产者；面 E 已于 2026-10-15 退役）。2026-11-15 owner 明令「ACP 所有代码清除」
+    // ⇒ 分支删除。本用例由"钉住契约仍在"翻转为"**钉住它已不在**"。
+    // 🔴 为什么保留而不是直接删用例：删了就没有任何东西阻止别人**悄悄把它加回来**。
+    //    现在这条会红 —— 红的意思是"acp- 又被当外部面了，你去看看是谁加回来的"。
     const f = fakeCtx('acp-session-uuid')
     registerOutputGuardHook(f.ctx as never)
     f.agent.session.events.push({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'vlm-describe 输出' }] } } })
     f.fire(1)
-    expect(f.steers.length).toBe(1)
+    expect(f.steers.length).toBe(0)
   })
 
   it('非 CCC 目录（无 .serenity）→ 零干预', () => {

@@ -61,6 +61,7 @@ import { DEFAULT_FAKE_INITIAL_MESSAGES } from '../seams/bootstrap.js'
 import { eventToken, REBUILD_TODO_FILENAME } from './assistant.js'
 import { appendBound, readLastBound } from './bound.js'
 import { isoLocal } from '../kernel/time.js'
+import { rotateCarrierLog } from './carrier-log.js'
 
 /** acknowledge 尾句（fake-initial-turns 的确认要求——rebuild 重建后不重走确认轮，直接继续） */
 const ACK_SUFFIX_RE = /Please simply reply "acknowledge" — no action needed\.\s*$/
@@ -334,6 +335,35 @@ export async function queueRebuild(
   // 它决定落盘内容）。展示码现在由 `readLastBound` 从目录名派生到 `sessionId2`。
   const boundRec = { dirName, mdPath, note: 'rebuild queued' }
   appendBound(session, 'rebuild', boundRec)
+
+  // ②b 🔴 **LOG 轮转（v1.136.0，owner 2026-11-15 令）** —— 把「LOG 式交接记忆」从
+  //     S142 轨迹的 **PROMPT.md 纪律（soft）** 升级为 **ACC 机械动作（hard）**。
+  //
+  //     原型设计件（S142 `references/dual-log-carrier-design.md` §5.2）明写：
+  //       「本实验先用 B（PROMPT.md 纪律）…… 把 B 升级成 A 是另一个裁决」
+  //     ⇒ owner 2026-11-15 给了这个裁决。原型 soft 版的失效形态正是「agent 忘了轮转，
+  //       且无信号」（LOG 无限长、代数不增）—— 现在它挂在 rebuild 路径上，忘不忘都一样。
+  //
+  //     🔴 **失败不阻断 rebuild**：rebuild 是"把上下文救回来"的动作，日志归档是**次要**的；
+  //        让归档失败挡住重建，等于用秩序换可用性，方向反了。
+  //        失败**必须被说出来**（⛔ 不静默），见下方 console.warn 的判据。
+  try {
+    const trajDir = dirname(mdPath)
+    const rot = rotateCarrierLog(trajDir)
+    if (rot.rotated) {
+      // 🔴 回执只说明"我做了 rename"，**不说明目标对** ⇒ 必须查 verified。
+      //    （同族：rename 成功但字节数不同 = 内容没搬全，而那不会自己报错。）
+      if (!rot.verified) {
+        console.warn(`[serenity-hooks] ⚠️ LOG 轮转回读校验失败：${rot.frozenAs} 的字节数不等于轮转前的 ${rot.bytesBefore} B。`
+          + ' rebuild 照常进行；请人工核对 LOG/ 目录。')
+      } else {
+        console.log(`[serenity-hooks] ✓ LOG 轮转：${rot.bytesBefore} B → LOG/${rot.frozenAs}（回读校验通过）`
+          + (rot.renamedFrom !== null ? `；原定名 ${rot.renamedFrom} 已存在 ⇒ 改名避让（⛔ 未覆盖）` : ''))
+      }
+    }
+  } catch (e) {
+    console.warn(`[serenity-hooks] ⚠️ LOG 轮转未执行（${(e as Error).message}）—— rebuild 不受影响`)
+  }
 
   // ③ 排队（覆盖同会话旧队列）——需求②：存 summary + mdPath（turn-stopping 重建后重命名标题）
   pendingRebuilds.set(dshSessionId, { anchor, summary, mdPath, focus, queuedAt: Date.now() })

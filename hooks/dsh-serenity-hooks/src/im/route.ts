@@ -124,9 +124,18 @@ export function readImSettings(root: string, paths: string[] = DEFAULT_SERENITY_
 /**
  * 判别一个 `im` 段是不是**新的统一形态**。
  *
- * 判据 = `accounts` 是数组 **且** 每行（若有）不带退役 ACP 的 `accountId` 之外的 ACP 形状；
- * 退役 ACP 形态的特征是顶层有 `channel:"acp"` 或 `acp` 对象。
+ * 判据 = `accounts` 是数组 **且** 不带已退役 ACP 的形状；
+ * 已退役 ACP 形态的特征是顶层有 `channel:"acp"` 或 `acp` 对象。
  * ⇒ 两者**任一命中**即判为"退役残留"，不认。
+ *
+ * 🔴 **2026-11-15（owner 令清除所有 ACP 代码）—— 本条**刻意保留**，理由要写清**：
+ *   ACP 的**实现**已全部删除（`acp-core` / `acp-http` / 端口 / 配置校验 / 会话前缀分支）。
+ *   但**别的 CCC 的配置文件里可能还留着** `im: {channel:"acp", acp:{…}}` ——
+ *   删掉这条判别 ⇒ 那些残留会被当成新配置读进来 ⇒ 得到一个没有 `accounts` 数组的对象
+ *   ⇒ 表现为**"配置没生效"且不报错**（静默失效，本轨最贵的一类）。
+ *   ⇒ 本函数是**防误读的护栏**，不是"ACP 功能的一部分"。**清功能 ≠ 拆护栏。**
+ *   ⚠️ 本仓自己的 `.opencode/serenity.json` 已无该段（2026-11-15 同批删除），
+ *      所以这条现在**没有已知的存量消费者** —— 它守的是别的容器与将来可能出现的旧配置。
  */
 function isUnifiedImSection(v: unknown): v is ImSettings {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return false

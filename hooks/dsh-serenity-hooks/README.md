@@ -1,6 +1,6 @@
-# 宁静号 ACC —— 给 DeepSeek Harness 装一个「AI 工作区」
+# 宁静号 ACC —— 给 DeepSeek Harness 装一个「认知容器」
 
-> **一句话**：本插件把一个普通目录变成 AI 的**工作区**。进去之后，它自带**记忆、纪律、工具和边界**——
+> **一句话**：本插件把一个普通目录变成 AI 的**认知容器**。进去之后，它自带**记忆、纪律、工具和边界**——
 > 中途换模型、重启机器、次日再来，都从上次停下的地方接着干。
 
 ## 1 它是什么 / 不是什么
@@ -12,10 +12,20 @@
 | **不是** | Agent 框架。不定义 agent loop、不选模型、不做 prompt 编排 —— 那是宿主的事 |
 | **不是** | DSH 的替代或分支。**本插件从不修改宿主本体** |
 | **不是** | 模型路由 / 网关。不代理模型请求，也不替你决定用哪个模型 |
-| **不是** | 某个工作区的私有产物。换一个符合标准的实现，同一个工作区照常工作 |
+| **不是** | 某个容器的私有产物。换一个符合标准的实现，同一个容器照常工作 |
 
-**支持的宿主档位** = 包内 `package.json` 的 `peerDependencies`（现为 `^0.1.7-rc.1 || ^0.2.0-rc.1 || ^0.2.1-rc.1` 三档并行；加档减档以该文件为准）。
+**支持的宿主档位** = 包内 `package.json` 的 `peerDependencies`。
 **当前版本 / 工具数 / 测试规模**：本文一律不写死 —— 版本看 [CHANGELOG.md](https://github.com/tellmewhattodo/dsh-serenity-plugin/blob/master/CHANGELOG.md)，运行态看 `dashboard health`。
+
+### 三个概念（后面所有内容都建在这上面）
+
+| 概念 | 是什么 | 住在哪 |
+|---|---|---|
+| **CCC**（Concrete Cognitive Container） | 一个目录 ＋ 一个 `.serenity` 标记。**没有标记，插件完全不介入** | 就是那个目录 |
+| **认知轨迹**（cognitive trajectory） | 一段**长期工程**，不是一次性对话。它没有生命周期：不完成、不关闭、永存 | `AGENT_SESSIONS/<日期>--<编码>--<名字>/SESSION.md` |
+| **会话**（session） | 轨迹的**可重建载体**。模型会换、上下文会满、进程会重启 —— 换掉载体，轨迹不动 | 宿主侧的会话日志 |
+
+> 一句话读法：**身份属于轨迹，不属于任何一次会话。** 这条区分了整个插件的行为。
 
 ## 2 快速开始（2 分钟）
 
@@ -46,11 +56,11 @@ dsh plugin --profile web add link:$(pwd)/hooks/dsh-serenity-hooks
 
 ⚠️ 不要用 `dsh plugin add github:…`：那个地址指向**仓库根**而不是插件包，装了不生效。
 
-**工作区 = 一个目录 + 一个标记文件**：
+**容器就是一个目录 ＋ 一个标记文件**：
 
 ```
-my-workspace/
-├── .serenity            ← 标记：这个目录是一个工作区（没有它，插件完全不介入）
+my-container/
+├── .serenity            ← 标记：这个目录是一个容器（没有它，插件完全不介入）
 ├── .opencode/skills/    ← 领域技能：一个领域一份知识，可自带小工具
 ├── AGENT_SESSIONS/      ← 库房：每条认知轨迹一个目录，SESSION.md 是它的身体
 └── _tmp/                ← 粘进对话的图片与文件落在这里
@@ -63,28 +73,32 @@ my-workspace/
 ### 3.1 十四个工具（其中三个按条件出现）
 
 > 这份清单**只在这里**（用户视角：能做什么）。**契约语义**（每个动作必须怎样）在标准的 §4，本文不复制。
+> 增减以 `src/kernel/invariant.ts` 的 `REGISTERED_TOOLS` 为准 —— 那份常量由 `tests/compliance.test.ts` 与装配文本对读。
 
 | 工具 | 能做什么 |
 |---|---|
-| `container_fs` | 工作区内的文件操作：列目录 / 树 / 查找 / 复制 / 移动 / 新建 / 追加 / 在文件管理器中打开。往工作区外一步都出不去 |
+| `container_fs` | 容器内的文件操作：列目录 / 树 / 查找 / 复制 / 移动 / 新建 / 在文件管理器中打开。往容器外一步都出不去 |
 | `cognitive_trajectory` | **一条认知轨迹**：它的身体（SESSION.md）+ 时间轴。建 / 看 / 切换 / 原地重建，以及**未来某刻唤醒**（`send-later`）与**即时递话**（`send-now`） |
-| `dashboard` | 常开仪表：`health`（三项自检）/ `time` / `wait` |
+| `dashboard` | 常开仪表：`health`（三项自检）/ `time` / `diag`（运行态诊断） |
 | `container_git` | git：status / commit / push / log / pull / diff。**绝不自动强推** |
 | `msm` | 小工具单入口：`msm("名字", ["参数"])`；记不全给候选；`inspect=true` 看用法 |
 | `praxis` | 按需注入四套方法：`eap`（把话说清）/ `neat`（先对齐再动手）/ `cce`（连续性）/ `ontology`（把领域结构显式化） |
 | `ontology` | 本体工程**引擎**：读 `.ttl`，做结构校验与语义审查、写模板。与 `praxis ontology` 一个说、一个跑 |
 | `serenity-skill-creator` | 增强型技能的创建器：`guide` / `create` / `check` / `review` / `index` / `status` |
-| `localstore` | 凭据与本地偏好：工作区根的 `localstore.json`，默认拒绝入库 |
+| `localstore` | 凭据与本地偏好：容器根的 `localstore.json`，默认拒绝入库 |
 | `container_admin` | 机务舱：`config`（说明目录 / 轨迹约束 / 当前配置）＋ `msm`（注册表管理） |
+| `browser_slot` | **浏览器槽位管理器**（最多 20 个独立 Chrome）：`acquire` / `list` / `release` ＋ 19 个页面动作（`ax` / `click` / `fill` / `wait` / `upload` / `dialog` …）。槽位有归属、有状态；忘了归还时**看守会反过来提醒占用它的会话** |
 | `im-bridge` ● | 给联系人发消息（微信 / 飞书）：文本、文件、联系人、通道状态 |
 | `diagram` ● | 标签源码 → 图，**进程内**光栅化并贴进对话（不起浏览器、不落文件） |
 | `reconstruct` ● | **载体换代**：累计用量过大的会话换一条新会话并归档旧的（与 `rebuild` 并存：一个治日志体积，一个治上下文） |
 
-● = **按条件出现**。条件不满足时**根本注册都不给它**（AI 连看都看不到，也不占上下文）：`im-bridge` 要有已启用的 IM 通道；`diagram` 是实验性功能，**默认关**，开关在设置面板「工具」组；`reconstruct` 只在**本会话累计 token 超过阈值**时才对模型可见（四个用量桶全加，阈值 10 亿 —— 宿主自己的界面 pill 是同一口径）。
+● = **按条件出现**。条件不满足时**根本注册都不给它**（AI 连看都看不到，也不占上下文）：`im-bridge` 要有已启用的 IM 通道；`diagram` 是实验性功能，**默认关**，开关在设置面板「工具」组；`reconstruct` 只在**本会话累计 token 超过阈值**时才对模型可见。
 
-> **运行态诊断**（v1.106.0 起）：原独立工具 `acc-diag` 已并入 **`dashboard` 的 `diag` 动作**（常驻可见，无需任何声明）——live 会话 / 唤醒时钟 / CRO 已启用轨迹 / 唤醒注册表（未来与已过期分列）。`exclusiveTools` 机制同批删除。
+> **运行态诊断**：`dashboard diag`（常驻可见，无需任何声明）—— live 会话 / 唤醒时钟 / CRO 已启用轨迹 / 唤醒注册表（未来与已过期分列）。
 
-> **改名一律硬切、无兼容别名**：`cc_fs` → `container_fs`、`logbook` / `trajectory` → **`cognitive_trajectory`**、`eap` / `neat` / `cce` → `praxis`。读到旧名时按此表换算。
+> **改名一律硬切、无兼容别名**：`cc_fs` → `container_fs`、`logbook` / `trajectory` → **`cognitive_trajectory`**、`eap` / `neat` / `cce` → `praxis`、`acc-diag` → **`dashboard diag`**。读到旧名时按此表换算。
+
+> 🔴 **已退役的动作与键**（读到它们是**上游资料陈旧**，不是你配错了）：`container_fs` 的 `append`（v1.101.0 砍）／`dashboard` 的 `wait`（砍）／`exclusiveTools` 机制（砍）／`weixin.autoReplyWithLastMessage` 与 `weixin.fallbackOnNoSend`（D238 砍）。
 
 ### 3.2 机械约束（AI 绕不过去）
 
@@ -92,14 +106,17 @@ my-workspace/
 
 | 约束 | 你会看到什么 |
 |---|---|
-| **工作区围墙** | 墙内可用，墙外一律拒绝 —— 路径连解析都不做 |
+| **容器围墙** | 墙内可用，墙外一律拒绝 —— 路径连解析都不做 |
 | **安全模式** | `bash` 从工具清单里消失（每一步都同步一次）；即使强行调用也被兜底拒绝 |
 | **治理文件与黑名单** | `.serenity` 等治理文件禁止 AI 写入；其余路径黑名单可配置 |
 | **凭据守卫** | `localstore.json` 对**所有**工具拒绝（含 read / grep / glob）⇒ 密钥值在结构上出不去 |
-| **对外输出守卫** | 对外向的会话（受限轨迹 / 重建会话）若答出敏感词 ⇒ **打回重答**，并告知命中的词与修改方向 |
+| **对外输出守卫** | 对外向的会话若答出敏感词 ⇒ **打回重答**，并告知命中的词与修改方向 |
 | **进度提醒** | 做久了提醒 AI「把进度写回工作日志」，并要求它回一个确认码 —— 提醒是机制，不依赖自觉 |
 | **日志体积治理** | `SESSION.md` 超过阈值 ⇒ 提醒重写（保留骨架 / 细节外移 / 可并则并）。阈值 `sessionKeeper.sessionMdMaxKB`，0 = 关 |
-| **重建前交接** | 重建上下文前，先把「做到哪 / 差什么 / 下一步」写进轨迹目录的 `REBUILD-TODO.md`；重建后的自己先读它 |
+| **日志自动轮转** | 重建上下文时，把细粒度日志 `LOG/LOG.md` **整份冻结**成 `LOG-<时间戳>.md` 并开新代。**重名自动避让、永不覆盖**、冻结后回读校验字节数 |
+
+> **为什么最后一条值得单列**：它原本是「提醒 AI 记得轮转」的一条纪律 —— 而纪律的失效形态是
+> **AI 忘了、没有任何信号、日志无限长**。移到重建路径上之后，忘不忘都一样。
 
 ## 4 对外入口（可选）
 
@@ -107,7 +124,7 @@ my-workspace/
 |---|---|---|
 | DSH 主界面 | 3080 | 本机自用。**插件不碰这个端口**，也不起这个监听器 |
 | 网页登录入口 | 3081（**默认关**） | 手机 / 外网访问完整界面：密码或 6 位动态验证码二选一，按账号失败锁定，登录后反代到 3080 |
-| 微信主动发送口 | 3082（只绑 `127.0.0.1`） | 工作区**外**的脚本用它发微信；工作区内的 AI 不用它，直接用 `im-bridge` |
+| 微信主动发送口 | 3082（只绑 `127.0.0.1`） | 容器**外**的脚本用它发微信；容器内的 AI 不用它，直接用 `im-bridge` |
 | 微信桥 | 无端口（出站长轮询） | 家人在微信里直接跟 AI 说话：扫码绑定，收文字 / 语音 / 图片 / 文件 |
 
 - **会话挂在轨迹上**：同一条轨迹固定同一个会话，重启后历史还在（身份在人这一层之外）。
@@ -118,7 +135,7 @@ my-workspace/
 ## 5 常见问题
 
 **装完没反应？**
-先确认你进的是带 `.serenity` 的目录 —— 不是工作区，插件完全不介入。进去后输入 `dashboard health` 看三项自检。
+先确认你进的是带 `.serenity` 的目录 —— 不是容器，插件完全不介入。进去后输入 `dashboard health` 看三项自检。
 
 **`bash` 怎么不见了？**
 安全模式开着。这是设计，不是故障：关掉胶囊里的 SAFE 滑块就回来。
@@ -136,10 +153,10 @@ my-workspace/
 不用。插件只补 `x-opencode-session` 这一族**缺的**头，**你写过的值一律不动**；环境里有 `OPENCODE_API_KEY` 而一个 opencode 路由都没有时会自动建一条。不需要就关 `opencodeProvider.autoConfigure`。
 
 **微信里 AI 的回复是怎么发出去的？**
-默认由插件把它最后一段话转给用户；配 `autoReplyWithLastMessage: false` 后改由 AI 自己发（`im-bridge`），该发没发会被打回提醒（最多 2 次），再开 `fallbackOnNoSend` 可让插件兜底转达。
+由 **AI 自己发**（`im-bridge`）—— 这是现在**唯一**路径。桥只在两个方向上做事：把入站消息变成一轮对话，以及**当 AI 该发却没发时打回提醒**（最多 2 次）。它不替 AI 说话，也没有兜底转发开关（两个旧开关已退役，见 §3.1）。
 
 **主动发的消息会被记录吗？**
-会，跟回复走同一条记录通道，事件里用 `source` 区分 `reply` / `proactive` / `reply-fallback`。
+会，跟回复走同一条记录通道，事件里用 `source` 区分。
 
 **轨迹声明、定时唤醒、CRO 怎么配？**
 本文不展开，各归其位：**声明面**（`trajectory.json` 能写什么、缺省是什么）在标准 §3.0.1；**工具自带手册**是 `container_admin config docs trajectory-self`（描述自己）与 `config docs trajectory-constraint`（限制自己）；**CRO 编写指南**是 `cognitive_trajectory cro-guide`。

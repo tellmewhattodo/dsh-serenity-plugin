@@ -256,7 +256,7 @@ function hydrate(entry: ResourceEntry): ResourceItem | null {
       rel: entry.rel,
       kind: 'dir',
       bytes,
-      excerpt: `子目录 · ${capped ? `≥${groupThousands(files)}` : groupThousands(files)} 个文件`,
+      excerpt: `subdirectory · ${capped ? `≥${groupThousands(files)}` : groupThousands(files)} file(s)`,
       ontology: false,
       key: entry.key,
     }
@@ -312,25 +312,25 @@ export function buildResourceIndex(skillDir: string, options: ResourceIndexOptio
   const hidden = items.length - shown.length
 
   const lines: string[] = [
-    '### 本 skill 的参考件（第二层 · 按需读取）',
-    '> 这里只有**清单**，没有正文：需要时用 `read` 打开下列路径（相对本 skill 目录）。',
+    '### Reference files for this skill (second layer — read on demand)',
+    '> Listing only, no bodies: `read` a path below (relative to this skill directory) when you need it.',
   ]
-  if (modeled) lines.push('> 🧬 **本 skill 已建模**：文字内容以 `skill.ttl` 为总约束。')
-  lines.push('', '| 文件 | 摘要 | 字节 |', '|---|---|---|')
+  if (modeled) lines.push('> 🧬 **This skill is modeled**: the wording is governed by `skill.ttl`.')
+  lines.push('', '| File | Summary | Bytes |', '|---|---|---|')
   for (const item of shown) {
     const label = item.kind === 'dir' ? `${item.rel}/` : item.rel
-    const excerpt = item.ontology ? '🧬 本 skill 的本体约束（已建模）' : item.excerpt
+    const excerpt = item.ontology ? '🧬 This skill\'s ontology constraints (modeled)' : item.excerpt
     lines.push(`| ${label} | ${excerpt} | ${groupThousands(item.bytes)} |`)
   }
   if (hidden > 0) {
     // 规则③：**响亮** —— 必须说清还剩多少项，绝不静默截断
-    lines.push('', `…**还有 ${hidden} 项未列出**（本层单次上限 ${maxItems} 项）。`)
+    lines.push('', `…**${hidden} more item(s) not listed** (this layer's per-call cap is ${maxItems}).`)
   }
 
   const body = lines.join('\n')
   if (body.length <= maxChars) return body
   // 字符上限：**照样响亮**（截断可见，且不改排序/条目内容）
-  return `${body.slice(0, maxChars)}\n…(第二层索引已按 ${groupThousands(maxChars)} 字符上限截断，原文 ${groupThousands(body.length)} 字符)`
+  return `${body.slice(0, maxChars)}\n…(second-layer index truncated at the ${groupThousands(maxChars)}-character cap; full text is ${groupThousands(body.length)} characters)`
 }
 
 /** 目录面（`SkillSummary.description`）用的名字清单 —— **只有名字**，无摘要、无字节 */

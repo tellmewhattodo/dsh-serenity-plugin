@@ -128,8 +128,8 @@ Directory of ACC capabilities — each area lists where to go for details (guide
                          acc_msm 已并入 msm（执行+发现）与 container_admin（管理）——msm("<name>", ["<args>"])；inspect=true 查用法
                          （v1.106.0 已删 exclusiveTools 机制：原专属工具 acc-diag **已并入 dashboard diag**）
   ④ 轨迹约束与对外面  → container_admin config（轨迹约束四动作 guide/validate/apply/list——**原 role 域已并入 config**，旧名作过渡别名仍可用；说明类配置走**两层菜单** config docs 目录 ／ config docs <章节> 详情）
-                         外部程序化接入用官方 dsh --profile acp
-                         ＋ 现成 ACP 客户端；本插件不提供 ACP 面
+                          （2026-11-15 owner 令：**ACP 面已整条下架** —— 代码 / 端口 / 配置校验 / 会话前缀全部清除。
+                           本插件**不提供**任何 ACP 接入面；外部程序化接入口径由宿主侧自行决定，与本插件无关。）
   ⑤ 自主与接入        → cognitive_trajectory send-now（跨轨迹的**即时**递送，**不排队**：live 目标在跑就当场注入当前轮、空闲则立即起轮；非 live 冷载入——等效于直接 wake；**有同步回执**）
                          cognitive_trajectory send-later（跨轨迹的"未来时刻 + 一条 message"；fire-and-forget，无回执无回收）
                          weixin 微信桥（配置/扫码/路由/消息 hook——CCC 侧 weixin-doctor MSM：msm("weixin-doctor", ["guide"])）

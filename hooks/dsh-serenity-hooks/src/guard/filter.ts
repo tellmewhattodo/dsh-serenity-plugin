@@ -46,7 +46,6 @@ const MECHANISM_WORDS: string[] = [
   'fake-initial-turns',
   '拦截缝',
   '装配层',
-  'acp-core',
   'trajectory-session',
   'trajectory-window',
   'trajectory-constraint',

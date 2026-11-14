@@ -165,7 +165,7 @@ describe('P3 · serenity-skill-creator', () => {
     mkdirSync(join(skillsRoot, 'withrefs', 'references'), { recursive: true })
     writeFileSync(join(skillsRoot, 'withrefs', 'references', '10-a.md'), '# 甲\n', 'utf-8')
     const t = await run({ action: 'index', name: 'withrefs' })
-    expect(t).toContain('### 本 skill 的参考件')
+    expect(t).toContain('### Reference files for this skill')
     expect(t).toContain('references/10-a.md')
     expect(t).toContain('甲')
 

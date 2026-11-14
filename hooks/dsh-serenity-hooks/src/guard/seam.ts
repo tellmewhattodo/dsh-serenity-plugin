@@ -10,13 +10,13 @@
  * **本地维护会话（普通 dsh 会话）不检测**——维护会话必然提及机制词
  * （dsh-serenity-hooks/cognitive_trajectory rebuild/mech-registry），打回会瘫痪自身工作。
  *
- * 🔴 **2026-10-15 补注（面 E 退役）**：`acp-` 前缀分支**已成孤儿，但本批不动**。
+ * 🔴 **2026-11-15（owner 令「ACP 已经下架了，所有的代码清除」）：`acp-` 前缀分支已删除。**
  * 判据（两条，实测）：① **该前缀从来没有生产者** —— 历史 `acp-core.ts` 建会话走的是
  * `createTrajectoryAgent`，其 id = `` `轨迹约束-${role}-${uuid}` ``（`trajectory/session.ts`）⇒ `acp-` **从不出现**；
- * ② 面 E 退役后连"本可能产生它的模块"也不在了。⇒ 该分支是**恒 false 的死判据**。
- * ⚠️ **仍不擅自删**：这是**运行时字符串比较**，删它属**行为变更**（不是纯清理），
- * 依本轨既有先例（`cheap-worker-` 前缀孤儿 —— 生产者文件已于 2026-10-28 整条删除，
- * 但四处判断保留作兼容，同族、同判据）⇒ **登记待裁**（见 S142 §当前状态「观察」）。
+ * ② 面 E 退役后连"本可能产生它的模块"也不在了。⇒ 该分支此前是**恒 false 的死判据**。
+ * ⚠️ 此前一轮我登记「不擅自删（删它属行为变更）」；**本次 owner 明令清除所有 ACP 代码** ⇒ 删。
+ * 反向钉：`tests/output-guard.test.ts` 有一条钉「`acp-` 前缀**不再**被特殊对待」——
+ * 万一将来有人复活该前缀，那条会红（而不是静默恢复旧行为）。
  */
 
 import type { Context } from 'cordis'
@@ -36,9 +36,8 @@ import { sessionEvents } from '../trajectory/core.js'
  * **错的**——轨迹约束的身份是轨迹，不再由 id 前缀表达；继续用前缀会漏掉所有
  * "挂在 轨迹约束轨迹上、但 id 不带前缀"的会话（典型 = 微信桥按轨迹派生的会话 id）。
  *
- * ⚠️ `rebuild-` 前缀保留（那是另一件事：重建会话同属对外面，与 轨迹约束 无关）；
- * `acp-` 分支保留但**已是死判据**（无生产者；面 E 已于 2026-10-15 退役）——
- * 理由与"为何不擅自删"见文件头注释。
+ * ⚠️ `rebuild-` 前缀保留（那是另一件事：重建会话同属对外面，与 轨迹约束 无关）。
+ * `acp-` 分支已于 2026-11-15 删除（owner 令清除所有 ACP 代码，见文件头注释）。
  */
 function isExternalFaceSession(sessionId: string | undefined, root: string): boolean {
   if (!sessionId) return false
@@ -48,7 +47,7 @@ function isExternalFaceSession(sessionId: string | undefined, root: string): boo
   //    · 本函数问「它是不是对外面」（输出守卫要不要保护隐私）
   //    受约束的轨迹（IM 会话）**没有**自带章程，但**确实是**对外面 ⇒ 用身份判据会把
   //    它们的输出守卫误关掉，那是一次静默的隐私回归。
-  return isTrajectoryConstrained(root, sessionId) || sessionId.startsWith('acp-') || sessionId.startsWith('rebuild-')
+  return isTrajectoryConstrained(root, sessionId) || sessionId.startsWith('rebuild-')
 }
 
 /** 读会话最后一个 assistant/message 文本（trajectory-session 同款）
@@ -81,7 +80,7 @@ export function registerOutputGuardHook(ctx: Context): void {
   ctx.on('agent/turn-stopping', (payload: { agent?: Agent; turn?: number }) => {
     const agent = payload?.agent
     if (!agent) return
-    // 作用范围（v1.26.3 用户拍板）：仅外部面（轨迹约束/acp/rebuild 前缀）——
+    // 作用范围（v1.26.3 用户拍板）：仅外部面（轨迹约束 / rebuild 前缀）——
     // 本地维护会话（普通 dsh 会话）豁免：维护会话必然提及机制词，打回会瘫痪自身工作
     const sessionId = String((agent.session as { id?: unknown }).id ?? '')
     // 激活门控：只在 .serenity 存在的 CCC 目录检测（非 CCC 目录零干预）
