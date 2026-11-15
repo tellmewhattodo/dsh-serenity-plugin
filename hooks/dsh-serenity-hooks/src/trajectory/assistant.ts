@@ -59,7 +59,7 @@ export const ACK_SKIP_PREFIX = `${ASSISTANT_PREFIX}-skipped`
  * 轮转时**整节搬运**进新代出生头（否则旧代冻结、新代空白 ⇒ 交接断开）。
  *
  * ## 🔴 三处引用同一常量（单一真相源）
- * **写侧** = `seams/keeper.ts` 的 `handoverReminderText()`｜**读侧** = `trajectory/rebuild.ts` 的重建锚点｜
+ * **写侧** = `seams/cognitive-trajectory-lifecycle.ts` 的 `handoverReminderText()`｜**读侧** = `trajectory/rebuild.ts` 的重建锚点｜
  * **搬运** = `trajectory/carrier-log.ts` 的 `rotateCarrierLog()`。
  * 节名一旦漂移，写侧写的东西读侧就找不到，**且没有任何机械信号会报警**。
  */

@@ -26,7 +26,7 @@ import { localstoreTool } from './tools/localstore/index.js'
 import { createContainerAdminTool } from './tools/container-admin.js'
 import { registerGuards } from './seams/guards.js'
 import { registerBootstrap } from './seams/bootstrap.js'
-import { registerKeeper } from './seams/keeper.js'
+import { registerKeeper } from './seams/cognitive-trajectory-lifecycle.js'
 import { registerContext } from './seams/context.js'
 import { registerEntrySkillSectionGlobal } from './seams/system-prompt.js'
 import { registerCompactRetention } from './seams/compact.js'
@@ -701,7 +701,7 @@ function registerDiagramTool(ctx: Context): void {
 // ── ⚠️ 没有删什么（这个区分是本次最重要的一条）─────────────────────────────────
 //   `trajectory-constraint.json` 那套**轨迹约束面机制**（工具白名单 / 模型 / 纪律参与项）**仍在用**：
 //     · 判据与读盘 = `trajectory/policy/profile.ts`（`trajectoryConstraintForSession`）
-//     · 施加点     = `seams/guards.ts`（工具面收窄）、`seams/keeper.ts`（纪律）
+//     · 施加点     = `seams/guards.ts`（工具面收窄）、`seams/cognitive-trajectory-lifecycle.ts`（纪律）
 //   ⇒ 退役的是"一个调试 HTTP 面"，**不是**"轨迹约束 这个约束面"。
 //   两者同名不是同一件事：面是给人手工问答用的窗口，约束面是轨迹自己的能力边界。
 //

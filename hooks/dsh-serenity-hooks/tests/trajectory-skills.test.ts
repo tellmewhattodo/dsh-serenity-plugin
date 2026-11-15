@@ -51,7 +51,7 @@ import {
 import { readCognitiveTrajectorySkills } from '../src/kernel/ccc.js'
 import { findSkillMd } from '../src/skills/discovery.js'
 import { registerCognitiveTrajectorySkillSection, serenitySystemPrompt } from '../src/seams/system-prompt.js'
-import { cognitiveTrajectoryCompactionReminderText } from '../src/seams/keeper.js'
+import { cognitiveTrajectoryCompactionReminderText } from '../src/seams/cognitive-trajectory-lifecycle.js'
 
 let dir: string
 let seq = 0

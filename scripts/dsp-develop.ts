@@ -321,7 +321,6 @@ function cmdTest(filter?: string): void {
   const m = r.stdout.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/)
   console.log(m ? `[dsp-develop] ✓ 测试通过 (${m[1]} files / ${m[2]} tests)` : '[dsp-develop] ✓ 测试通过')
 }
-
 /** coverage：vitest --coverage（v1.28.0 可测试可验证——coverage 阈值门禁见 hooks vitest.config.ts）。
  *  从 HOOKS_DIR 运行：coverage-v8 装在 hooks 自身 node_modules（根 node_modules 无），
  *  且 hooks/vitest.config.ts 定义 coverage 范围 = hooks src。
@@ -383,8 +382,22 @@ function cmdCoverage(): void {
   console.log('[dsp-develop] ✓ coverage 门禁通过（报告：hooks/dsh-serenity-hooks/coverage/）')
 }
 
-function cmdBuild(): void {
-  cmdTypecheck()
+/**
+ * cmdBuild — 构建（默认**自带 typecheck**，`skipTypecheck` 供发布链去重时跳过）。
+ *
+ * 🔴 **2026-11-16 为什么不重复跑 typecheck（实测底数，owner 令「typecheck 优化下 不要重复跑」）**：
+ *   · `typecheck`（node ＋ client 两遍 tsc）实测 **≈163 s**；
+ *   · 全套测试 241 files / **3656 tests** 实测 **≈34 s**；
+ *   · 而 `cmdPublish` 原先是 `cmdTest()` → `cmdBuild()`，**两边各 typecheck 一次** ⇒ 白付 ≈163 s，
+ *     且占整条发布链的绝大多数 —— **比整个测试套件贵约 5 倍**。
+ *   ⇒ 发布会话里改成：`cmdTypecheck()` **跑一次**，然后 `cmdTest()` ＋ `cmdBuild({skipTypecheck:true})`。
+ *
+ * ⚠️ **为什么用参数而不是直接删掉 cmdBuild 里的 typecheck**：单独跑 `dsp-develop build`
+ *   时没有别处替它把关，删掉就等于**build 不再验类型**（判据 43：退役要素要么留钉要么有替代）。
+ *   ⇒ 保留默认行为，**只让发布链这一个调用点显式声明"我已经验过了"**。
+ */
+function cmdBuild(opts: { skipTypecheck?: boolean } = {}): void {
+  if (!opts.skipTypecheck) cmdTypecheck()
   const staging = process.env.DSH_HOME ? join(process.env.DSH_HOME, 'source', 'current') : resolve(process.env.HOME ?? '', '.dsh', 'source', 'current')
   const stagingRoot = readlinkSafe(staging)
   if (!existsSync(join(HOOKS_DIR, 'tsdown.config.ts'))) fail('tsdown.config.ts 缺失', 2)
@@ -599,10 +612,19 @@ function cmdPublish(): void {
   // v1.31.11（用户裁决 D52"检查归发布机制"）：前置补**锁文件一致性判定**——GitHub CI 不再是
   // 我们的质量门（用户"我对 github ci 持反对态度"），原先由 CI 的 `Install (hooks)` 兜住的
   // "锁文件漂移"改由发布链在 publish 前拦下。
-  // 发布链的检查面（= 我们的门）：锁文件一致 → 测试（含 typecheck 双面）→ 构建 → README 同步 → tarball 核对。
+  // 发布链的检查面（= 我们的门）：锁文件一致 → typecheck（**一次**）→ 测试 → 构建 → README 同步 → tarball 核对。
+  //
+  // 🔴 **2026-11-16 改动（owner 令「typecheck 优化下 不要重复跑」）**：
+  //   原先 = `cmdTest()` → `cmdBuild()`，而 `cmdBuild()` 内部**又调一次 `cmdTypecheck()`**。
+  //   实测 typecheck ≈163 s（node ＋ client 两遍 tsc）、全套 3656 条测试 ≈34 s
+  //   ⇒ 重复的那一次是全链里最贵的一段，且它**什么都没多验**（同一份源码、同一个 tsconfig、中间无改动）。
+  //   ⇒ 现在：**显式跑一次 `cmdTypecheck()`**，`cmdBuild({ skipTypecheck: true })` 不再重复。
+  //   ⛔ **不是"少验了一次类型"**：typecheck 仍是发布前的必过门，只是从 2 次变 1 次。
+  //   判据可证伪 = 故意引入一个类型错误，发布链必须仍在此处红。
   verifyLockfile()
+  cmdTypecheck()
   cmdTest()
-  cmdBuild()
+  cmdBuild({ skipTypecheck: true })
   syncPackageReadme()
   verifyTarball()
   const cache = join(process.env.HOME ?? '', '.cache', 'npm-publish')

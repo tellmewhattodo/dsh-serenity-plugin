@@ -12,7 +12,7 @@
  * 不再靠翻会话记录猜）⇒ 它的读数**写坏了没人会立刻发现**，只会让清理决策建立在错数上。
  *
  * ## 🔴 开工第一步 = 按【被测符号】核对既有登记（纪律 ⑯ ＋ ㉔ 逐【分支】而非逐文件）
- * grep `usage-stats.js` ⇒ import 点 = `seams/keeper.ts` ／ `seams/system-prompt.ts`；
+ * grep `usage-stats.js` ⇒ import 点 = `seams/cognitive-trajectory-lifecycle.ts` ／ `seams/system-prompt.ts`；
  * 测试只有 **`usage-stats.test.ts`（245 行 / 19 用例）**，逐块读过其覆盖面
  * （**本件不重做其中任何一条**）：落点与初态 ／ 自增语义（firstAt 不漂 / 重启续算 / 分桶）／
  * 两个 skill 口径不混 ／ **只记名字不记参数**（敏感值不入盘）／ 容错与原子写（损坏自愈 / 容忍手改 /

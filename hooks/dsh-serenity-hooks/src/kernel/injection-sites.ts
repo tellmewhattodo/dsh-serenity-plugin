@@ -112,9 +112,16 @@ export const INJECTION_SITES: readonly InjectionSite[] = [
   },
   {
     id: 2,
-    name: 'keeper 提醒（CHECKPOINT/LIMIT/COMPACTION/SCRATCH PRUNE）',
-    at: 'seams/keeper.ts:581',
-    textFrom: 'keeper 提示构造',
+    // 🔵 2026-11-16：本文件由 `seams/keeper.ts` 改名为 `seams/cognitive-trajectory-lifecycle.ts`
+    //    （职责只剩轨迹生命周期；配置键 `cognitiveTrajectory.keeper` 保持不变）。
+    name: '轨迹生命周期提醒（CHECKPOINT/HANDOVER/COMPACTION/SCRATCH PRUNE）',
+    // 🔴 **符号锚，不是行号**（2026-11-16 修）：原值 `seams/keeper.ts:581` 在改成符号锚时
+    //    文件实际只有 547 行 —— 也就是说**它在我动手之前就早已指错**，而且**零信号**：
+    //    没有任何用例、没有类型检查、没有 lint 会去看这个字符串指向哪一行。
+    //    这正是判据 43 / D151 的形态：**残留引用是零信号熵**，行号是最易腐的那一种引用。
+    //    ⇒ 定位改用「文件 + 导出符号」，行号漂移不再让这条记录说谎。
+    at: 'seams/cognitive-trajectory-lifecycle.ts registerKeeper（reminderText / handoverReminderText / cognitiveTrajectoryCompactionReminderText）',
+    textFrom: '轨迹生命周期提示构造',
     origin: 'acc',
     form: 'notice',
     delivery: 'this-step',

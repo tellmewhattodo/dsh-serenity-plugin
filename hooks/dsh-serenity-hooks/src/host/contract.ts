@@ -333,7 +333,7 @@ export const HOST_EVENTS: readonly HostEventContract[] = [
   { name: 'session/disposed', site: 'seams/lifecycle.ts', impact: 'per-会话内存态不清理（长跑泄漏）', required: false },
   { name: 'settings/document-updated', site: 'opencode-provider.ts, deepseek-vision-patch.ts（ns 过滤复评）', impact: 'opencode 路由 / 多模态补丁热改不再自愈（自动配置仍覆盖首次）', required: false },
   { name: 'tools/pre-execute', site: 'seams/guards.ts', impact: '机械守卫（safe-mode/路径/白名单）失效', required: true },
-  { name: 'tools/post-execute', site: 'seams/keeper.ts', impact: 'cognitive-trajectory-assistant 计分失效', required: false },
+  { name: 'tools/post-execute', site: 'seams/cognitive-trajectory-lifecycle.ts', impact: 'cognitive-trajectory-assistant 计分失效', required: false },
   { name: 'system-prompt/assemble', site: 'seams/bootstrap.ts', impact: '工具目录两阶段装配失效', required: false },
 ] as const
 

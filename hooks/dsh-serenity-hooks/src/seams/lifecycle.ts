@@ -26,7 +26,7 @@ import { stopAllBridges } from '../im/bridge.js'
 import { forgetManualOutputSession } from '../im/guard.js'
 import { forgetImBridgeVisibility, forgetExclusiveToolsVisibility, forgetNonCccToolVisibility, forgetHostScheduleToolHiding, forgetTrajectoryConstraintToolVisibility } from './guards.js'
 import { forgetToolVisibility } from './tool-visibility.js'
-import { forgetLogbookCompactionState } from './keeper.js'
+import { forgetLogbookCompactionState } from './cognitive-trajectory-lifecycle.js'
 import { registerDisposer } from '../host/effect.js'
 
 /** 从 Agent / Session / 事件负载中取会话 id（形状宽容：未知结构返回 null） */

@@ -1,5 +1,13 @@
 /**
- * keeper.ts — 拦截缝：session-keeper（DCP 提醒，post-execute observe-and-enrich）
+ * cognitive-trajectory-lifecycle.ts — 拦截缝：**认知轨迹生命周期**提醒（post-execute observe-and-enrich）
+ *
+ * 🔵 **2026-11-16 改名（原 `seams/keeper.ts`）**：本文件的职责在 v1.13x 后已经**只剩轨迹生命周期**——
+ * 计分 ／ 交接 ／ 上下文压缩 ／ rebuild 提醒，全部围绕"这条认知轨迹该怎么续下去"。
+ * `keeper` 是沿袭 opencode-serenity-plugin 的旧名（session-keeper），**名不副实** ⇒ 改成本名。
+ *
+ * 🔴 **改名边界（重要，别顺手改）**：只改**文件路径与模块 id**。
+ * ⛔ **不改** `cognitiveTrajectory.keeper`（配置键）与 `'keeper'`（轨迹约束子集维度）——
+ * 那两个是**外部契约**：用户 `trajectory-constraint.json` 里写着它们，改一名会让所有存量配置静默失效。
  *
  * 照 dsh-external/tool-failure-guard 模式：先检测计分，`next()` 委托，
  * 再把提醒折叠到返回决策的 additionalContexts（绝不 veto）。
@@ -132,7 +140,7 @@ export function reminderText(code: string): string {
  * 让模型看见两条不同文案 ⇒ 它要判断"我该调哪个" ⇒ 把一个机械决定变成一次思考，
  * 既浪费注意力，又可能选错。
  *
- * 选路由 `keeper.shouldHandover` 一侧机械完成，规则见那里的注释。
+ * 选路由本文件的 `registerKeeper` 一侧机械完成（`selectHandoverPath` 只是纯函数），规则见那里的注释。
  *
  * ⚠️ 便签落点 = `LOG/LOG.md` 的 `## Handover note` 节（2026-11-16 裁定）：
  * 它是**小步落盘的同一块地**，不另立文件；轮转时该节整节搬进新代出生头。

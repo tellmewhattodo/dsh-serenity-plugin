@@ -41,7 +41,7 @@ import {
   __resetLogbookCompactionForTest,
   DEFAULT_SESSION_MD_MAX_KB,
   handoverReminderText,
-} from '../src/seams/keeper.js'
+} from '../src/seams/cognitive-trajectory-lifecycle.js'
 import { unregisterTrajectorySession } from '../src/trajectory/session.js'
 import { resetTrajectorySessions } from '../src/trajectory/policy/window.js'
 import { make轨迹约束Session, 轨迹约束Json } from './helpers/trajectory-constraint-fixture.js'

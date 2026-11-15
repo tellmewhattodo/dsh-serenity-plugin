@@ -39,7 +39,7 @@ import {
   resolveSessionMdPath,
   sanitizeFocusLine,
 } from '../src/trajectory/rebuild.js'
-import { handoverReminderText, readContextPressure } from '../src/seams/keeper.js'
+import { handoverReminderText, readContextPressure } from '../src/seams/cognitive-trajectory-lifecycle.js'
 import { setActiveSessionInfo, resetActiveSessionStore } from '../src/trajectory/core.js'
 import { SESSION_CONTEXT_MARKER } from '../src/trajectory/core.js'
 import { readLastBound, appendBound } from '../src/trajectory/bound.js'

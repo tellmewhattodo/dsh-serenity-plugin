@@ -12,7 +12,7 @@
  * |---|---|---|
  * | 1 | 累计输入 token > 1000m | 阈值 = **1e9**（owner 裁「我这有好几个十亿的」） |
  * | 2 | 隐藏 tool 自动出现 | **`ctx.tools.register(def, { when })`** —— 不是 restrict，见下 |
- * | 3 | 提示词注入 | `seams/keeper.ts` 每轮超阈值注入一句，指明会话 id 与动作 |
+ * | 3 | 提示词注入 | `seams/cognitive-trajectory-lifecycle.ts` 每轮超阈值注入一句，指明会话 id 与动作 |
  * | 4 | 与 rebuild 同语义、区别 = 先建新会话 → 绑轨迹 → 注入继续 → 归档旧的 | 本文件 |
  *
  * ## 🔴 「累计输入 token」到底是哪个量（**判错会让功能在最需要的会话上永不触发**）
@@ -115,7 +115,7 @@ export interface TokenTotals {
  *
  * ⚠️ **必须显式给 keys**（`snapshot(session, ['tokenUsage'])`）：`tokenUsage` 的 `wire`
  *   **没有** `summary: false`（而 `contextPressure` 有）⇒ 走"摘要集"读法拿不到它。
- *   这里直接点名要它，与 `keeper.ts` 的 `readContextPressure`（不传 keys）**走法不同**，不是笔误。
+ *   这里直接点名要它，与 `cognitive-trajectory-lifecycle.ts` 的 `readContextPressure`（不传 keys）**走法不同**，不是笔误。
  *
  * @returns 读不到（投影未装配 / 会话无该格）⇒ `null`，**不回报 0**
  */

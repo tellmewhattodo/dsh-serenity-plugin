@@ -89,7 +89,7 @@ type _SessionsCreate = Expect<Extends<Ret<HostContext['sessions']['create']>, un
 /** CCC 自动发现回落（`surface/debug.ts:103`；v1.31.6 C4 现场：list 形状在 0.1.5 变了） */
 type _PersistenceList = Expect<Extends<Awaited<Ret<HostContext['sessionPersistence']['list']>>, readonly unknown[]>>
 
-/** 上下文压力读数（`seams/keeper.ts:readContextPressure`——rebuild 提醒的输入） */
+/** 上下文压力读数（`seams/cognitive-trajectory-lifecycle.ts:readContextPressure`——rebuild 提醒的输入） */
 type _ProjectionsSnapshot = Expect<Extends<Ret<HostContext['sessionProjections']['snapshot']>, unknown>>
 
 /** shadow-price 定价（`trajectory/rebuild.ts:356` `meter.estimateMessage(message)`） */
@@ -177,7 +177,7 @@ type _SessionHeaderDepth = Expect<Extends<NonNullable<Ret<HostContext['sessions'
 type _PersistenceSnapshotCwd = Expect<Extends<Awaited<Ret<HostContext['sessionPersistence']['list']>>[number]['header']['cwd'], string | undefined>>
 
 /**
- * 上下文压力投影（`keeper.ts` 读 `snap.values.contextPressure.{projectedTokens,contextWindow}`）。
+ * 上下文压力投影（`cognitive-trajectory-lifecycle.ts` 读 `snap.values.contextPressure.{projectedTokens,contextWindow}`）。
  * key 由 `dsh-token-meter` 声明增强进 `SessionProjectionMap`——**投影键改名会在此处红**。
  */
 type _ContextPressure = Expect<Extends<

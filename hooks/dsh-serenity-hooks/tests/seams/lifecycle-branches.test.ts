@@ -129,8 +129,8 @@ vi.mock('../../src/seams/guards.js', async (orig) => {
   }
 })
 
-vi.mock('../../src/seams/keeper.js', async (orig) => {
-  const actual = await orig<typeof import('../../src/seams/keeper.js')>()
+vi.mock('../../src/seams/cognitive-trajectory-lifecycle.js', async (orig) => {
+  const actual = await orig<typeof import('../../src/seams/cognitive-trajectory-lifecycle.js')>()
   return {
     ...actual,
     forgetLogbookCompactionState: (id: string) => {
