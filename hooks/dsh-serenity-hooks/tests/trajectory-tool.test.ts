@@ -41,9 +41,6 @@ vi.mock('../src/trajectory/cleanup.js', async (importOriginal) => {
 })
 
 import { createCognitiveTrajectoryTool } from '../src/tools/cognitive-trajectory.js'
-import { sessionsRootDir } from '../src/trajectory/cleanup.js'
-import { projectDirNameForCwd } from '../src/trajectory/interrupted.js'
-import * as nodeZlib from 'node:zlib'
 import { hasSessionLogById } from '../src/trajectory/cleanup.js'
 import { resetActiveSessionStore, COGNITIVE_TRAJECTORY_ACTIONS } from '../src/trajectory/core.js'
 import { BIND_FILENAME } from '../src/trajectory/bound.js'
@@ -97,30 +94,12 @@ function toolWith(ctx: unknown) {
 }
 
 /**
- * `continue-all-interrupted` 组的靶子会话 id + 其"以 interrupted 结尾"的日志构造器。
- *
- * 🔴 夹具写成**真 zstd 多帧**（每帧一个事件）—— 与 DSH 真机形态一致。
- * 单帧夹具会让"只解第一帧"的实现也变绿，那是假绿。
+ * 🔵 **2026-11-15 移除**：本文件原有一组 `continue-all-interrupted` 夹具
+ * （`LIVE_ID` ＋ `writeInterruptedSessionLog`），随该动作一并删除 —— 动作已从
+ * `COGNITIVE_TRAJECTORY_ACTIONS` 移除，工具面不再有续跑入口。
+ * 中断扫描与续跑的**逻辑**仍由 `src/trajectory/interrupted.ts` 提供并被 scheduler 调用，
+ * 其夹具与用例在 `tests/trajectory/interrupted.test.ts` 里（真 zstd 多帧，与真机同形）。
  */
-const LIVE_ID = 'session-interrupted-fixture'
-
-function writeInterruptedSessionLog(sessionId: string): void {
-  const zstd = (nodeZlib as unknown as { zstdCompressSync?: (b: Buffer) => Buffer }).zstdCompressSync
-  if (zstd === undefined) throw new Error('本机 Node 无 zstdCompressSync，无法构造夹具')
-  // 会话目录要落在本 CCC 推导出的 project 目录下（扫描域由 header.cwd 推导）
-  const projectDir = join(sessionsRootDir(), projectDirNameForCwd(ccc))
-  const sessionDir = join(projectDir, sessionId)
-  mkdirSync(sessionDir, { recursive: true })
-  const events = [
-    { type: 'turn/start', time: 1000, data: { turn: 1 } },
-    { type: 'step/start', time: 1001, data: { turn: 1, step: 1 } },
-    { type: 'turn/end', time: 1002, data: { turn: 1, reason: { kind: 'interrupted' } } },
-    { type: 'step/end', time: 1003, data: { turn: 1, step: 1 } },
-    { type: 'session/end-seed', time: 1004, data: {} },
-  ]
-  const frames = events.map((e) => zstd(Buffer.from(`${JSON.stringify(e)}\n`, 'utf8')))
-  writeFileSync(join(sessionDir, 'session.v4.jsonl.zstd'), Buffer.concat(frames))
-}
 
 /**
  * 🔴 手册**可被发现性**的机械钉（owner 2026-10-20：「这是认知轨迹感知理解这些边界的重要手册」）。
@@ -230,13 +209,20 @@ describe('cognitive_trajectory：工具面', () => {
     // 🔴 2026-10-20（D173 兑现）：10 → **11**（`resident`：常驻名单的只读发现动作）。
     //    ⚠️ 它补的正是 v1.77.1 手册**曾承诺却不存在**的那个动作（D179(a)，S196 踩到）
     //    ⇒ 这个计数不只是加一，它是一条"说明面终于与实现对齐"的证据。
-    // 🔴 2026-10-22：11 → **12**（`interrupted`：以 interrupted 结尾的 dsh 会话只读发现）。
-    //    边界（owner 原话「我们 ACC 不关心周期」）：只出**入口**，周期归调用方的认知轨迹。
-    expect(COGNITIVE_TRAJECTORY_ACTIONS).toHaveLength(13)
+    // 🔴 2026-10-22：11 → 12（`interrupted`）；同日 → 13（`continue-all-interrupted`）。
+    // 🔴🔴 **2026-11-15（owner 令）：13 → 11** —— `interrupted` 与 `continue-all-interrupted`
+    //    **两个动作整体移除**。理由见 `core.ts` 的 `CognitiveTrajectoryAction` 注释：
+    //    ACC 的自动兜底（scheduler 60s tick）已足够可靠，工具上再挂一份能起 agent 的入口
+    //    = 第二真相源，且它把一件已自动化的事重新变成人的义务。
+    //    ⚠️ **能力没删**（scheduler 仍在用 `scanInterruptedSessions`/`createResumeOne`），只删入口。
+    expect(COGNITIVE_TRAJECTORY_ACTIONS).toHaveLength(11)
     expect(COGNITIVE_TRAJECTORY_ACTIONS).toContain('archive')
     expect(COGNITIVE_TRAJECTORY_ACTIONS).toContain('uid')
     expect(COGNITIVE_TRAJECTORY_ACTIONS).toContain('resident')
-    expect(COGNITIVE_TRAJECTORY_ACTIONS).toContain('interrupted')
+    // 🔴 **反向钉**（2026-11-15）：这两个动作**已移除**，将来谁把它们加回来必须变红。
+    //    同族纪律 #43：退役要留「旧形态不再出现」的钉，否则下一个我会"顺手"加回去而无人报警。
+    expect(COGNITIVE_TRAJECTORY_ACTIONS).not.toContain('interrupted')
+    expect(COGNITIVE_TRAJECTORY_ACTIONS).not.toContain('continue-all-interrupted')
     for (const k of ['name', 'uid', 'summary', 'target', 'at', 'message', 'note', 'force', 'dryRun']) {
       expect(tool.parameters[k], `缺参数 ${k}`).toBeDefined()
     }
@@ -789,45 +775,12 @@ describe('cognitive_trajectory：uid（🔴 2026-10-19 起写入退役、读取�
     expect((await run({ action: 'uid', name: 'S900' })) as Record<string, unknown>).toMatchObject({ uid: 'good-handle' })
   })
 
-  /**
-   * 🔴 2026-10-22 真机实测踩到的缺陷（v1.87.5 修复）：
-   * `continue-all-interrupted` 需要 `ctx.agents` / `ctx.sessionController` 才能唤醒会话。
-   * 初版从 `execute(args, exec)` 的 `exec` 取 —— 而 `exec` 是宿主 `ToolRunContext`
-   * （= ToolExecution + deferContext…），**不含 cordis 服务** ⇒ 一律 undefined
-   * ⇒ 症状「sessionController 不可用」，而目标会话其实**就在 live 列表里**。
-   *
-   * 这条用例钉住的是**取值来源**：把 live agent 挂在**工厂 ctx** 上（不在 exec 上），
-   * 若实现退回 `exec` ⇒ 必然走到「不可用」分支 ⇒ 红。
-   *
-   * ⚠️ 它与 `createResumeOne` 的单测**不重复**：那边验的是注入逻辑（替身 direct 喂 deps），
-   * 这边验的是**服务从哪儿取**——两者正交，缺了这条就再次"跑绿也照样炸"。
-   */
-  it('🔴 continue-all-interrupted 必须从**工厂 ctx** 取 agents（从 exec 取会拿不到服务）', async () => {
-    const injected: string[] = []
-    const liveAgent = {
-      status: 'idle',
-      followup: (m: unknown) => injected.push(JSON.stringify(m)),
-    }
-    const ctxWithAgents = {
-      get: (n: string) => (n === 'agents' ? { get: (id: string) => (id === LIVE_ID ? liveAgent : undefined) } : undefined),
-    } as never
-
-    // 构造一个"以 interrupted 结尾"的 live 会话日志（真 zstd 多帧，与真机同形）
-    writeInterruptedSessionLog(LIVE_ID)
-    const t = toolWith(ctxWithAgents)
-    const out = (await t.execute({ action: 'continue-all-interrupted', lookbackHours: 8 }, fakeExec())) as string
-
-    expect(out).toContain('已注入 1')
-    expect(out).toContain(LIVE_ID)
-    expect(injected.length).toBe(1)
-  })
-
-  it('🔴 continue-all-interrupted：无 live agent 且无 sessionController ⇒ 如实报"不可用"，不假装成功', async () => {
-    writeInterruptedSessionLog(LIVE_ID)
-    // 工厂 ctx 里两个服务都没有
-    const t = toolWith({ get: () => undefined } as never)
-    const out = (await t.execute({ action: 'continue-all-interrupted', lookbackHours: 8 }, fakeExec())) as string
-    expect(out).toContain('已注入 0')
-    expect(out).toContain('sessionController')
-  })
+  // 🔴🔴 **2026-11-15（owner 令）：本组原有两条 `continue-all-interrupted` 用例已删除。**
+  //    它们测的是 `cognitive_trajectory` 的**续跑入口**（从工厂 ctx 取 agents ／ 无服务时如实报"不可用"），
+  //    而该动作已整体移除（`COGNITIVE_TRAJECTORY_ACTIONS` 13 → 11，见文件上方「工具面」组的反向钉）。
+  //
+  //    ⚠️ **能力没删，判据也没丢**：`scanInterruptedSessions` / `createResumeOne` / `buildContinueText`
+  //    全在 `src/trajectory/interrupted.ts`，且仍由 `wake/scheduler.ts` 的 60s tick 调用 ⇒ 它们的
+  //    单测继续在 `tests/trajectory/interrupted.test.ts` 覆盖。这里删掉的只是"**工具入口**那一层"。
+  //    ⚠️ 顺带登记：这两条本来就挂错了分组（测续跑却挂在 `uid` 组里，历史遗留），借这次一起清掉。
 })

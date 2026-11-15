@@ -857,116 +857,19 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
          */
         return listResident(root)
       }
-      case 'interrupted': {
-        /**
-         * 以未完成轮次结尾的 dsh 会话（owner 2026-10-22 令：**只出入口**）。
-         *
-         * 🔴 **边界（owner 原话：「我们 ACC 不关心周期」）**：本动作**只回答**"此刻哪些会话
-         * 的最后一轮没跑完"，**不判周期、不自动续跑、不改日志**。
-         * 何时扫、续谁、怎么续 = 调用方（CCC 的认知轨迹）的事。
-         *
-         * 🔴 **为什么不是"曾经中断过"**：长会话历史上可中断几十次（实测单会话 33 次）；
-         * 按"曾经"判会把早已恢复的会话全部当成待续 ⇒ 灾难。
-         * 🔴 **判据只在一处**：`trajectory/interrupted.ts` 的 `detectInterruptedEnd`
-         * （⛔ 别在此处复述取值域 —— 2026-10-24 就是这份复述漏掉了 `aborted`）。
-         *
-         * 🔴 **正在跑的会话要排除**：live 会话不该被判成"待续"（它正在跑，不是中断）。
-         */
-        const lookbackHours = typeof args.lookbackHours === 'number' && args.lookbackHours > 0
-          ? args.lookbackHours
-          : DEFAULT_LOOKBACK_MS / 3_600_000
-
-        const sessionsRootPath = sessionsRootDir()
-        // 当前 dsh 会话的 cwd 决定项目目录名（宿主 `--<path-with-dashes>--` 规则）
-        const cwd = exec.agent?.session?.header?.cwd ?? root
-        const projectDir = join(sessionsRootPath, projectDirNameForCwd(cwd))
-
-        const scan = scanInterruptedSessions(projectDir, {
-          lookbackMs: lookbackHours * 3_600_000,
-          // 🔴 A105：排除「此刻在跑轮次」的会话（不是「宿主认识的」）。见 `collectRunningSessionIds` 的注释。
-          liveIds: collectRunningSessionIds(Date.now()),
-        })
-
-        return renderInterruptedScan({ projectDir, lookbackHours, scan })
-      }
-      case 'continue-all-interrupted': {
-        /**
-         * 扫 + 逐条注入续跑消息（owner 2026-10-22 追加令：
-         * 「我希望实现的是 continue-all-interrupted 方法，调用后自动找到 8h 内所有 dsh 会话
-         *   注入简单的 continue 进行唤醒，这样 CCC 就不用动脑子了」）。
-         *
-         * 🔴 **与 `interrupted` 分立而不合并**：前者是**观察**（只读、零副作用），
-         * 后者是**动作**（会真起 agent、真烧算力）。想看一眼清单却误触发全量续跑
-         * 是不可接受的 ⇒ 两个动作各自可调用。
-         *
-         * 🔴 **边界仍是"不判周期"**：何时调用归调用方（CCC 的定时轨迹）。
-         * 本动作只保证"**调用一次就把该做的做完**"。
-         */
-        const lookbackHours = typeof args.lookbackHours === 'number' && args.lookbackHours > 0
-          ? args.lookbackHours
-          : DEFAULT_LOOKBACK_MS / 3_600_000
-
-        // dryRun：只报"会续哪些"，一条都不注入（给调用方一次确认机会）
-        const dryRun = args.dryRun === true
-
-        const sessionsRootPath = sessionsRootDir()
-        const cwdRead = exec.agent?.session?.header?.cwd ?? root
-        const projectDir = join(sessionsRootPath, projectDirNameForCwd(cwdRead))
-
-        const scan = scanInterruptedSessions(projectDir, {
-          lookbackMs: lookbackHours * 3_600_000,
-          // 🔴 A105：同 `interrupted`，排除「此刻在跑轮次」的会话。
-          liveIds: collectRunningSessionIds(Date.now()),
-        })
-
-        if (dryRun) {
-          return renderContinueResult({ projectDir, lookbackHours, scan, outcomes: null, dryRun: true })
-        }
-
-        // 逐条注入（**串行**：冷载入开销大，并发起多个 agent 会互相抢算力）
-        //
-        // 🔴 **必须用工厂参数 `ctx`，不能用 `exec`**（2026-10-22 真机实测踩到）：
-        //    `execute(args, exec)` 的第二参是宿主 `ToolRunContext`（= ToolExecution + deferContext…），
-        //    **不含 cordis 服务**。拿它去 `hostAgents()` / `hostService()` 一律 undefined
-        //    ⇒ 症状是「sessionController 不可用」—— 而那个会话其实**就在 live 列表里**。
-        //    ⇒ 这与 F3「包装对象没有 header」是同一族错误：**服务要从真 ctx 取，不能从别的东西冒充。**
-        const agents = hostAgents(ctx) as { get?: (id: string) => unknown } | undefined
-        const sc = hostService<{
-          resolveAgent?: (id: string) => Promise<{ agent?: unknown; error?: string }>
-        }>(ctx, 'sessionController')
-        const resumeOne = createResumeOne({
-          agents,
-          sessionController: sc,
-          // 🔴 **DII M2 · 注入点 #15**（2026-11-04）：工厂里改走声明层。
-          //    ⚠️ **通道不在这里选** —— 选 steer/followup 的是 `createResumeOne`（含退回逻辑）。
-          //    本工厂只负责"造消息"，这正是 I3：意图定死、通道由上下文落。
-          makeMessage: (text) =>
-            toMessage(
-              makeInjection({
-                origin: 'acc',
-                form: 'notice',
-                summary: '中断兜底继续（工具面）',
-                text,
-                delivery: 'wake-now',
-              }),
-            ),
-        })
-
-        const outcomes: ResumeOutcome[] = []
-        for (const hit of scan.sessions) {
-          try {
-            outcomes.push(await resumeOne(hit))
-          } catch (err) {
-            outcomes.push({
-              sessionId: hit.sessionId,
-              ok: false,
-              error: err instanceof Error ? err.message : String(err),
-            })
-          }
-        }
-
-        return renderContinueResult({ projectDir, lookbackHours, scan, outcomes, dryRun: false })
-      }
+      /**
+       * 🔴 **`interrupted` ／ `continue-all-interrupted` 两个动作已于 2026-11-15 移除（owner 令）。**
+       *
+       * 理由：ACC 的**自动兜底**（`wake/scheduler.ts` 的 60s tick）已经足够可靠，
+       * 它自己扫、自己注入，不依赖任何调用方。工具上再挂一份同样能起 agent 的入口，
+       * 只会制造"两条路做同一件事"的第二真相源 —— 而它的失效形态是**把一件已自动化的事
+       * 重新变成人的义务**（调用方以为自己必须记得调它）。
+       *
+       * ⚠️ **能力没删，只删入口**：`scanInterruptedSessions` / `createResumeOne` /
+       * `buildContinueText` 全部留在 `trajectory/interrupted.ts`，**scheduler 仍在用它们**。
+       *
+       * 恢复方式见 `trajectory/core.ts` 的 `CognitiveTrajectoryAction` 注释。
+       */
       default:
         throw new Error(`Unknown action: ${args.action as string}`)
     }

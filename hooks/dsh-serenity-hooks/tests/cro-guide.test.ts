@@ -74,7 +74,15 @@ describe('CRO 指南: 出口形状（guide 老套路，设计 §8.1）', () => {
     // 9 → 10（2026-10-18 新增 `uid`：认知轨迹的唯一标识符，独立于编码与命名）
     // 10 → 11（2026-10-20 新增 `resident`：常驻名单只读动作，D173 兑现）
     // 11 → 12（2026-10-22 新增 `interrupted`：以 interrupted 结尾的 dsh 会话只读发现）
-    expect(COGNITIVE_TRAJECTORY_ACTIONS).toHaveLength(13)
+    // 12 → 13（同日新增 `continue-all-interrupted`）
+    // 🔴🔴 **13 → 11（2026-11-15 owner 令）：`interrupted` 与 `continue-all-interrupted` 整体移除。**
+    //    这是「动作面 = 单一真相源」这条判据的**第二次兑现**：本文件不复制动作表，只断言派生出来的
+    //    计数与成员关系 ⇒ 删动作时**这里必须跟着红**（本轮它确实红了，正是判据有判别力的证据）。
+    //    ⚠️ 能力没删：scheduler 的 60s tick 仍在用 `scanInterruptedSessions`/`createResumeOne`。
+    expect(COGNITIVE_TRAJECTORY_ACTIONS).toHaveLength(11)
+    // 反向钉（与 trajectory-tool.test.ts 同款）：加回来必须红，⛔ 不许"顺手"恢复
+    expect(COGNITIVE_TRAJECTORY_ACTIONS).not.toContain('interrupted')
+    expect(COGNITIVE_TRAJECTORY_ACTIONS).not.toContain('continue-all-interrupted')
   })
 
   it('指南非空且是多行正文（不是占位符）', () => {

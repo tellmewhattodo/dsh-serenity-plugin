@@ -14,7 +14,47 @@
 
 ---
 
-## v1.136.3 — 2026-11-15（A1 失败回执带出引擎 ERR 行：一条指着不存在的路）
+## v1.136.4 — 2026-11-15（`cognitive_trajectory` 移除两个续跑动作：删入口，不删能力）
+
+owner 令（逐字）：**「我要删的是 我们acc提供的trajectory tool 中的 恢复能力」**
+
+### 改了什么
+
+| 位置 | 动作 |
+|---|---|
+| `src/trajectory/core.ts` | `CognitiveTrajectoryAction` 与 `COGNITIVE_TRAJECTORY_ACTIONS` **13 → 11**，去掉 `interrupted` / `continue-all-interrupted`；原位写了整段移除理由与**恢复方式** |
+| `src/tools/cognitive-trajectory.ts` | `switch` 里那两个 case **整段删除**（−123 行），原位留说明注释指向 `core.ts` |
+
+### 删入口 ≠ 删能力（这一条是本版的判据）
+
+`scanInterruptedSessions` / `createResumeOne` / `buildContinueText` **一个都没删**，
+它们全在 `src/trajectory/interrupted.ts`，且 **`wake/scheduler.ts` 的 60s tick 仍在调用**
+—— 那是容器级自动兜底的唯一实现，**行为与 v1.136.3 完全一致**。
+
+删掉的只是「工具手册上那个同样能起 agent 的入口」。理由（R↓）：
+自动兜底每拍自己扫、自己注入，不需要调用方；工具上再挂一份同能力的入口 =
+**第二真相源**，而它的失效形态比沉默更坏 —— 调用方以为自己必须记得调它，
+于是把一件**已经自动化的事重新变成人的义务**。
+
+### 判据（含变异检验）
+
+- `trajectory-tool.test.ts`：计数 13 → **11** ＋ **反向钉**（`not.toContain` 两动作）。
+- `cro-guide.test.ts`：同一计数的第二处派生点，13 → **11** ＋ 同款反向钉。
+  🔴 它**是本次唯一被真跑红的存量用例** —— 不是缺陷，而是「动作面 = 单一真相源」
+  这条判据在正常工作：不复制动作表、只断言派生结果 ⇒ 删动作时这里必须红。
+- 删掉两条**孤儿用例**（`continue-all-interrupted` 从工厂 ctx 取 agents ／ 无服务时如实报"不可用"）
+  及其专用夹具 `writeInterruptedSessionLog` / `LIVE_ID` / 三个随之失效的 import。
+  ⚠️ 顺带登记：那两条本来就挂错了分组（测续跑却挂在 `uid` 组），历史遗留。
+- **变异检验**：把 `'interrupted'` 加回枚举 ⇒ `trajectory-tool` 与 `cro-guide` **各自精确红 1 条**，
+  且都指向计数断言所在行；还原后 239 files / 3646 tests 全绿。
+
+### 门禁
+
+`typecheck` ✓ ／ `test` **239 files / 3646 tests** ✓（v1.136.3 为 239 / 3648，
+＝ −2 条删掉的孤儿用例）
+
+---
+
 
 > 来源 = **butler 的现场报障**（owner 2026-11-15 转派），我已**独立复现**后修复。
 > butler 同时自查推翻了另一条「A1 与 M1–M10 不是同一道闸」的结论（他做了探针，A1 **确实**解析

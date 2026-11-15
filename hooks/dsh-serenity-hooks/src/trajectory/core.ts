@@ -87,19 +87,27 @@ import { readTrajectoryFile } from './policy/files.js'
  *   🔴 **2026-10-24（owner 报障「不是崩溃的就扫不到」）**："未跑完"有两种宿主写法 ——
  *   `interrupted`（崩溃后 resume 补收尾）与 `aborted`（被正常终止：重启／销毁／用户中断）。
  *   修前只认前者 ⇒ **发布重启这一类整批漏扫**。取值域只在 `trajectory/interrupted.ts` 一处定义。
- * 2026-10-22（owner 追加令「我希望实现的是 continue-all-interrupted 方法，调用后自动找到
- *   8h 内所有 dsh 会话注入简单的 continue 进行唤醒，这样 CCC 就不用动脑子了」）：
- *   新增 **`continue-all-interrupted`** = `interrupted` 的**动作版**（扫 → 逐条注入续跑消息）。
- *   判据（R↓，两者为何并存而不合并）：`interrupted` 是**观察**（只读，零副作用），
- *   `continue-all-interrupted` 是**动作**（会真起 agent、真消耗算力）。
- *   ⇒ 观察与动作**必须分开可调用** —— 想看一眼清单却误触发全量续跑，是不可接受的副作用。
- *   ⚠️ 边界不变：ACC 仍**不判周期**（何时调用归调用方），只是把"调用一次要做完什么"补齐。
+ *
+ * 🔴🔴 **2026-11-15（owner 令）：`interrupted` 与 `continue-all-interrupted` 两个动作已从工具面移除。**
+ *
+ * **移除的理由（这是判据，不是"收拾东西"）**：
+ *   ACC 的**自动兜底**（`wake/scheduler.ts` 的 60s tick）已经**过于可靠**——它每拍自己扫、
+ *   自己注入，不需要任何调用方。⇒ 工具上再挂一份**同样能起 agent、同样烧算力**的入口，
+ *   只增加"两条路都能做同一件事"的第二真相源，而**它的失效形态比沉默更坏**：
+ *   调用方以为自己必须记得调它，于是**把一件已经自动化的事重新变成人的义务**。
+ *
+ * **删的只是"工具面那两个动作"，底层函数一个都没删** ——
+ * `scanInterruptedSessions` / `createResumeOne` / `buildContinueText` **仍被 scheduler 使用**，
+ * 那是自动兜底的唯一实现。⇒ 判据：**删入口 ≠ 删能力**；能力归自动兜底，入口不必重复。
+ *
+ * ⚠️ **恢复这两个动作的方式**（若哪天自动兜底不够用）：把 `'interrupted'` / `'continue-all-interrupted'`
+ *   加回本数组 ＋ 加回 `tools/cognitive-trajectory.ts` 的 `switch`（那两个 case 的正文当时整段删除，
+ *   重建时照 `trajectory/interrupted.ts` 的现有导出写即可——它从没动过）。
  */
-type CognitiveTrajectoryAction = 'list' | 'show' | 'create' | 'use' | 'rebuild' | 'archive' | 'uid' | 'send-now' | 'send-later' | 'cro-guide' | 'resident' | 'interrupted' | 'continue-all-interrupted'
+type CognitiveTrajectoryAction = 'list' | 'show' | 'create' | 'use' | 'rebuild' | 'archive' | 'uid' | 'send-now' | 'send-later' | 'cro-guide' | 'resident'
 
 export const COGNITIVE_TRAJECTORY_ACTIONS: readonly CognitiveTrajectoryAction[] = [
   'list', 'show', 'create', 'use', 'rebuild', 'archive', 'uid', 'send-now', 'send-later', 'cro-guide', 'resident',
-  'interrupted', 'continue-all-interrupted',
 ]
 
 /**
