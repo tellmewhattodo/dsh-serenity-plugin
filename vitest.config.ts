@@ -11,6 +11,13 @@ export default defineConfig({
     // 同一测试跑两遍（实证：固定端口 3182 EADDRINUSE 假失败）。显式排除（含 vitest 默认项，避免覆盖丢失）。
     exclude: ['**/node_modules/**', '**/.pnpm-store/**', '**/dist/**', '**/coverage/**', '**/.git/**'],
     environment: 'node',
+    // 🔴 2026-11-16（真机红转绿后追的根因）：vite 的默认 `cacheDir` 是 `node_modules/.vite`，
+    //    而它按**进程 cwd 的上级链**解析。`dsh-develop coverage` 从 `hooks/` 跑，
+    //    缓存曾落到 **CCC 的 `.opencode/skills/node_modules/.vite`** —— 那个位置会被
+    //    `serenity-skills-ontology.ttl` 的 `forall s in Skill: skillDependsOn(s, HomeSerenity)
+    //    implies s.hasSkillMd == true` 当成一个 skill（缺 SKILL.md ⇒ 合规用例红）。
+    //    ⇒ 症状（本体合规红）与真因（测试缓存在别人家门口）**完全不像**，故钉死在这里。
+    cacheDir: 'node_modules/.vite',
     // coverage 见 hooks/dsh-serenity-hooks/vitest.config.ts（dsh-develop coverage 从 hooks 目录运行——
     // coverage-v8 装在 hooks node_modules；本根配置普通 test 不需要 coverage 依赖）
   },

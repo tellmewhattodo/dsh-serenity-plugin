@@ -16,6 +16,11 @@ export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
     environment: 'node',
+    // 🔴 2026-11-16：钉死缓存目录。默认按 cwd 上级链解析，而 `dsh-develop coverage`
+    //    从本目录（hooks）跑 ⇒ 缓存曾落到 **CCC 的 `.opencode/skills/node_modules/.vite`**，
+    //    被本体公理当成一个缺 SKILL.md 的 skill ⇒ 合规用例红。
+    //    症状与真因完全不像（同族 D252：读数器在跑，读的不是那个量），故在此显式固定。
+    cacheDir: 'node_modules/.vite',
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

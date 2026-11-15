@@ -39,11 +39,11 @@ import {
   resolveSessionMdPath,
   sanitizeFocusLine,
 } from '../src/trajectory/rebuild.js'
-import { rebuildReminderText, readContextPressure } from '../src/seams/keeper.js'
+import { handoverReminderText, readContextPressure } from '../src/seams/keeper.js'
 import { setActiveSessionInfo, resetActiveSessionStore } from '../src/trajectory/core.js'
 import { SESSION_CONTEXT_MARKER } from '../src/trajectory/core.js'
 import { readLastBound, appendBound } from '../src/trajectory/bound.js'
-import { REBUILD_TODO_FILENAME } from '../src/trajectory/assistant.js'
+import { HANDOVER_NOTE_HEADING, LOG_FILE_REL } from '../src/trajectory/assistant.js'
 
 let dir: string
 
@@ -144,35 +144,39 @@ describe('轨迹跟踪器 rebuild（v1.22.4 定稿：复用旧会话 + turn 结�
     expect(a).not.toContain('Continue the work of S')
   })
 
-  // ── v1.49.0 交接协议读侧（owner 2026-09-26 裁决"**砍掉 in-flight**，这正是目的"）：
-  //    rebuild 锚点改指**独立便签文件** REBUILD-TODO.md（文件名常量与写侧同源）──
+  // ── 2026-11-16 交接协议读侧（owner 裁定）：便签住 `LOG/LOG.md` 的 `## Handover note` 节，
+  //    锚点必须**同时**指向当前代与被冻结的上一代（轮转可能把在办状态留在上一代里）──
 
-  it('buildRebuildAnchor：含交界便签读侧指令（文件名常量与写侧同源）', () => {
+  it('buildRebuildAnchor：读侧指 LOG 的 ## Handover note（节名常量与写侧同源）', () => {
     const mdPath = join(dir, 'AGENT_SESSIONS', '2026-08-24--S142--dsp', 'SESSION.md')
     const a = buildRebuildAnchor(dir, 'S142', mdPath)
-    // 与 keeper.rebuildReminderText（写侧）共用同一常量——文件名漂移则读侧找不到写侧写的东西
-    expect(a).toContain(REBUILD_TODO_FILENAME)
-    // 绝对路径与相对路径都给（新我可直接 read，不必自己推导兄弟路径）
-    expect(a).toContain(join(dir, 'AGENT_SESSIONS', '2026-08-24--S142--dsp', REBUILD_TODO_FILENAME))
-    expect(a).toContain('AGENT_SESSIONS/2026-08-24--S142--dsp/' + REBUILD_TODO_FILENAME)
-    // 🔴 便签**不是权威**——明确写出，防新我拿它当状态真相源（它可被随时丢弃）
-    expect(a).toContain('NOT the authoritative state')
-    // 便签缺失时的兜底指引（存量轨迹尚未建该文件 → 重建后不得空转）
-    expect(a).toContain('If it is missing, infer the in-flight items')
-    // 顺序：先读 SESSION.md 全貌 → 再读交界便签
-    expect(a.indexOf(REBUILD_TODO_FILENAME)).toBeGreaterThan(a.indexOf('Read that SESSION.md first'))
+    // 与 keeper.handoverReminderText（写侧）共用同两个常量——漂移则读侧找不到写侧写的东西
+    expect(a).toContain(HANDOVER_NOTE_HEADING)
+    expect(a).toContain(LOG_FILE_REL)
+    // 相对路径给出（新我可直接 read）
+    expect(a).toContain('AGENT_SESSIONS/2026-08-24--S142--dsp/LOG/LOG.md')
+    // 🔴 关键：必须提示**也读被冻结的上一代** —— 轮转把整份 LOG mv 走时，
+    //    在办状态可能还留在上一代里；只指当前代会读到空白。
+    expect(a).toContain('previous generation')
+    expect(a).toContain('LOG-<stamp>.md')
+    // 顺序：先读 SESSION.md 全貌 → 再读交接便签
+    expect(a.indexOf(HANDOVER_NOTE_HEADING)).toBeGreaterThan(a.indexOf('Read that SESSION.md first'))
   })
 
-  it('🔴 buildRebuildAnchor：不再指向已砍掉的 SESSION.md In-flight 段（回归钉）', () => {
+  it('🔴 buildRebuildAnchor：不再指向独立便签文件（回归钉）', () => {
     const mdPath = join(dir, 'AGENT_SESSIONS', '2026-08-24--S142--dsp', 'SESSION.md')
     const a = buildRebuildAnchor(dir, 'S142', mdPath)
+    // 2026-11-16：独立文件整体删除，改住 LOG —— 加回来就是第二个"在办"住处
+    expect(a).not.toContain('REBUILD-TODO')
+    expect(a).not.toContain('handover scratch note')
+    // 旧的 In-flight 段同样不许复活
     expect(a).not.toContain('In-flight (rebuild handover)')
     expect(a).not.toContain('at the very end of SESSION.md')
   })
 
-  it('buildRebuildAnchor：无激活会话名时同样带交界便签读侧指令（非会话相关分支）', () => {
+  it('buildRebuildAnchor：无激活会话名时同样带交接便签读侧指令（非会话相关分支）', () => {
     const a = buildRebuildAnchor(dir, '', join(dir, 'AGENT_SESSIONS', 'SESSION.md'))
-    expect(a).toContain(REBUILD_TODO_FILENAME)
+    expect(a).toContain(HANDOVER_NOTE_HEADING)
   })
 
   // ── v1.29.2（R1）：rebuild 任务焦点传递（note → Task focus 段）──
@@ -511,21 +515,20 @@ describe('轨迹跟踪器 rebuild（v1.22.4 定稿：复用旧会话 + turn 结�
   })
 })
 
-describe('F2: rebuildReminderText（轨迹跟踪器提示，D64：注入不带消耗/阈值数值）', () => {
-  it('不含 K 占用/阈值数值 + 持久轨迹/临时副本语义 + cognitive_trajectory rebuild 引导', () => {
+describe('F2: 交接提醒（HANDOVER，D64：注入不带消耗/阈值数值）', () => {
+  it('不含 K 占用/阈值数值 + 写便签 + rebuild 引导（rebuild ≡ reconstruct 同一条）', () => {
     // 2026-09-16 所有者指令（D64）：判定仍读 K，但**注入文本不得透露消耗与限制**。
-    // 触发判定本身在 keeper.test.ts 的 Tracker 用例里覆盖。
-    const t = rebuildReminderText()
-    expect(t).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT]')
+    // 🔴 2026-11-16：文案改为 HANDOVER（两路共用），旧 `LIMIT`/`persistent body` 断言已随文案退役。
+    const t = handoverReminderText()
+    expect(t).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
     expect(t).not.toContain('930K')
     expect(t).not.toContain('(threshold')
     expect(t).not.toMatch(/Context usage at/)
-    expect(t).toContain('persistent body')
-    expect(t).toContain('rebuildable carrier')
+    expect(t).toContain('LOG/LOG.md')
+    expect(t).toContain('## Handover note')
     expect(t).toContain('cognitive_trajectory rebuild')
-    // v1.24.12 沉淀协议（S142 用户需求）：rebuild 前修订 skill / 新建 skill 写 SESSION 提案
-    expect(t).toContain('revise the relevant existing skill')
-    expect(t).toContain('SESSION.md')
+    // 选路信息不得出现（走哪条路是机械的账）
+    expect(t).not.toContain('reconstruct')
   })
 })
 

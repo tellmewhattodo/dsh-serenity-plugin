@@ -123,23 +123,25 @@ describe('v1.23.3 重建提醒：不做节流（每轮都催）+ 连续 3 轮升
       .join('\n')
   }
 
-  it('每次超阈值都注入（不做节流）', async () => {
+  it('每次超阈值都注入交接提醒（不做节流）', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'keeper-rebuild-'))
     writeFileSync(join(dir, '.serenity'), 'test')
     try {
       const { listener } = captureWithPressure()
-      // 连续两次工具调用 → 每次都注入 [COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT] 提醒（无冷却跳过）
+      // 连续两次工具调用 → 每次都注入交接提醒（无冷却跳过）
+      // 🔴 2026-11-16：`LIMIT` 已并入 `HANDOVER`（rebuild ≡ reconstruct 共用一条注入）。
       const t1 = await runOnce(listener, 's1', dir)
       const t2 = await runOnce(listener, 's1', dir)
-      expect(t1).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT]')
-      expect(t2).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT]')
-      expect(t2).not.toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT · MANDATORY]') // 第 2 轮仍未升级
+      expect(t1).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      expect(t2).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      // 第 2 轮仍未升级：升级档只有语气更硬，**token 不变**（2026-11-16 裁定不加 ESCALATED 标记）
+      expect(t2).not.toContain('STOP:')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('连续 3 轮超阈值未 rebuild → 升级 [COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT · MANDATORY] 强制语气（持续催）', async () => {
+  it('连续 3 轮超阈值未交接 → 升级为 STOP 强制语气（token 不变，持续催）', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'keeper-rebuild-'))
     writeFileSync(join(dir, '.serenity'), 'test')
     try {
@@ -148,11 +150,13 @@ describe('v1.23.3 重建提醒：不做节流（每轮都催）+ 连续 3 轮升
       const t2 = await runOnce(listener, 's2', dir)
       const t3 = await runOnce(listener, 's2', dir)
       const t4 = await runOnce(listener, 's2', dir)
-      expect(t1).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT]')
-      expect(t2).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT]')
-      expect(t3).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT · MANDATORY]') // 第 3 轮升级
-      expect(t3).toContain('mandatory')
-      expect(t4).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT · MANDATORY]') // 升级后持续催（不重置）
+      expect(t1).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      expect(t2).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      // 🔴 升级的**判据是语气**，不是 token：同一个 HANDOVER token 贯穿两档，
+      //    这样模型看到的是"同一件事说得更硬"，而不是"出现了第二件事"。
+      expect(t3).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      expect(t3).toContain('STOP:')
+      expect(t4).toContain('STOP:') // 升级后持续催（不重置）
       // 状态累计可见
       expect(rebuildReminderStateSnapshot().get('s2')?.consecutive).toBeGreaterThanOrEqual(4)
     } finally {

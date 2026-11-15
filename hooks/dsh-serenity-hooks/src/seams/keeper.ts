@@ -23,8 +23,8 @@ import { readSimpleSettings } from '../surface/settings.js'
 import { trajectoryConstraintParticipates } from '../trajectory/session.js'
 import { getActiveSessionInfo } from '../trajectory/core.js'
 import { readLastBound } from '../trajectory/bound.js'
-import { shouldOfferReconstruct, reconstructReminderText } from '../trajectory/reconstruct.js'
-import { eventToken, ACK_PREFIX, ACK_SKIP_PREFIX, REBUILD_TODO_FILENAME } from '../trajectory/assistant.js'
+import { shouldOfferReconstruct, selectHandoverPath, type HandoverPath } from '../trajectory/reconstruct.js'
+import { eventToken, ACK_PREFIX, ACK_SKIP_PREFIX, LOG_FILE_REL } from '../trajectory/assistant.js'
 import { recordToolUsage } from '../surface/usage.js'
 import { PLUGIN_SOURCE } from '../kernel/message-source.js'
 
@@ -123,17 +123,29 @@ export function reminderText(code: string): string {
  * SESSION.md 末尾的段，改指**独立便签文件** `REBUILD-TODO_FILENAME`（轨迹目录下）——
  * 理由见该常量的头注（持久文件 vs 只用一次的交界材料必须分家）。
  */
-export function rebuildReminderText(escalated = false): string {
-  const handover =
-    ` Before rebuilding, write your current in-flight items (the exact step you are in the middle of, `
-    + `what is not finished yet, and what the next action is) into "${REBUILD_TODO_FILENAME}" in this cognitive trajectory's `
-    + `directory — create it if it does not exist. That file is a scratch note for the handover only: `
-    + `no format obligation, no archival duty, safe to discard at any time. The rebuilt conversation reads it first `
-    + `and continues from it.`
+/**
+ * 交接提醒（**rebuild 与 reconstruct 共用同一条文案**，2026-11-16 owner 裁定）。
+ *
+ * 🔴 为什么必须无差别：`rebuild`（原地清空、会话 id 不变）与 `reconstruct`
+ * （另开日志、旧会话归档）对**会话本身**做的是同一件事——**把它换掉**。
+ * 旧日志封不封存、id 变不变，是**机械层的账**，会话不需要知道，也不该据此改变行为。
+ * 让模型看见两条不同文案 ⇒ 它要判断"我该调哪个" ⇒ 把一个机械决定变成一次思考，
+ * 既浪费注意力，又可能选错。
+ *
+ * 选路由 `keeper.shouldHandover` 一侧机械完成，规则见那里的注释。
+ *
+ * ⚠️ 便签落点 = `LOG/LOG.md` 的 `## Handover note` 节（2026-11-16 裁定）：
+ * 它是**小步落盘的同一块地**，不另立文件；轮转时该节整节搬进新代出生头。
+ */
+export function handoverReminderText(escalated = false): string {
   if (escalated) {
-    return `${eventToken('limitMandatory')} Context usage has reached the configured rebuild threshold — you have been reminded repeatedly and have NOT called the cognitive_trajectory rebuild action. This is now mandatory: STOP at the current task step, preserve valuable cognition into the CCC skills (or write a new-skill proposal into SESSION.md), then call cognitive_trajectory rebuild immediately, passing --summary "<content summary ≤20 chars>" (required; the dsh session title is renamed to S###-YYYY-MM-DD-<summary> after rebuild).${handover} The conversation will be cleared and rebuilt in place; SESSION.md is the persistent cognitive trajectory and stays in place — identity continues from it. Do not continue working without rebuilding; this reminder persists until you call cognitive_trajectory rebuild.`
+    return `${eventToken('handover')} Repeatedly unacknowledged. STOP: write "## Handover note" into ${LOG_FILE_REL} `
+      + `(the exact step you are in, what comes next, what is unfinished), then call `
+      + `cognitive_trajectory rebuild --summary "<next phase ≤20 chars>" immediately.`
   }
-  return `${eventToken('limit')} Context usage has reached the configured rebuild threshold. This session is the rebuildable carrier of the cognitive trajectory: SESSION.md is the persistent body, this conversation is only a temporary work copy. Before rebuilding: if this conversation produced valuable cognition, revise the relevant existing skill of this CCC (structure it with eap); if a new skill is warranted, write a short proposal into SESSION.md for the user to review — do not create it yourself.${handover} ACT NOW: at the next natural pause (end of the current task step), call the cognitive_trajectory rebuild action — passing --summary "<content summary ≤20 chars>" describing the next work phase (required; the dsh session title is renamed to S###-YYYY-MM-DD-<summary> after rebuild) — to clear and rebuild this conversation: the current copy is discarded, identity continues from SESSION.md. If you are in the middle of an unbreakable step, continue it, then rebuild at its end. Do not ignore this; rebuild is the expected action, not an option.`
+  return `${eventToken('handover')} This carrier is being retired; the cognitive trajectory continues. `
+    + `Write your in-flight state into ${LOG_FILE_REL} under "## Handover note", then call `
+    + `cognitive_trajectory rebuild --summary "<next phase ≤20 chars>".`
 }
 
 /** 读取会话 contextPressure 投影（sessionProjections 可选服务；未装配返回 null） */
@@ -311,14 +323,15 @@ export function cognitiveTrajectoryCompactionReminderText(input: {
   //    ② `move detail out … references/*.md` —— EAP **推不出**"外移到哪"（EAP 只说 R↓，不指定落点）。
   //       它是一条独立的操作指令，owner 2026-10-21 明确要求保留。
   const principles =
-    'Load eap (praxis eap) first, then refactor SESSION.md end to end under EAP: '
-    + '(1) E↑ — make every variable, boundary and directed relationship explicit; '
-    + '(2) R↓ — carry rationale and rejected alternatives, so the next self can rebuild the reasoning rather than '
-    + 'only the conclusion, and move long evidence chains, logs and reference material out into separate files '
-    + '(e.g. AGENT_SESSIONS/<session>/references/*.md) linked from SESSION.md; '
-    + '(3) S↑ — a structure that regenerates the same way each time instead of a chronological transcript. '
-    + 'The fixed sections are a contract with the harness: keep their order and headings, and rewrite everything '
-    + 'inside them.'
+    'Load eap (praxis eap) first, then restructure it as a layered abstraction tree — do not merely shorten it. '
+    + 'Sort its contents BY NATURE (this is the whole point of the load): '
+    + '(1) process — attempts, dead ends, raw readings — belongs in ' + LOG_FILE_REL + '; '
+    + '(2) evidence and designs — long evidence chains, research, reference material — belongs in '
+    + 'AGENT_SESSIONS/<session>/references/ and is reached by a pointer from SESSION.md; '
+    + '(3) judgement stays in the body — identity and boundaries, decisions with rationale and rejected options, '
+    + 'milestones with evidence pointers, current state, pending rulings. '
+    + 'Keep the fixed sections in this order — 身份与边界 / 权威锚点 / 工作纪律 / 决策 / 日志 / 当前状态 / 待 owner 裁决 '
+    + '— and rewrite everything inside them.'
   // v1.34.1 护栏（规格 docs/cognitive-trajectory-skill-injection.md §4）：compaction 是**唯一会重写 SESSION.md** 的时刻，
   // 也正因此是 frontmatter（轨迹 skill 声明的唯一真相源）最可能被抹掉的时刻——在提醒里点名它。
   // 残余风险（记录在案）：护栏是**文案级**，不是机械强制；文案只此一处，两条提醒共用（防两处漂移）。
@@ -330,84 +343,13 @@ export function cognitiveTrajectoryCompactionReminderText(input: {
   return `${eventToken('compaction')} ${facts}. Pause the current work and compact this cognitive trajectory's log (SESSION.md) before continuing — that log is the persistent body of this cognitive trajectory, and its size is operational entropy (H_op) the container pays on every read. ${principles} ${frontmatterGuard} After rewriting, resume the paused work; this reminder stops once the file is under the limit.`
 }
 
-// ── REBUILD-TODO.md（交界便签）体积超限 → 清理提醒（v1.49.0，owner 2026-09-26 需求）──
-
-/**
- * 交界便签体积上限（KB）—— **硬编码，刻意不设配置键**。
- *
- * 🔴 owner 2026-09-26 裁决（逐字）：*"不需要设定，很多设定项我想砍掉了，好的功能用久了就发现
- * 离不开，就不需要了"* ⇒ **不提供 `sessionKeeper.rebuildTodoMaxKB`**（设计件 Q4 的原倾向被否）。
- * 对照：SESSION.md 的上限**保留可配置**（既有面，本版不动）。
- */
-export const DEFAULT_REBUILD_TODO_MAX_KB = 10
-
-/** 连续超限轮数达此值 → 语气升级（对齐 COMPACTION_ESCALATE_AFTER / REBUILD_ESCALATE_AFTER） */
-const REBUILD_TODO_ESCALATE_AFTER = 3
-
-interface RebuildTodoState {
-  /** 连续超限轮数（文件降回限内即清零 → 清理完成后提醒自动停止） */
-  consecutive: number
-}
-
-const rebuildTodoStates = new Map<string, RebuildTodoState>()
-
-/** 测试/调试：查看交界便签超限提醒状态 */
-export function rebuildTodoStateSnapshot(): ReadonlyMap<string, RebuildTodoState> {
-  return new Map(rebuildTodoStates)
-}
-
-/** 会话销毁/测试重置：清理超限计数（防 per-会话 Map 无界增长） */
-export function forgetRebuildTodoState(scope: string): void {
-  rebuildTodoStates.delete(scope)
-}
-
-/** 测试辅助：清空交界便签提醒状态 */
-export function __resetRebuildTodoForTest(): void {
-  rebuildTodoStates.clear()
-}
-
-/**
- * 交界便签超限提醒文案（v1.49.0）。
- *
- * ## 与 SESSION.md 档的**语义差别**（刻意，不是疏漏）
- *
- * | | SESSION.md 超限（`cognitiveTrajectoryCompactionReminderText`） | 便签超限（本条） |
- * |---|---|---|
- * | 动作 | **重写**（compaction） | **清理／丢弃**（prune） |
- * | 结构义务 | 保 EAP 骨架 ＋ 4 条重写原则 ＋ frontmatter 护栏 | **无** |
- * | 强度 | 升级后**强制**（"STOP…必须先重写"） | 升级后**语气加重，但动作仍只是"清理"** |
- * | 授权 | — | 🔴 **明确授权整份删除** |
- *
- * ## 归属（D23）
- * 机制（文件名 ／ 上限 ／ 注入时机）归 **ACC**；**写什么、怎么组织、何时丢**归 **CCC**。
- * 🔴 owner 裁决（逐字）：*"rebuild 提示 Agent 去写，清空我们就不干涉了，只管最大量"* ⇒
- * **ACC 只提醒，不做任何写／删／归档操作**（自动删 = 数据丢失风险：rebuild 时序上新我还没读就被删）。
- *
- * ## 为什么要求"参照 eap"
- * owner 裁决（逐字）：*"不规定，但要求参照 eap 来编写（这样质量会好点）"* ⇒
- * **不规定内部结构**（不给骨架），但**要求按 EAP 写**（显式 ／ 可重建 ／ 稳定）。
- */
-export function rebuildTodoReminderText(input: {
-  sizeKB: number
-  limitKB: number
-  mdPath: string
-  escalated?: boolean
-}): string {
-  const { sizeKB, limitKB, mdPath, escalated = false } = input
-  const facts = `${REBUILD_TODO_FILENAME} is ${sizeKB} KB (limit ${limitKB} KB): ${mdPath}`
-  const action =
-    `This file is a scratch note for the rebuild handover — it carries no archival duty and you may discard it `
-    + `wholesale at any time. Prune it now, writing in the spirit of eap (praxis eap): `
-    + `(1) delete what is already done; (2) delete what has been superseded; `
-    + `(3) delete what is already recorded in SESSION.md — that file is the cognitive trajectory's persistent body, `
-    + `this one only carries what the next self needs once. Do not restructure it into a formal document: `
-    + `the only mechanical constraint on this file is its size.`
-  if (escalated) {
-    return `${eventToken('scratchPrune')} ${facts} — you have been reminded repeatedly and have NOT pruned it. `
-      + `Prune it now. ${action} This reminder persists until the file is under the limit.`
-  }
-  return `${eventToken('scratchPrune')} ${facts}. ${action} This reminder stops once the file is under the limit.`
-}
+// ── 交界便签的体积提醒已于 2026-11-16 整块退役 ──
+//
+// 原 `rebuildTodoReminderText()` ＋ `DEFAULT_REBUILD_TODO_MAX_KB` ＋ 三个状态函数，
+// 服务对象是**独立文件** `REBUILD-TODO.md`。owner 2026-11-16 裁定：便签改住
+// `LOG/LOG.md` 的 `## Handover note` 节 ⇒ 它随之获得 **LOG 的机械轮转**（有界），
+// 于是"另设一个 10 KB 软上限并提醒人去清理"成为第二套并行的熵管理 —— 删掉。
+// 🔴 判据：**一个有硬轮转的东西，不需要再挂一个软提醒。**
 
 // ── DSH 注册 ──
 
@@ -423,8 +365,10 @@ const trackers = new Map<string, KeeperTracker>()
 
 /** v1.23.3 重建提醒状态：agentId → 连续超阈值累计轮数（进程内存态） */
 interface RebuildReminderState {
-  /** 连续超阈值未 rebuild 的累计轮数（达阈值 → 升级强制提醒） */
+  /** 连续超阈值未交接的累计轮数（达阈值 → 升级强制提醒） */
   consecutive: number
+  /** 本呆机械选定的交接路径（⛔ 不进注入正文，只供诊断与测试观测） */
+  path?: HandoverPath
 }
 /** 连续超阈值轮数达此值 → 升级为 [TRAJECTORY-ESCALATED] 强制语气（此后持续升级催，直到 rebuild） */
 const REBUILD_ESCALATE_AFTER = 3
@@ -492,28 +436,42 @@ export function registerKeeper(ctx: Context, opts: KeeperRegistration = {}): voi
       blocks.push({ type: 'text', text: reminderText(code) })
     }
 
-    // ② 轨迹跟踪器：上下文压力检测（独立——每次工具调用后都查，不依赖计分）
-    // v1.23.3 用户拍板：**不做节流，催就行了**——每次超阈值都注入（每轮都催）；
-    // 连续超阈值 REBUILD_ESCALATE_AFTER 轮仍未 rebuild → 升级 [TRAJECTORY-ESCALATED]
-    // 强制语气，此后持续升级催（不重置，直到 agent 调用 cognitive_trajectory rebuild 压力自然回落）。
-    // 需求①（S142 用户拍板）：判定从窗口比例改为绝对 K——projectedTokens ≥ thresholdK*1000
-    // （纯绝对，无窗口比例上限保护；contextWindow 不再参与判定，压力缺失 contextWindow 也照常触发）
-    // 🔴 2026-09-16（S142 所有者指令，D64）：**判定照旧读 K，但注入文本不再带数值**
-    // （`rebuildReminderText` 参数已退化为仅 escalated；见其头注）。
+    // ② **交接**（2026-11-16 裁定：rebuild ≡ reconstruct 合并为一条注入 ＋ 机械选路）
+    //
+    // 两个量、一条注入：
+    //   · `contextPressure.projectedTokens` —— **当前** prompt 有多大，原地清空后回落；
+    //   · `tokenUsage.totals` 四桶全加     —— **跨轮累加**的用量，原位清空**永不回落**。
+    // ⇒ 必须分开采，但**只能合成一条话**：对会话而言两者都是"你该被换掉了"，
+    //   走哪条路是机械的账（见下方 selectHandoverPath 的判据）。
     if (participatesRebuild) {
       const session = (exec as { agent?: { session?: unknown } }).agent?.session
       if (session) {
+        const thresholdK = readSimpleSettings().rebuildThresholdK
         const pressure = readContextPressure(ctx, session)
-        if (pressure && pressure.projectedTokens > 0) {
-          const thresholdK = readSimpleSettings().rebuildThresholdK
-          if (pressure.projectedTokens >= thresholdK * 1000) {
-            const key = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? 'global'
-            const st = rebuildReminderStates.get(key) ?? { consecutive: 0 }
-            st.consecutive += 1
-            const escalated = st.consecutive >= REBUILD_ESCALATE_AFTER
-            blocks.push({ type: 'text', text: rebuildReminderText(escalated) })
-            rebuildReminderStates.set(key, st)
-          }
+        const contextOver = pressure !== null && pressure.projectedTokens > 0
+          && pressure.projectedTokens >= thresholdK * 1000
+        let totalOver = false
+        try {
+          totalOver = shouldOfferReconstruct(ctx, session)
+        } catch {
+          /* 判据异常不得打断本缝（它每轮都跑）；工具可见性那条 `when` 会独立再判一次 */
+        }
+        if (contextOver || totalOver) {
+          const key = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? 'global'
+          const st = rebuildReminderStates.get(key) ?? { consecutive: 0 }
+          st.consecutive += 1
+          rebuildReminderStates.set(key, st)
+          // 🔴 机械选路（2026-11-16）：`selectHandoverPath` 只用来**记录**本呆会走哪条路，
+          //    ⛔ 不进注入正文 —— 会话不需要知道，也不该据此改变行为（rebuild ≡ reconstruct）。
+          st.path = selectHandoverPath({ contextOver, totalOver }) ?? undefined
+          blocks.push({
+            type: 'text',
+            text: handoverReminderText(st.consecutive >= REBUILD_ESCALATE_AFTER),
+          })
+        } else {
+          // 两个量都回到阈值内（交接已完成）→ 清零，提醒自动停止
+          const key = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? 'global'
+          rebuildReminderStates.delete(key)
         }
       }
     }
@@ -548,58 +506,9 @@ export function registerKeeper(ctx: Context, opts: KeeperRegistration = {}): voi
       }
     }
 
-    // ④ 交界便签（REBUILD-TODO.md）体积检查（v1.49.0，owner 2026-09-26 需求）：
-    // 与 ③ **同形**（同一 post-execute 钩子 ／ 同一 stat 口径 ／ 同一升级机制），但**语义不同**——
-    // ③ 要求"重写 SESSION.md 并保 EAP 骨架"，④ 只要求"**清理便签**"（可整份丢弃、不阻断工作）。
-    // 🔴 **文件不存在 ⇒ 零成本**（`readFileSize` 返回 null ⇒ 直接清零；**不自动创建**——空文件本身即熵）。
-    // 🔴 ACC 只提醒，**不做任何写／删／归档**（owner：*"清空我们就不干涉了，只管最大量"*）。
-    if (trajectoryConstraintParticipates(root, sessionId, 'session')) {
-      const scope = sessionId ?? 'global'
-      const session = (exec as { agent?: { session?: unknown } }).agent?.session
-      const mdPath = resolveActiveSessionMdPath(root, scope, session)
-      const todoPath = mdPath ? join(dirname(mdPath), REBUILD_TODO_FILENAME) : null
-      const size = todoPath ? readFileSize(todoPath) : null
-      if (todoPath && size !== null && size > DEFAULT_REBUILD_TODO_MAX_KB * 1024) {
-        const st = rebuildTodoStates.get(scope) ?? { consecutive: 0 }
-        st.consecutive += 1
-        blocks.push({
-          type: 'text',
-          text: rebuildTodoReminderText({
-            sizeKB: Math.round(size / 1024),
-            limitKB: DEFAULT_REBUILD_TODO_MAX_KB,
-            mdPath: todoPath,
-            escalated: st.consecutive >= REBUILD_TODO_ESCALATE_AFTER,
-          }),
-        })
-        rebuildTodoStates.set(scope, st)
-      } else {
-        // 文件不存在（size === null）或已回到限内 → 清零，提醒自动停止
-        rebuildTodoStates.delete(scope)
-      }
-    }
-
-    // ⑤ 🆕 **载体过大 → `reconstruct` 提醒**（v1.121.0，owner 2026-11-06 令）。
-    //
-    // 与 ② **同族但看的是另一个量**（这一点判错会让整个功能失效，见 `trajectory/reconstruct.ts` 头注）：
-    //   · ② 读 `contextPressure.projectedTokens` —— **当前** prompt 有多大，rebuild 后会回落；
-    //   · ⑤ 读 `tokenUsage.totals` 四桶全加 —— **跨轮累加**的用量，rebuild 后**不回落**。
-    // ⇒ ⑤ 治的是"这条日志本身太大了"，② 治的是"这一轮 prompt 太大了"，两者可以同时成立。
-    //
-    // 🔴 **不 escalete、不重复计数**：`reconstruct` 是不可逆的换代（旧会话被归档），
-    //   催得越勤不等于越好；一句话说清"该调什么"就够。⛔ 也别把它做成"必须"（D255：条件与保证同句）。
-    if (participatesRebuild) {
-      const session = (exec as { agent?: { session?: unknown } }).agent?.session
-      if (session) {
-        try {
-          if (shouldOfferReconstruct(ctx, session)) {
-            const id = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? ''
-            blocks.push({ type: 'text', text: reconstructReminderText(id) })
-          }
-        } catch {
-          /* 判据异常不得打断本缝（它每轮都跑）；工具可见性那条 `when` 会独立再判一次 */
-        }
-      }
-    }
+    // ④ 交界便签体积检查 —— **已于 2026-11-16 整块退役**。
+    //    便签改住 `LOG/LOG.md` 的 `## Handover note` 节 ⇒ 它随之获得 LOG 的**机械轮转**（有界）。
+    //    ⛔ 别再挂第二个"软上限 + 提醒清理"：一个有硬轮转的东西不需要软提醒。
 
     if (blocks.length === 0) return downstream
     // 🔴 **DII M2 · 注入点 #2**（2026-11-04）：改走声明层。

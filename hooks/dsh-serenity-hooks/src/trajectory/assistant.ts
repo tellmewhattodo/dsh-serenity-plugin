@@ -26,21 +26,14 @@
 export const EVENT_LABEL = {
   /** 计分同步提醒（原 TRAJECTORY-STEWARD） */
   checkpoint: 'CHECKPOINT',
-  /** 上下文极限重建提醒（原 TRAJECTORY；LIMIT 替代被否的 BOSS——自然词） */
-  limit: 'LIMIT',
-  /** 极限强制升级（原 TRAJECTORY-ESCALATED） */
-  limitMandatory: 'LIMIT · MANDATORY',
+  /** 交接提醒（rebuild ≡ reconstruct 共用；2026-11-16 由 `limit`/`limitMandatory` 合并而来） */
+  handover: 'HANDOVER',
   /** 重建锚点头部（原 TRAJECTORY-REBUILD） */
   rebuild: 'REBUILD',
   /** 敏感输出边界守卫（原 SERENITY OUTPUT GUARD） */
   guard: 'BOUNDARY GUARD',
   /** SESSION.md 体积超限重写提醒（v1.31.1，S142 用户需求） */
   compaction: 'LOGBOOK COMPACTION',
-  /** **交界便签（REBUILD-TODO.md）体积超限清理提醒**（v1.49.0，owner 2026-09-26 需求）。
-   *
-   *  🔴 **刻意与 `compaction` 分开**：那条要求"**重写 SESSION.md 并保留 EAP 骨架**"，
-   *  本条只要求"**清理便签**"——共用一个 token 会让模型误以为要动 SESSION.md。 */
-  scratchPrune: 'SCRATCH PRUNE',
 } as const
 
 /** 家族标识（所有动态注入统一前缀） */
@@ -56,24 +49,24 @@ export const ACK_PREFIX = `${ASSISTANT_PREFIX}-recorded`
 export const ACK_SKIP_PREFIX = `${ASSISTANT_PREFIX}-skipped`
 
 /**
- * rebuild 交界便签的**文件名**（v1.49.0；owner 2026-09-26 需求）。
+ * 交接便签的**落点**：`LOG/LOG.md` 里的节名（2026-11-16 owner 裁定）。
  *
- * ## 它取代了什么（owner 原话：*"砍掉 in-flight，这正是目的"*）
- * v1.31.1 的交界协议要求把手头事项写进 **SESSION.md 末尾**的 `## In-flight (rebuild handover)` 段。
- * 实测的代价（S142 自身取证）：In-flight 段曾积 **12 块**（含多份**已被取代**的交接），
- * 而 SESSION.md 是**有格式义务**的持久文件（7 段固定 ＋ 粒度受 EAP 约束）⇒
- * ① 持久文件被临时物污染 ② 每次整理都要付"压缩＋归档＋保真"三件套（该文件曾达 292 KB）。
- *
- * ⇒ 分家：**只用一次的交界材料**写进这份**临时便签**（无格式义务、无留档义务、可随时丢弃）。
+ * ## 它取代了什么
+ * v1.49.0 曾把交界材料分家到**独立文件** `REBUILD-TODO.md`。v1.136.0 起 LOG 有了
+ * **机械轮转**（`carrier-log.ts`），于是那个独立文件成了第三种住处——而它要装的东西
+ * （"我卡在哪一步"）本质是**过程留痕**，与 LOG 同性质、同寿命、同策展度。
+ * ⇒ 2026-11-16 owner 裁定：**整体删掉独立文件**，便签住进 LOG 的一节，
+ * 轮转时**整节搬运**进新代出生头（否则旧代冻结、新代空白 ⇒ 交接断开）。
  *
  * ## 🔴 三处引用同一常量（单一真相源）
- * **写侧** = `seams/keeper.ts` 的 `rebuildReminderText()`｜**读侧** = `trajectory/rebuild.ts` 的重建锚点｜
- * **体积提醒** = `seams/keeper.ts` 的 `rebuildTodoReminderText()`。
- * 文件名一旦漂移，写侧写的东西读侧就找不到 —— **且没有任何机械信号会报警**。
- *
- * 🔴 **不得改名**（owner 已具名）。形态 = **固定文件名**（人读友好；比照旧 IN_FLIGHT_HEADING 的取舍）。
+ * **写侧** = `seams/keeper.ts` 的 `handoverReminderText()`｜**读侧** = `trajectory/rebuild.ts` 的重建锚点｜
+ * **搬运** = `trajectory/carrier-log.ts` 的 `rotateCarrierLog()`。
+ * 节名一旦漂移，写侧写的东西读侧就找不到，**且没有任何机械信号会报警**。
  */
-export const REBUILD_TODO_FILENAME = 'REBUILD-TODO.md'
+export const HANDOVER_NOTE_HEADING = '## Handover note'
+
+/** 交接便签在 LOG 里的相对路径（给人读的提示用） */
+export const LOG_FILE_REL = 'LOG/LOG.md'
 
 // ── 风格门面（D8：仅 plain 与 metaphor；无 game 档）──
 
@@ -83,12 +76,10 @@ type CognitiveTrajectoryStyle = 'plain' | 'metaphor'
 /** 星舰词变体（仅在 style=metaphor 时替换可见前缀；正文不动） */
 const METAPHOR_PREFIX: Record<keyof typeof EVENT_LABEL, string> = {
   checkpoint: 'CHECKPOINT',
-  limit: 'CONTEXT LIMIT',
-  limitMandatory: 'CONTEXT LIMIT · MANDATORY',
+  handover: 'HANDOVER',
   rebuild: 'REBUILD',
   guard: 'BOUNDARY GUARD',
   compaction: 'LOGBOOK COMPACTION',
-  scratchPrune: 'SCRATCH PRUNE',
 }
 
 /**

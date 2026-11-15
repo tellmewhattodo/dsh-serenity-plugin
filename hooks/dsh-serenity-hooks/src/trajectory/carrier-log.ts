@@ -52,6 +52,7 @@
 
 import { existsSync, readFileSync, writeFileSync, renameSync, statSync, mkdirSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { HANDOVER_NOTE_HEADING } from './assistant.js'
 
 /** 日志目录名（相对轨迹目录）。owner 2026-11-04 令：日志家族住 `LOG/`，⛔ 不与 `references/` 混放。 */
 export const LOG_DIR = 'LOG'
@@ -107,6 +108,33 @@ function listFrozen(dir: string): string[] {
   }
   // 时间戳命名 ⇒ 字典序即时间序（不需要读 mtime，也不需要指针）
   return names.filter((n) => n.startsWith('LOG-') && n.endsWith('.md')).sort()
+}
+
+/**
+ * 从一份 LOG 正文里抽出 `## Handover note` 整节（含标题，到下一个同级或更高级标题为止）。
+ *
+ * 🔴 **为什么不抽就轮转 = 交接断开**：轮转把整份 `LOG.md` `mv` 成冻结代，新代是空白的。
+ * 若在办状态写在旧代里，新会话读新代 ⇒ **读不到** ⇒ 交接失败，且**没有任何报错**。
+ * 这与"便签必须被交接后的会话完整读到"是同一条判据（2026-11-16 owner 裁定）。
+ *
+ * @returns 该节全文（含标题、去掉尾部空行）；没有该节 ⇒ `null`
+ */
+export function extractHandoverNote(text: string): string | null {
+  const lines = text.split('\n')
+  const head = lines.findIndex((l) => l.trim() === HANDOVER_NOTE_HEADING)
+  if (head < 0) return null
+  // 节止于下一个 `## ` 或更高级标题（`# `/`### ` 之下仍属本节 ⇒ 只有 `## ` 与 `# ` 才算边界）
+  let end = lines.length
+  for (let i = head + 1; i < lines.length; i++) {
+    const t = lines[i]!.trim()
+    if (t.startsWith('## ') || t.startsWith('# ')) {
+      end = i
+      break
+    }
+  }
+  const section = lines.slice(head, end)
+  while (section.length > 0 && section[section.length - 1]!.trim() === '') section.pop()
+  return section.join('\n')
 }
 
 /** 读一个轨迹目录的日志状态（只读，不改任何东西）。 */
@@ -214,10 +242,17 @@ export function rotateCarrierLog(trajectoryDir: string, now: Date = new Date()):
   // 回读校验：目标在，且字节数 == 轮转前
   const verified = existsSync(dst) && statSync(dst).size === bytesBefore
 
-  // ④ 开新代
+  // ④ 开新代（**并搬运交接便签** —— 这一步是"交接后能读到"的机械保证）
   if (!existsSync(live)) {
     const frozen = listFrozen(dir)
-    writeFileSync(live, birthHeader(frozen.length + 1, now, target), 'utf-8')
+    let header = birthHeader(frozen.length + 1, now, target)
+    // 🔴 搬运 `## Handover note` 整节：不搬 ⇒ 新代空白 ⇒ 新会话读到空 LOG ⇒ 交接断开且无报错。
+    //    顺序不可换：必须在 rename **之后**从冻结代读（轮转前读也一样，但从 dst 读最贴近真相）。
+    const note = extractHandoverNote(readFileSync(dst, 'utf-8'))
+    if (note !== null) {
+      header += `${note}\n\n`
+    }
+    writeFileSync(live, header, 'utf-8')
   }
 
   return { rotated: true, frozenAs: target, bytesBefore, verified, renamedFrom }

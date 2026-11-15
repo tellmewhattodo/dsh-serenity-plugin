@@ -40,11 +40,7 @@ import {
   forgetLogbookCompactionState,
   __resetLogbookCompactionForTest,
   DEFAULT_SESSION_MD_MAX_KB,
-  rebuildTodoReminderText,
-  DEFAULT_REBUILD_TODO_MAX_KB,
-  rebuildTodoStateSnapshot,
-  forgetRebuildTodoState,
-  __resetRebuildTodoForTest,
+  handoverReminderText,
 } from '../src/seams/keeper.js'
 import { unregisterTrajectorySession } from '../src/trajectory/session.js'
 import { resetTrajectorySessions } from '../src/trajectory/policy/window.js'
@@ -107,64 +103,40 @@ describe('keeper: 纯跟踪器', () => {
   })
 })
 
-describe('轨迹跟踪器（Cognitive Trajectory Tracker）— v1.22.1 概念命名', () => {
-  it('rebuildReminderText：SESSION.md=持久轨迹，会话=临时可重建工作副本（D64：注入不带数值）', () => {
-    // 需求①（v1.28.0）曾把**判定**从比例改为绝对 K，并顺带让文案显示 K 数值；
-    // 2026-09-16 所有者指令（D64）撤销"文案显示"这一半：**判定照旧读 K，注入文本不带数值**。
-    const text = rebuildReminderText()
-    expect(text).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT]')
-    expect(text).toContain('persistent body')
-    expect(text).toContain('rebuildable carrier')
-    expect(text).toContain('ACT NOW')
+describe('交接提醒（HANDOVER）：rebuild ≡ reconstruct 共用一条注入（2026-11-16 裁定）', () => {
+  it('普通档：一条注入，便签落点 = LOG/LOG.md 的 ## Handover note', () => {
+    const text = handoverReminderText()
+    expect(text).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+    // 唯一动作：写便签 → 调 rebuild（`--summary` 保留：标题命名要靠它）
+    expect(text).toContain('LOG/LOG.md')
+    expect(text).toContain('## Handover note')
     expect(text).toContain('cognitive_trajectory rebuild')
-    expect(text).toContain('not an option')
-    // 🔴 D64 钉子：不得出现上下文消耗 / 阈值**数值**（旧文案 = `Context usage at 412K (threshold 400K)`）
-    //    （"threshold" 一词本身不算违规——见上方 reminderText 用例的判据边界说明）
-    expect(text).not.toContain('412K')
-    expect(text).not.toContain('(threshold')
-    expect(text).not.toMatch(/Context usage at/)
-    // v1.24.12 沉淀协议：rebuild 前修订现有 skill（eap 结构化）；新建 skill 写 SESSION 提案不自行创建
-    expect(text).toContain('revise the relevant existing skill of this CCC')
-    expect(text).toContain('write a short proposal into SESSION.md')
-    expect(text).toContain('do not create it yourself')
-    // v1.28.0 需求②（P0-1 审计补断言）：文案必须指导带 --summary（重建后标题重命名）——
-    // 若删指引，模型裸调 cognitive_trajectory rebuild 会被 summary 必填拒绝（2026-09-05 rebuild bug 教训）
     expect(text).toContain('--summary')
     expect(text).toContain('≤20 chars')
-    expect(text).toContain('renamed to S###-YYYY-MM-DD-<summary>')
-    // v1.49.0 交接协议（写侧，owner 2026-09-26 裁决"砍掉 in-flight"）：改指**独立便签文件**
-    expect(text).toContain('REBUILD-TODO.md')
-    expect(text).toContain('current in-flight items')
-    expect(text).toContain('create it if it does not exist')
-    // 🔴 砍掉 in-flight 的回归钉：写侧**不得**再指向 SESSION.md 末尾的段
-    expect(text).not.toContain('In-flight (rebuild handover)')
-    expect(text).not.toContain('at the very end of SESSION.md')
-    // 便签的性质要在写侧就讲清（无格式义务 / 无留档义务 / 可随时丢弃）
-    expect(text).toContain('no format obligation')
-    expect(text).toContain('safe to discard at any time')
-    // v1.23.3：不向 LLM 植入阈值建议（设定是用户自由）
-    expect(text).not.toContain('0.75~0.9')
+    // 🔴 反向钉：⛔ 不得出现选路信息 —— 走哪条路是机械的账，会话不需要知道
+    expect(text).not.toContain('reconstruct')
+    expect(text).not.toContain('archive')
+    // 🔴 反向钉：独立便签文件已退役
+    expect(text).not.toContain('REBUILD-TODO')
+    expect(text).not.toContain('create it if it does not exist')
   })
 
-  it('rebuildReminderText 升级语气（escalated=true，D64：同样不带数值）', () => {
-    const text = rebuildReminderText(true)
-    expect(text).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · LIMIT · MANDATORY]')
-    expect(text).not.toContain('460K')
-    expect(text).not.toContain('(threshold')
-    expect(text).toContain('mandatory')
+  it('升级档：同一 token、更强语气（⛔ 不换成第二个 token）', () => {
+    const text = handoverReminderText(true)
+    // 判据：升级的是**语气**，不是"出现了第二件事"
+    expect(text).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+    expect(text).not.toContain('MANDATORY') // token 不再分档
     expect(text).toContain('STOP')
+    expect(text).toContain('## Handover note')
     expect(text).toContain('cognitive_trajectory rebuild')
-    expect(text).toContain('persists until you call cognitive_trajectory rebuild')
-    // v1.24.12：升级版同样带紧凑沉淀指令（修订 skill / 新建 skill 提案进 SESSION）
-    expect(text).toContain('preserve valuable cognition')
-    expect(text).toContain('new-skill proposal into SESSION.md')
-    // v1.28.0 需求②（P0-1 审计补断言）：升级版同样指导带 --summary
-    expect(text).toContain('--summary')
-    expect(text).toContain('renamed to S###-YYYY-MM-DD-<summary>')
-    // v1.49.0 交接协议：升级版同样要求写交界便签
-    expect(text).toContain('REBUILD-TODO.md')
-    expect(text).not.toContain('In-flight (rebuild handover)')
   })
+})
+
+describe('轨迹跟踪器：上下文压力读数（readContextPressure）', () => {
+  // 2026-11-16：原「轨迹跟踪器」组的 `rebuildReminderText` 两条用例已删除 ——
+  //   文案整体重写为 HANDOVER（rebuild ≡ reconstruct 共用），旧断言测的是旧文案的每一句
+  //   （`ACT NOW` / `persistent body` / `REBUILD-TODO.md` / `LIMIT · MANDATORY`），
+  //   保留它们等于用一个已不存在的契约定住实现。新契约定在上面的 HANDOVER 组。
 
   it('readContextPressure：sessionProjections 装配时读取投影', () => {
     const session = { id: 's1' }
@@ -258,18 +230,24 @@ describe('keeper: LOGBOOK COMPACTION（SESSION.md 体积超限重写提醒，v1.
     expect(t).toContain('limit 1 KB')
     expect(t).toContain('SESSION.md')
     expect(t).toContain('praxis eap')
-    // 🔴 v1.84.0（owner 2026-10-21 令）：文案从「4 条重写原则」换成「按 EAP 重构整个 SESSION.md」。
-    //    被取代的旧断言（keep the EAP layered skeleton ／ merge or drop ／ full discretion ／
-    //    reconstruction over preservation）**不再钉**——它们钉的是一个已被删除的文案形态，
-    //    留着只会让下一版以为那四条还在。取代它的是 EAP 的三个变量 + 两条硬约束。
-    expect(t).toContain('refactor SESSION.md end to end under EAP')
-    expect(t).toContain('E↑')
-    expect(t).toContain('R↓')
-    expect(t).toContain('S↑')
-    // ② references 外移：owner 2026-10-21 明确「保留」——EAP 推不出"外移到哪"，它是独立操作指令。
+    // 🔴 v1.136.6（2026-11-16 裁定）：文案从「按 EAP 重构」升级为「按性质分流」——
+    //    压缩的出口有三个，而不是只有"移出到 references"：记录→LOG、证据→references、判断→主体。
+    //    ⚠️ 旧断言 `refactor SESSION.md end to end under EAP` 与 `E↑/R↓/S↑` 三变量**不再钉**：
+    //    那是上一版文案的措辞，留着等于用一个已不存在的契约定住实现（同族 D151）。
+    expect(t).toContain('restructure it as a layered abstraction tree')
+    expect(t).toContain('do not merely shorten it')
+    // 三个出口，缺一即压缩只剩"改写得更短"这半条路
+    expect(t).toContain('LOG/LOG.md')
     expect(t).toContain('references/')
-    // ③ 两条硬约束：契约骨架（顺序与标题）+ frontmatter
-    expect(t).toContain('keep their order and headings')
+    expect(t).toContain('judgement stays in the body')
+    // 七段点名（2026-11-16 选 A：硬编码段名 —— 注入是模型读的，模型不看 SKILL）
+    expect(t).toContain('身份与边界')
+    expect(t).toContain('权威锚点')
+    expect(t).toContain('工作纪律')
+    expect(t).toContain('决策')
+    expect(t).toContain('当前状态')
+    expect(t).toContain('待 owner 裁决')
+    // 硬约束：frontmatter 不许动
     expect(t).toContain('frontmatter')
   })
 
@@ -346,17 +324,18 @@ describe('keeper: LOGBOOK COMPACTION 纯逻辑', () => {
     expect(base).toContain('Pause the current work')
     expect(base).toContain('H_op')
     expect(base).toContain('resume the paused work')
-    // v1.84.0 文案（EAP 三变量，取代旧四条原则）
-    expect(base).toContain('refactor SESSION.md end to end under EAP')
-    expect(base).toContain('E↑')
-    expect(base).toContain('R↓')
-    expect(base).toContain('S↑')
+    // v1.136.6 文案（三条出口取代旧 EAP 三变量表述，见上一个用例的判据）
+    expect(base).toContain('layered abstraction tree')
+    expect(base).toContain('LOG/LOG.md')
+    expect(base).toContain('references/')
+    expect(base).toContain('judgement stays in the body')
     const esc = cognitiveTrajectoryCompactionReminderText({ sizeKB: 285, limitKB: 100, mdPath: '/ccc/SESSION.md', escalated: true })
     expect(esc).toContain('mandatory')
     expect(esc).toContain('STOP')
     expect(esc).toContain('persists until the file is under the limit')
-    // 升级档的动作词也必须一致（旧版这里是 rewrite，会与 refactor 混着读）
-    expect(esc).toContain('refactor SESSION.md end to end')
+    // 升级档同样保留三条出口（否则升级后模型只知道"要压"，不知道往哪压）
+    expect(esc).toContain('belongs in AGENT_SESSIONS/<session>/references/')
+    expect(esc).toContain('belongs in LOG/LOG.md')
   })
 
   it('阈值：未配置 → 缺省 100KB（v1.84.0 由 200 下调）；配置生效；0 生效（关闭）；坏值回落缺省', () => {
@@ -426,134 +405,6 @@ describe('keeper: LOGBOOK COMPACTION 纯逻辑', () => {
   })
 })
 
-describe('keeper: REBUILD-TODO 交界便签体积超限（v1.49.0，owner 2026-09-26 需求）', () => {
-  let dir: string
-  let handler: ((exec: unknown, result: unknown, next: () => Promise<unknown>) => Promise<unknown>) | null = null
-  const SCOPE = 'todo-size-1'
-
-  /** 建 SESSION.md 并把同目录的 REBUILD-TODO.md 写到指定字节数；返回便签绝对路径 */
-  function bindSessionWithTodo(todoBytes: number | null): string {
-    const sessionDir = join(dir, 'AGENT_SESSIONS', '2026-01-01--S001--todo-test')
-    mkdirSync(sessionDir, { recursive: true })
-    const mdPath = join(sessionDir, 'SESSION.md')
-    writeFileSync(mdPath, 'x')
-    const todoPath = join(sessionDir, 'REBUILD-TODO.md')
-    if (todoBytes !== null) writeFileSync(todoPath, 'x'.repeat(todoBytes))
-    setActiveSessionInfo(SCOPE, { sessionId: 'S001', dirName: '2026-01-01--S001--todo-test', mdPath })
-    return todoPath
-  }
-
-  async function fire(): Promise<string[]> {
-    const exec = { name: 'read', agent: { session: { id: SCOPE, header: { cwd: dir } } } }
-    const result = (await handler!(exec, {}, async () => ({ kind: 'enter' }))) as {
-      additionalContexts?: Array<{ content?: Array<{ text?: string }> }>
-    }
-    return (result.additionalContexts ?? []).map((m) => m.content?.[0]?.text ?? '')
-  }
-
-  beforeEach(() => {
-    __resetRebuildTodoForTest()
-    // 🔴 必须一并清**路径缓存**：`resolveActiveSessionMdPath` 按 scope 缓存 60s（且缓存命中时
-    // 不再做 existsSync）⇒ 上个用例的临时目录已被删，缓存里仍是它的旧路径 ⇒ 便签路径指向
-    // 不存在的文件 ⇒ 静默零注入（本用例首跑就是栽在这条上）。
-    __resetLogbookCompactionForTest()
-    dir = mkdtempSync(join(tmpdir(), 'keeper-todo-'))
-    writeFileSync(join(dir, '.serenity'), 'test')
-    mkdirSync(join(dir, '.opencode'), { recursive: true })
-    // 阈值设很大 → 屏蔽计分提醒噪音，只观察便签体积提醒
-    writeFileSync(join(dir, '.opencode', 'serenity.json'), JSON.stringify({ sessionKeeper: { threshold: 99999 } }))
-    handler = null
-    registerKeeper({ on: (name: string, fn: unknown) => { if (name === 'tools/post-execute') handler = fn as typeof handler } } as never)
-  })
-
-  afterEach(() => {
-    clearActiveSessionInfo(SCOPE)
-    __resetRebuildTodoForTest()
-    rmSync(dir, { recursive: true, force: true })
-  })
-
-  it('上限硬编码 10KB（owner 裁决：不设配置键）', () => {
-    expect(DEFAULT_REBUILD_TODO_MAX_KB).toBe(10)
-  })
-
-  it('提醒文案：独立 token + 事实三件套 + 三条清理建议 + 整份丢弃授权 + 参照 eap', () => {
-    const base = rebuildTodoReminderText({ sizeKB: 14, limitKB: 10, mdPath: '/ccc/AGENT_SESSIONS/S1/REBUILD-TODO.md' })
-    // 🔴 与 SESSION.md 档**分开的 token**——共用会让模型误以为要动 SESSION.md
-    expect(base).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · SCRATCH PRUNE]')
-    expect(base).not.toContain('LOGBOOK COMPACTION')
-    expect(base).toContain('REBUILD-TODO.md is 14 KB (limit 10 KB)')
-    expect(base).toContain('/ccc/AGENT_SESSIONS/S1/REBUILD-TODO.md')
-    // 动作 = **清理**，不是重写保骨架
-    expect(base).toContain('Prune it now')
-    expect(base).toContain('praxis eap')
-    // 🔴 反向钉：便签档**不得**含 SESSION.md 档的重写文案。
-    //    ⚠️ v1.84.0 修正：这里原先钉的是 `keep the EAP layered skeleton`，而那句话已随文案改版消失
-    //    ⇒ 该反向钉**当时就失效**（旧串不存在，就算整段 compaction 文案混进来也照样绿）。
-    //    改钉新文案里最独特的动作短语，反向钉才继续有判别力。
-    expect(base).not.toContain('refactor SESSION.md end to end')
-    expect(base).not.toContain('frontmatter')
-    // 三条清理建议（已完成 / 已被取代 / 已进 SESSION.md）
-    expect(base).toContain('already done')
-    expect(base).toContain('superseded')
-    expect(base).toContain('already recorded in SESSION.md')
-    // 🔴 明确授权整份丢弃 + 唯一机械约束 = 体积（不规定内部结构）
-    expect(base).toContain('discard it')
-    expect(base).toContain('the only mechanical constraint on this file is its size')
-  })
-
-  it('升级版：语气加重，但动作仍只是清理、不阻断工作（与 SESSION.md 档的强制语义区分）', () => {
-    const esc = rebuildTodoReminderText({ sizeKB: 14, limitKB: 10, mdPath: '/p/REBUILD-TODO.md', escalated: true })
-    expect(esc).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · SCRATCH PRUNE]')
-    expect(esc).toContain('reminded repeatedly')
-    expect(esc).toContain('persists until the file is under the limit')
-    // 🔴 与 compaction 档的差别：**不得**出现强制重写语义
-    expect(esc).not.toContain('mandatory')
-    expect(esc).not.toContain('STOP')
-  })
-
-  it('注入行为：文件缺失 → 零注入且不自动创建；超限 → 注入且计数自增；清理回限内 → 停止并清零', async () => {
-    // ① 文件缺失 ⇒ 零注入，且**不自动创建**（空文件本身即熵）
-    const todoPath = bindSessionWithTodo(null)
-    expect(await fire()).toHaveLength(0)
-    expect(existsSync(todoPath)).toBe(false)
-
-    // ② 超限（11 KB > 10 KB）⇒ 注入 + 计数自增
-    writeFileSync(todoPath, 'x'.repeat(11 * 1024))
-    const texts = await fire()
-    expect(texts).toHaveLength(1)
-    expect(texts[0]).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · SCRATCH PRUNE]')
-    expect(texts[0]).toContain('REBUILD-TODO.md is 11 KB (limit 10 KB)')
-    expect(rebuildTodoStateSnapshot().get(SCOPE)?.consecutive).toBe(1)
-    expect(await fire()).toHaveLength(1)
-    expect(rebuildTodoStateSnapshot().get(SCOPE)?.consecutive).toBe(2)
-
-    // ②b 会话销毁路径：按 scope 清理计数（防 per-会话 Map 无界增长）
-    forgetRebuildTodoState(SCOPE)
-    expect(rebuildTodoStateSnapshot().has(SCOPE)).toBe(false)
-
-    // ③ 清理回限内 ⇒ 不再注入 + 计数保持清零（提醒自动停止）
-    writeFileSync(todoPath, 'x')
-    expect(await fire()).toHaveLength(0)
-    expect(rebuildTodoStateSnapshot().has(SCOPE)).toBe(false)
-  })
-
-  it('与 SESSION.md 档互不干扰：便签超限时 SESSION.md 未超限 ⇒ 只注入便签那一条', async () => {
-    const todoPath = bindSessionWithTodo(11 * 1024)
-    const texts = await fire()
-    expect(texts).toHaveLength(1)
-    expect(texts[0]).toContain('SCRATCH PRUNE')
-    expect(texts[0]).not.toContain('LOGBOOK COMPACTION')
-    // 反向：便签清掉后，把 SESSION.md 撑过限 ⇒ 只注入 compaction 那一条
-    writeFileSync(todoPath, 'x')
-    writeFileSync(join(dirname(todoPath), 'SESSION.md'), 'x'.repeat(2048))
-    writeFileSync(join(dir, '.opencode', 'serenity.json'), JSON.stringify({ sessionKeeper: { threshold: 99999, sessionMdMaxKB: 1 } }))
-    __resetLogbookCompactionForTest()
-    const texts2 = await fire()
-    expect(texts2).toHaveLength(1)
-    expect(texts2[0]).toContain('LOGBOOK COMPACTION')
-    expect(texts2[0]).not.toContain('SCRATCH PRUNE')
-  })
-})
 
 
 describe('keeper: 轨迹约束轨迹纪律子集旁路（F4b ⑩）', () => {

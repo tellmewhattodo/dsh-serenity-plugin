@@ -58,7 +58,7 @@ import {
   sessionEvents,
 } from './core.js'
 import { DEFAULT_FAKE_INITIAL_MESSAGES } from '../seams/bootstrap.js'
-import { eventToken, REBUILD_TODO_FILENAME } from './assistant.js'
+import { eventToken, HANDOVER_NOTE_HEADING } from './assistant.js'
 import { appendBound, readLastBound } from './bound.js'
 import { isoLocal } from '../kernel/time.js'
 import { rotateCarrierLog } from './carrier-log.js'
@@ -92,9 +92,12 @@ export function buildRebuildAnchor(
   focus?: string | null,
 ): string {
   const rel = activeMdPath.startsWith(root) ? activeMdPath.slice(root.length + 1) : activeMdPath
-  // 交界便签（v1.49.0）：与 SESSION.md **同目录**的兄弟文件；路径同样独立成行（便于新我直接 read）
-  const todoAbs = join(dirname(activeMdPath), REBUILD_TODO_FILENAME)
-  const todoRel = todoAbs.startsWith(root) ? todoAbs.slice(root.length + 1) : todoAbs
+  // 交接便签（2026-11-16 裁定）：住 `LOG/LOG.md` 的 `## Handover note` 节，**不另立文件**。
+  // 于是锚点要给出两个位置：当前代（搬运后的新代出生头亦含该节）与被冻结的上一代
+  // —— 后者在"搬运尚未落地 / 搬运失败"时是唯一还有该节的地方。
+  const logDirAbs = join(dirname(activeMdPath), 'LOG')
+  const logLiveAbs = join(logDirAbs, 'LOG.md')
+  const logRel = logLiveAbs.startsWith(root) ? logLiveAbs.slice(root.length + 1) : logLiveAbs
   // 会话目录名 = SESSION.md 的父目录 basename（可含空格，如 "…--S142--dsh-serenity-plugin 长期维护"）
   const sessionDir = basename(dirname(activeMdPath))
   const sessionLine =
@@ -113,9 +116,10 @@ export function buildRebuildAnchor(
     `- Persistent cognitive trajectory — SESSION.md path: ${rel}`,
     `  (the cognitive trajectory's persistent body — stays in place through rebuilds)`,
     `- Read that SESSION.md first (goal/decisions/progress/unresolved), then continue from the last checkpoint.`,
-    // v1.49.0 交接协议（owner 2026-09-26 裁决"**砍掉 in-flight**，这正是目的"）：读侧改指**独立便签文件**。
-    // 🔴 便签**不是权威**（可被随时丢弃）——权威仍是 SESSION.md；此处刻意点明，防新我拿便签当状态真相源。
-    `- Then read the handover scratch note: ${todoRel} (path: ${todoAbs}) — the previous self paused mid-task and left its in-flight items there. That file carries no format obligation and may be discarded at any time; it is NOT the authoritative state. If it is missing, infer the in-flight items from SESSION.md's latest progress entries.`,
+    // 交接便签（2026-11-16 裁定）：住 `LOG/LOG.md` 的 `## Handover note` 节。
+    // 🔴 提示**先读当前代、再读被冻结的上一代** —— 轮转把整份 LOG `mv` 走时，
+    //    在办状态可能还留在上一代里，只指当前代会读到空白。
+    `- Handover note: read ${logRel} first — "${HANDOVER_NOTE_HEADING}" in the current generation, and the previous generation's \`LOG-<stamp>.md\` if this handover froze it. The previous carrier wrote its in-flight step there before it was retired.`,
     // v1.29.2（R1）：任务焦点——重建后会话理解当前任务（无历史；SESSION.md 含完整历史）
     ...(focusLine ? [`- Task focus: ${focusLine}`] : []),
   ]

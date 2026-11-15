@@ -170,6 +170,27 @@ export function shouldOfferReconstruct(ctx: unknown, session: unknown): boolean 
   return cumulativeTokens(totals) >= RECONSTRUCT_TOKEN_THRESHOLD
 }
 
+/** 交接走哪条路（`in-place` = 原地清空；`new-log` = 另开日志并归档旧的） */
+export type HandoverPath = 'in-place' | 'new-log'
+
+/**
+ * **机械选路**（2026-11-16 owner 裁定）：会话不参与、也不感知这个决定。
+ *
+ * 判据只有两个量，且**顺序不可换**：
+ *   1. **累计用量超限** ⇒ 必须 `new-log`。
+ *      因为原地清空**不会让累计量回落** —— 同一条日志换个讲者还是那么大。
+ *   2. 仅**上下文超限** ⇒ `in-place`（更便宜：不新建会话、不归档、id 不变）。
+ *
+ * 🔴 **同时触发时选 `new-log`**（裁定 1）：反正累计量迟早要超，一次做到位，
+ *    比"先原地清空、下一轮再另开"少一次中断。
+ * ⛔ **LOG 大小不参与**：LOG 有机械轮转，永远不是交接触发器。
+ */
+export function selectHandoverPath(input: { contextOver: boolean; totalOver: boolean }): HandoverPath | null {
+  if (input.totalOver) return 'new-log'
+  if (input.contextOver) return 'in-place'
+  return null // 两个量都没超 ⇒ 不需要交接
+}
+
 /**
  * 达到阈值时注入的那句话（owner 给的语义，逐要素保留：**会话 id ＋ "过于庞大" ＋ 动作名**）。
  *
