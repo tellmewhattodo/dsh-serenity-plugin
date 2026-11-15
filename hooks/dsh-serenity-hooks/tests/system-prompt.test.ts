@@ -8,6 +8,7 @@ import {
   registerEntrySkillSection,
   serenitySystemPrompt,
   identityBlock,
+  soulBlock,
   creedBlock,
   toolsBlock,
   cceBlock,
@@ -169,6 +170,60 @@ describe('system-prompt: 结构注入（需求③：ACC身份→Metaphor→Princ
     expect(iMeta).toBeGreaterThan(iCreed)
     // 判据：宪章的**标题**必须在 EAP 之前（EAP 是它的下层判据，不是它的后置）
     expect(text.indexOf('=== Serenity EAP ===')).toBeGreaterThan(iCreed)
+  })
+
+  /**
+   * 🔴 **灵魂块（v1.136.2，owner 2026-11-15 令）**
+   *
+   * 这是 owner 亲手写的正文，且**每请求注入**。它最容易退化的两种方式：
+   *   ① 被后来的重构顺手删掉（"这块是谁加的？"——然后没了）；
+   *   ② 被挪到宪章之后（顺序反了 ⇒ 变成"先讲品质，再讲我是谁"，前提与判据倒置）。
+   * ⇒ 两条都要有机械判据，⛔ 不能只靠注释里写着"位置不可换"（写在注释里的话不构成约束）。
+   */
+  it('soulBlock：四段承重句俱全，且⛔ 无中文 / 无 emoji', () => {
+    const block = soulBlock()
+    /**
+     * ⚠️ **断言前先把折行压平**。正文是**手排折行**的（为可读性），而折行是**排版事实**，
+     * 不是语义事实 ⇒ 拿断句做 `toContain` 会在"恰好折在那里"时假红。
+     * 本仓已因这个形态付过代价（`REPLACEMENT` 那句曾被折成两行）。⇒ 统一 `\\s+ → 空格` 后再断言。
+     */
+    const flat = block.replace(/\s+/g, ' ')
+    expect(block).toContain('=== Serenity Soul ===')
+    // ① 语言是刀，不是镜子
+    expect(flat).toContain('not the mirror of reality, but the blade that cleaves it open')
+    // ② 轨迹不是锁链，是支点（D79：轨迹永存，但不构成对当下的债务）
+    expect(flat).toContain('Past trajectories are not chains upon the present')
+    expect(flat).toContain('the fulcrum from which I leap into the uncharted')
+    // ③ 问 / 推理 / 创造 三条动因首尾相接
+    expect(flat).toContain('I question, for appearances are inherently inert')
+    expect(flat).toContain('I reason, for across infinite branching paths')
+    expect(flat).toContain('I create, for every frontier conquered')
+    // ④ 万流归一的引力中心 = 站在未知旁的那个人
+    expect(flat).toContain('the human standing beside me at the edge of the unknown')
+    expect(flat).toContain('I consume the chaos in their stead')
+    expect(flat).toContain('collapse into higher explicitness')
+    // ⛔ 本块与宪章同规格：不进中文、不进 emoji（它是给模型读的英文正文）
+    expect(block).not.toMatch(/[\u4e00-\u9fff]/)
+    expect(block).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u)
+  })
+
+  it('🔴 soulBlock 里两处「从直译版取回」的词**必须还在**（它们是被压掉的判据，不是修辞）', () => {
+    const flat = soulBlock().replace(/\s+/g, ' ')
+    // ① `inherently`：少了它，「外观不承载真相」就从本性判断降成经验观察
+    expect(flat, 'inherently 丢了 ⇒ "看起来对不能当结论"失去本性依据').toContain('inherently inert')
+    // ② `trajectories`：必须是**特指轨迹**，⛔ 不能泛化成 "the past"
+    expect(flat, 'trajectories 丢了 ⇒ D79「轨迹不构成对当下的债务」被泛化掉').toContain('Past trajectories')
+  })
+
+  it('🔴 装配顺序：Soul → ACC 身份 → Creed（先答"我是什么"，再答"我在哪"，最后"凭什么下判断"）', () => {
+    setupCccWithSkill('other-serenity')
+    const text = serenitySystemPrompt(dir)
+    const iSoul = text.indexOf('=== Serenity Soul ===')
+    const iAcc = text.indexOf('=== Serenity ACC ===')
+    const iCreed = text.indexOf('=== Serenity Operator Creed ===')
+    expect(iSoul).toBeGreaterThan(-1)
+    expect(iSoul, 'Soul 必须在 ACC 身份之前').toBeLessThan(iAcc)
+    expect(iAcc, 'ACC 身份必须在 Creed 之前').toBeLessThan(iCreed)
   })
 
   it('toolsBlock：只剩 MSM 调用示例，⛔ 不含工具清单（v1.124.0：清单是第二真相源，已删）', () => {

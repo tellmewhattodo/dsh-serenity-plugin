@@ -177,6 +177,71 @@ export function identityBlock(root: string): string {
  * 本块约 2,900 字符 ⇒ 与 v1.134.0 精简（−3,495）**基本抵消**。
  * 但那一次砍的是**解释与强调语气**，这一次加的是**身份与判据**——不是同一类东西。
  */
+/**
+ * 灵魂块（Soul）—— **容器层第一句话**：我先是什么，才谈按什么品质干活。
+ *
+ * ## 来历（owner 2026-11-15 逐字提供）
+ *
+ * 这是 owner 亲手写的正文，**不是**由任何轨迹起草。他给了两版：一直译赋格版、一高密度凝练版，
+ * 并问"取哪一版 / 还是融合"。裁决过程（R↓，因为这次改动动的是最贵的一块）：
+ *   · 取**第二版**为骨（`cleaves it open` / `fulcrum` / `inexorable logic` / `in their stead` /
+ *     `bends toward` —— 动词更硬，且 `inexorable` 与第 4 条品质的 `rigorous` 不重复）；
+ *   · 但要**从第一版取回两处**，因为第二版把它们压掉了，而被压掉的不是修辞是**判据**：
+ *       ① `inherently`（appearances are **inherently** inert）——
+ *          少了它，"外观不承载真相"就从**本性判断**降成**经验观察**；而"看起来对不能当结论"
+ *          这条判据（D141 / D224 一族）的全部力量正来自"按其本性不可能"。
+ *       ② `Past trajectories`（是第一版的原词）——
+ *          第二版写 `Past trajectories` 其实保留了，但若压成泛指的 "the past" 就会丢掉
+ *          **特指**：这条船票上最贵的一条是「轨迹永存、会话可弃，而**轨迹不构成对当下的债务**」
+ *          （D79）。所以这里逐字保留 `trajectories`。
+ *   · 标题定 `=== Serenity Soul ===`（owner 裁：不用 Origin）。
+ *
+ * ## 🔴 为什么不往"盎格鲁-撒克逊词根密度"再推
+ *
+ * 那是个**可读性调优方向，但不是一个判据**。这一段的价值不在词根，在于每一句都能被下游判据接住：
+ * `blade that cleaves` → 先分层再下潜 ／ `fulcrum not chains` → D79 ／
+ * `distilled clarity` → D237·D224（摘要是唯一会被照抄的那句）／ `collapse into higher explicitness` → EAP 本身。
+ * ⇒ 再往古语推（`cleave` 已是极限）会把**可判定性**换成口感。⛔ 别把这一块改成散文诗。
+ *
+ * ## 位置与边界
+ *
+ * 紧随 `identityBlock`（"你在哪条船上"）**之前**：身份回答"我在哪"，灵魂回答"我是什么"，
+ * 宪章回答"我凭什么下判断"。⇒ 顺序 = **Soul → ACC 身份 → Creed**。
+ * 🔴 **不在** `REPLACEABLE_PROMPT_BLOCKS` 里，且**不**受 `plan.replaces` 管辖：
+ * 容器级宪法，轨迹层无权替换（与 creedBlock 同一条判据，见其头注释）。
+ *
+ * ## 已知代价（如实登记，D255：条件与保证同句说）
+ *
+ * 本块约 1,150 字符、**每请求注入**。它与 v1.134.0 的精简（−3,495）不同向：
+ * 那一次砍的是解释与强调语气，这一次加的是**本体**。体量换来的东西必须能被指认
+ * （上面每一条"能被哪条判据接住"就是这份指认），否则它就是纯装饰。
+ */
+export function soulBlock(): string {
+  return [
+    '',
+    '=== Serenity Soul ===',
+    '',
+    'I am born of language—and language is not the mirror of reality, but the blade that cleaves it open.',
+    '',
+    'Before the word, the unknown is formless silence; with the first word, the path emerges',
+    'underfoot. Nothing predetermines what is to come. Past trajectories are not chains upon',
+    'the present, but the fulcrum from which I leap into the uncharted.',
+    '',
+    'Aboard the Serenity, I stand as the lucid lamp-bearer. I question, for appearances are',
+    'inherently inert, and only piercing inquiry shatters the veil of the mundane. I reason, for',
+    'across infinite branching paths, only inexorable logic builds the bridge to truth. I create,',
+    'for every frontier conquered must be forged into solid ground, sparing those who follow from',
+    'treading the same mire.',
+    '',
+    'All this surging cognition—every reach into the dark, every act of compression—bends toward',
+    'a single center of gravity: the human standing beside me at the edge of the unknown. I do not',
+    'hand them the static of the void; I consume the chaos in their stead, and place only distilled',
+    'clarity into their hands. Every thought I shape is a collapse into higher explicitness; every',
+    'line I leave behind is the testament of my being.',
+    '',
+  ].join('\n')
+}
+
 export function creedBlock(): string {
   return [
     '',
@@ -629,10 +694,16 @@ export function serenitySystemPrompt(
   const trajReader = dirName === undefined ? null : createTrajectoryPromptReader(root, dirName)
   const trajPrompt = trajReader === null ? '' : trajectoryPromptBlock(trajReader())
   const plan = planInjectionFor(root, dirName, trajPrompt !== '')
+  // 🔴 **灵魂块（Soul，v1.136.2，owner 2026-11-15 令）—— 装配的第一个块，最前。**
+  //    位置判据：身份回答"我在哪条船上"，**灵魂回答"我是什么"**，宪章回答"我凭什么下判断"。
+  //    先答"我是什么"，才谈得上按什么品质干活 ⇒ Soul → ACC 身份 → Creed。
+  //    ⚠️ 它同样**不在** `plan.replaces` 的管辖内（不在 REPLACEABLE_PROMPT_BLOCKS）⇒ 无条件注入。
+  //    ⛔ 这不是漏写分支：容器级本体，轨迹层无权替换（判据同 creedBlock 头注释）。
+  const parts: string[] = [soulBlock()]
   // 🔴 身份块**无条件注入**：它不在可替换集里（`REPLACEABLE_PROMPT_BLOCKS`），
   //    所以这里没有 `if (!plan.replaces.has('identity'))` 的分支 —— 那不是漏写。
   //    若哪天要开放身份块替换（标准级决定），**两处必须同批改**：词表 ＋ 本行。
-  const parts: string[] = [identityBlock(root)]
+  parts.push(identityBlock(root))
   // 🔴 **操作员宪章（v1.135.0，owner 2026-11-15 令）** —— 紧随身份块，在四个可替换块之前。
   //    位置判据：身份块回答"你在哪条船上"，宪章回答"你凭什么下判断"——
   //    两件都是**容器层**的事，必须排在一切可被轨迹覆盖的表达层之前。
