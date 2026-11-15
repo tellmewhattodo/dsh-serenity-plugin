@@ -1784,7 +1784,7 @@ describe('🔴 A104-C′ 容器级中断兜底（每 tick 自带「发现 ＋ �
     registerWakeScheduler(safetyCtx(sent) as never)
     await waitFor(() => sent.length > 0, 20_000)
     expect(sent, '被打断的会话必须被注入一次续跑').toHaveLength(1)
-    expect(sent[0]).toContain('中断续跑')
+    expect(sent[0]).toContain('interrupted-continuation')
     expect(sent[0]).toContain(INTERRUPTED_ID)
     // tick 日志里也要能看见（否则"它到底动没动"又只能靠猜）
     await waitFor(() => (wakeSchedulerState().lastTickLog ?? []).some((l) => l.includes('中断兜底')), 20_000)

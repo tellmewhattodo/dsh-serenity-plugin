@@ -673,13 +673,13 @@ describe('formatPendingTools（清单折叠）', () => {
   it('恰好等于上限 ⇒ 不折叠（边界是 ≤，⛔ 不是 <）', () => {
     const eight = ['t0', 't1', 't2', 't3', 't4', 't5', 't6', 't7']
     expect(formatPendingTools(eight)).toBe(eight.join(', '))
-    expect(formatPendingTools(eight)).not.toContain('等共')
+    expect(formatPendingTools(eight)).not.toContain('total')
   })
 
   it('超上限 1 项 ⇒ 就折叠，且总数（不是剩余数）可见', () => {
     const nine = Array.from({ length: 9 }, (_, i) => `t${i}`)
     const out = formatPendingTools(nine)
-    expect(out).toContain('等共 9 项')
+    expect(out).toContain('9 total')
     expect(out).toContain('t7')
     expect(out).not.toContain('t8')
   })
@@ -705,28 +705,28 @@ describe('buildContinueText（续跑正文）', () => {
   it('🔴🔴 首行必须自报「这是 ACC 自动发的」（否则人以为是有人派活）', () => {
     const t = buildContinueText('session-a', 1, [])
     const firstLine = t.split('\n')[0]
-    expect(firstLine, '首行必须标明自动身份').toContain('ACC 自动')
-    expect(firstLine, '首行必须说明不是人安排的').toMatch(/不是你安排的/)
+    expect(firstLine, '首行必须标明自动身份').toContain('ACC automatic')
+    expect(firstLine, '首行必须说明不是人安排的').toMatch(/Nobody scheduled this/)
   })
 
   it('🔴 必须说明「手工停止的轮次不会被续跑」（给读者一个可行动的事实）', () => {
     const t = buildContinueText('session-b', 1, [])
-    expect(t).toMatch(/手工点过.*停止.*不会/)
+    expect(t).toMatch(/stopped by hand is \*\*not\*\* resumed/)
   })
 
   it('无未完成调用 ⇒ 不提副作用核对（不制造无谓警告）', () => {
     const t = buildContinueText('session-x', 7, [])
     expect(t).toContain('session-x')
-    expect(t).toContain('turn 7')
-    expect(t).not.toContain('副作用未知')
+    expect(t).toContain('turn: 7')
+    expect(t).not.toContain('side effects unknown')
   })
 
   it('🔴 有未完成调用 ⇒ 必须警告"副作用未知≠没执行"并禁止整段重放', () => {
     const t = buildContinueText('session-y', 3, ['edit', 'im-bridge'])
     expect(t).toContain('edit, im-bridge')
-    expect(t).toContain('副作用未知')
-    expect(t).toContain('可能已经执行')
-    expect(t).toContain('不要把被中断的那一轮整段重放')
+    expect(t).toContain('side effects unknown')
+    expect(t).toContain('may already have run')
+    expect(t).toContain('Do not replay that whole interrupted turn')
   })
 
   it('🔴 正文不含版本号（D159：唤醒文本不得写死版本）', () => {
@@ -750,19 +750,19 @@ describe('buildContinueText（续跑正文）', () => {
    */
   it('🔴🔴 必须区分「干到一半被掐」与「正常结束在等拍板」', () => {
     const t = buildContinueText('session-w', 4, [])
-    expect(t).toMatch(/干到一半被掐断/)
-    expect(t).toMatch(/等 owner 拍板/)
+    expect(t).toMatch(/cut off midway/)
+    expect(t).toMatch(/waiting for the owner to decide/)
   })
 
   it('🔴🔴 必须明写「本条消息不构成任何授权」（防自我授权）', () => {
     const t = buildContinueText('session-v', 4, [])
-    expect(t).toContain('不构成任何授权')
+    expect(t).toContain('grants no authorization')
   })
 
   it('🔴 反向钉：这句话**不许**出现在开头（先给事实，再给判断条件）', () => {
     const t = buildContinueText('session-u', 2, [])
     const head = t.split('\n').slice(0, 3).join('\n')
-    expect(head).not.toContain('不构成任何授权')
+    expect(head).not.toContain('grants no authorization')
   })
 
   /**
@@ -779,13 +779,26 @@ describe('buildContinueText（续跑正文）', () => {
   it('🔴 清单超上限 ⇒ 折叠成计数，但总数仍可见', () => {
     const many = Array.from({ length: 150 }, (_, i) => `tool_${i}`)
     const t = buildContinueText('session-big', 9, many)
-    expect(t, '总数必须仍可见（折叠≠丢信息）').toContain('等共 150 项')
+    expect(t, '总数必须仍可见（折叠≠丢信息）').toContain('150 total')
     // 折叠后实际列出的名字个数 = 显示上限（前 8 项）
     expect(t).toContain('tool_0')
     expect(t).toContain('tool_7')
     expect(t, '第 9 项起应被折叠掉').not.toContain('tool_8')
-    // 有效载荷不许随清单线性膨胀
-    expect(t.length).toBeLessThan(1000)
+    /**
+     * 🔴 **有效载荷不许随清单线性膨胀** —— 判据是**尺度不变**，不是某个魔法常数。
+     *
+     * 这里原先写死 `t.length < 1000`，那是**中文**下的实测值；2026-11-15 正文改英文后
+     * 同样内容变成 1484 字符 ⇒ 断言变红，而**折叠机制一个字都没坏**。
+     * ⇒ 判据修正：拿"150 项"与"9 项"两种输入**比长度差**。
+     *   折叠生效 ⇒ 差值是常数级（只多出计数里那几个数字）；
+     *   折叠失效 ⇒ 差值是 141 个名字的长度 ⇒ 必然爆掉。
+     *   ⚠️ 这比写死阈值强：它**不随语言/措辞/长度单位漂移**，只钉真正要保的性质。
+     */
+    const small = buildContinueText('session-big', 9, ['tool_0', 'tool_1'])
+    expect(
+      t.length - small.length,
+      '折叠失效会让正文随清单线性膨胀（这才是本条要防的）',
+    ).toBeLessThan(200)
   })
 
   it('🔴 折叠反向钉：未超上限 ⇒ 原样全列，不得出现计数尾巴', () => {

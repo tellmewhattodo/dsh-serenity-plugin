@@ -316,7 +316,7 @@ export async function queueRebuild(
       'Unable to determine the active SESSION.md for this session — checked (in order): ' +
       'in-memory activation (cognitive_trajectory use in this process), [SESSION CONTEXT] events in this conversation, ' +
       'AGENT_SESSIONS/.bindings.json (authoritative binding), rebuild anchor in the surface. ' +
-      'None matched an existing SESSION.md. Run "cognitive_trajectory use <S###> --summary <内容概括 ≤20 字>" to bind this ' +
+      'None matched an existing SESSION.md. Run "cognitive_trajectory use <S###> --summary <one-line summary, ≤20 chars>" to bind this ' +
       'conversation to a cognitive trajectory, then retry cognitive_trajectory rebuild. (No global fallback is applied on purpose — ' +
       'guessing could resume a different cognitive trajectory.)',
     )

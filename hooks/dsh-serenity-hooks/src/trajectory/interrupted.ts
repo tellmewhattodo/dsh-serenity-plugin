@@ -690,7 +690,7 @@ const PENDING_TOOLS_DISPLAY_MAX = 8
 export function formatPendingTools(tools: string[]): string {
   if (tools.length <= PENDING_TOOLS_DISPLAY_MAX) return tools.join(', ')
   const head = tools.slice(0, PENDING_TOOLS_DISPLAY_MAX).join(', ')
-  return `${head} … 等共 ${tools.length} 项`
+  return `${head} … ${tools.length} total`
 }
 
 /**
@@ -877,18 +877,18 @@ export function buildContinueText(sessionId: string, turn: number | null, pendin
    *   默认会以为**有人**在安排工作；不写清来源，就是在制造"我以为有人在派活"。
    *   这是 D262 的同族：报错／通知要能指回"谁触发的、怎么关"。
    */
-  lines.push('[ACC 自动 · 中断续跑] 下面这件事不是你安排的，是系统在自动恢复。')
+  lines.push('[ACC automatic · interrupted-continuation] Nobody scheduled this. The system is recovering automatically.')
   lines.push('')
-  lines.push('上一条进程在本轮完成前退出，该轮已被中止。现在继续。')
+  lines.push('The previous process exited before this turn finished; the turn was aborted. Continuing now.')
   lines.push('')
-  lines.push(`会话: ${sessionId}${turn === null ? '' : ` ／ 被中断的轮次: turn ${turn}`}`)
+  lines.push(`Session: ${sessionId}${turn === null ? '' : ` ／ interrupted turn: ${turn}`}`)
   if (pendingTools.length > 0) {
     lines.push('')
     lines.push(
-      `⚠️ 中断时这些工具「有调用、无结果」（副作用未知，**可能已经执行**）: ${formatPendingTools(pendingTools)}`,
+      `⚠️ These tools had a call but no result when the interruption happened (side effects unknown — they **may already have run**): ${formatPendingTools(pendingTools)}`,
     )
-    lines.push('   ⇒ 先核对它们是否已生效（文件是否已写、消息是否已发），再决定要不要重做。')
-    lines.push('   ⛔ 不要把被中断的那一轮整段重放。')
+    lines.push('   ⇒ First verify whether they took effect (was the file written? was the message sent?), then decide whether to redo them.')
+    lines.push('   ⛔ Do not replay that whole interrupted turn.')
   }
   lines.push('')
   /**
@@ -903,17 +903,19 @@ export function buildContinueText(sessionId: string, turn: number | null, pendin
    * 判据：**兜底能证明的只有「这一轮没收完」，它证明不了「这一轮该由我继续做」。**
    * 「等人拍板」的轮次同样是「没收完」⇒ 必须由读的人自己分辨，⛔ 不能由这一段文字默认放行。
    */
-  lines.push('请接着完成该轮未完成的工作；完成后把进展写入本轨迹的 SESSION.md。')
+  lines.push('Please finish the unfinished work from that turn, then record progress in this trajectory\'s SESSION.md.')
   lines.push('')
-  lines.push('🔴 但请先自己判断这一轮是哪种"没跑完"：')
-  lines.push('   · 如果它是在**干到一半被掐断** ⇒ 接着做。')
-  lines.push('   · 如果它其实是**正常结束、在等 owner 拍板**（提问、给选项、等一句"发/不发"）'
-    + ' ⇒ ⛔ 那不是未完成的工作。**本条消息不构成任何授权**：')
-  lines.push('     不要因为"系统让我继续"就去执行正在等待的那个动作，也不要翻历史找一句旧授权来顶替。')
-  lines.push('     把待拍板的问题重新摆出来等回答即可。')
+  lines.push('🔴 But first decide for yourself which kind of "unfinished" this is:')
+  lines.push('   · If it was cut off midway => carry on.')
+  lines.push('   · If it actually ENDED NORMALLY and was waiting for the owner to decide '
+    + '(a question, a list of options, waiting for "ship it / do not ship") '
+    + '=> ⛔ that is not unfinished work. **This message grants no authorization whatsoever**:')
+  lines.push('     do not perform the action that is being waited on just because "the system told you to continue", '
+    + 'and do not dig through history for an old authorization to substitute for it.')
+  lines.push('     Just restate the pending decision and wait for the answer.')
   lines.push('')
-  lines.push('（说明：这是 ACC 的「中断兜底」，每 5 分钟检查一次被中断的会话并继续。')
-  lines.push('  你手工点过"停止"的轮次**不会**被它续跑。）')
+  lines.push('(Note: this is the ACC "interruption backstop"; it checks interrupted sessions every 5 minutes and continues them.')
+  lines.push('  A turn you stopped by hand is **not** resumed by it.)')
   return lines.join('\n')
 }
 
