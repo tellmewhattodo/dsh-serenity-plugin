@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import {
   inspectSkillOntology,
   formatSkillOntologyInspection,
+  extractEngineErrors,
   type SkillOntologyInspection,
 } from '../src/skills/skill-ontology.js'
 
@@ -20,7 +21,7 @@ let root: string
 let skillDir: string
 
 /** 一个能过 `check --level strict` 的最小本体（形状照引擎自带测试的 MINI_TTL） */
-function miniTtl(opts: { imports?: string } = {}): string {
+function miniTtl(opts: { imports?: string; extra?: string } = {}): string {
   const imp = opts.imports === undefined ? '' : `    owl:imports <${opts.imports}> ;\n`
   return `@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
@@ -35,6 +36,7 @@ ${imp}    rdfs:comment "minimal" .
 :Thing a owl:Class ;
     rdfs:label "Thing" ;
     sr:rigidity sr:rigid .
+${opts.extra ?? ''}
 `
 }
 
@@ -133,6 +135,68 @@ describe('P2 · 本体预留口', () => {
     expect(a2.detail).toContain('探测没跑成')
     expect(a2.detail).not.toContain('未声明')
     expect(insp.state).toBe('error')
+  })
+
+  /**
+   * 🔴🔴 **2026-11-15 butler 现场报障（我已复现）**：A1 失败时回执只有「引擎 ERR 行见报告」，
+   *    而 `check` **不落盘、不回传任何路径** ⇒ "报告"在构造上不存在，操作者被迫再跑一次
+   *    `ontology check` 才看得到「第几条公理、什么错」。
+   *
+   * 判据（同族 = D262 报错要指路）：**指一条不存在的路，比不指更坏**。
+   * 这两条用例钉的就是"引擎的 ERR 行必须出现在 A1 的 detail 里"，且**保留 `[M8]`/`[M9]` 编号**
+   * （编号是引擎的判据号，是可检索的锚，⛔ 不能被我改写成散文）。
+   */
+  it('🔴 A1 失败必须**带出引擎的 ERR 行**（中文散文规则 ⇒ M8 tokenization error）', () => {
+    writeSkillTtl(miniTtl({
+      extra: `
+:onto sr:axiom [
+    sr:description "中文散文规则" ;
+    sr:rule "每一个 物件 都 必须 有 名字"
+] .
+`,
+    }))
+    const a1 = inspectSkillOntology(skillDir, { root }).checks.find((c) => c.id === 'A1')!
+    expect(a1.ok).toBe(false)
+    expect(a1.detail).toContain('ERR [M8]')
+    expect(a1.detail).toContain('tokenization error')
+    // ⛔ 回执里不该再出现那句"见报告"（它指不到任何东西）
+    expect(a1.detail).not.toContain('见报告')
+  })
+
+  it('🔴 A1 失败必须带出 ERR 行（引用不存在的类型 ⇒ M9）', () => {
+    writeSkillTtl(miniTtl({
+      extra: `
+:onto sr:axiom [
+    sr:description "引用不存在的类型" ;
+    sr:rule "forall q in NoSuchType: q.x == 1"
+] .
+`,
+    }))
+    const a1 = inspectSkillOntology(skillDir, { root }).checks.find((c) => c.id === 'A1')!
+    expect(a1.ok).toBe(false)
+    expect(a1.detail).toContain('ERR [M9]')
+    expect(a1.detail).toContain('NoSuchType')
+  })
+
+  it('extractEngineErrors：只认 `ERR [M<数字>]` 行，且**上限生效**（防烂文件撑爆回执）', () => {
+    const out = [
+      'Ontology Validation: demo',
+      '---',
+      '  WRN [M4] Type "X" is rigid but has no identity criteria',
+      '  ERR [M8] Axiom #1 tokenization error: Unexpected character: 每',
+      '  ERR [M9] Axiom #2 quantifier references unknown type "NoSuchType"',
+      'random line mentioning ERR but not the shape',
+      '  ERR [M10] Ontology file not found: /x',
+    ].join('\n')
+    const got = extractEngineErrors(out)
+    // WRN 不算 ERR；散文里的 "ERR" 也不算
+    expect(got).toEqual([
+      'ERR [M8] Axiom #1 tokenization error: Unexpected character: 每',
+      'ERR [M9] Axiom #2 quantifier references unknown type "NoSuchType"',
+      'ERR [M10] Ontology file not found: /x',
+    ])
+    expect(extractEngineErrors(out, 1)).toHaveLength(1)
+    expect(extractEngineErrors('no errors here')).toEqual([])
   })
 
   // ── J3：三态**互可分辨** ────────────────────────────────────────────

@@ -74,6 +74,31 @@ function parseImports(explainStdout: string): string[] {
 }
 
 /**
+ * 从引擎输出里抽出 `ERR [...]` 行（**读引擎自己的正文，不重造措辞**）。
+ *
+ * 🔴 为什么必须有这个（2026-11-15 butler 现场报障，已由我复现）：
+ *   A1 失败时回执原先只有一句「结构校验未通过（引擎 ERR 行见报告）」——
+ *   **而"报告"根本不是一个可指的东西**：`check` 不落盘、不回传，操作者拿到的就是那一句。
+ *   同一份内容交给 `ontology check` 会打印 `ERR [M8] Axiom #1 tokenization error: …` 等逐条错误。
+ *   ⇒ 信息一直在 `runOntologyCli` 的返回值里，是这一行把它丢了。
+ *
+ * ⚠️ 判据 = **引擎的原文**，⛔ 不是我重新写一句摘要（重写会漂，且丢掉 `[M8]` 这类可检索编号）。
+ * @param out 引擎 stdout ＋ stderr 的合并文本
+ * @param max 最多带出几条（防一份烂文件把回执撑爆）
+ */
+export function extractEngineErrors(out: string, max = 5): string[] {
+  const hits: string[] = []
+  for (const line of out.split('\n')) {
+    const t = line.trim()
+    // 引擎的错误行形如 `ERR [M8] …` / `ERR [M10] …`（M 编号是它的判据号，必须原样保留）
+    if (!/^ERR\s*\[M\d+\]/.test(t)) continue
+    hits.push(t)
+    if (hits.length >= max) break
+  }
+  return hits
+}
+
+/**
  * 检查一个 skill 的预留口。
  *
  * @param skillDir skill 目录（绝对路径）
@@ -96,6 +121,20 @@ export function inspectSkillOntology(skillDir: string, opts: InspectOptions): Sk
 
   // ── A1：结构合法（check --level strict）───────────────────────────────
   const c1 = runOntologyCli(['check', abs, '--level', 'strict'], { cwd: opts.root })
+  /**
+   * 🔴 **失败必须把引擎的 ERR 行带出来**（2026-11-15 butler 报障 ＋ 我复现）。
+   *
+   * 修前：`code === 1` ⇒ 只写「引擎 ERR 行见报告」。而 `check` 不落盘、不回传任何路径
+   * ⇒ **"报告"在构造上不存在**，操作者被迫再跑一个工具（`ontology check`）才看得到
+   * 「第几条公理、什么错」。同族判据：**报错要指路**（D262）—— 指一条不存在的路更坏。
+   *
+   * 这里的 ERR 行取自 `stdout ＋ stderr`：引擎把校验错误打在 stdout 正文里、
+   * 把 `[ONTO_VALIDATION_FAILED]` 的代码块打在 stderr，两者都要看。
+   */
+  const engineErrors = extractEngineErrors(`${c1.stdout}\n${c1.stderr}`)
+  const errLine = engineErrors.length > 0
+    ? `\n       ${engineErrors.join('\n       ')}`
+    : ''
   checks.push({
     id: 'A1',
     ok: c1.code === 0,
@@ -103,7 +142,7 @@ export function inspectSkillOntology(skillDir: string, opts: InspectOptions): Sk
       c1.code === 0
         ? 'strict 结构校验通过'
         : c1.code === 1
-          ? '结构校验未通过（引擎 ERR 行见报告）'
+          ? `结构校验未通过（引擎 ${engineErrors.length} 条 ERR）：${errLine}`
           : c1.code === 2
             ? `解析失败／读不到文件（code 2）${c1.stderr.trim() !== '' ? `：${c1.stderr.trim().split('\n')[0]}` : ''}`
             : `引擎内部错误（code ${c1.code}）`,
