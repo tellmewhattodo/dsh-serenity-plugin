@@ -223,9 +223,38 @@ describe('cognitive_trajectory：工具面', () => {
     //    同族纪律 #43：退役要留「旧形态不再出现」的钉，否则下一个我会"顺手"加回去而无人报警。
     expect(COGNITIVE_TRAJECTORY_ACTIONS).not.toContain('interrupted')
     expect(COGNITIVE_TRAJECTORY_ACTIONS).not.toContain('continue-all-interrupted')
+
     for (const k of ['name', 'uid', 'summary', 'target', 'at', 'message', 'note', 'force', 'dryRun']) {
       expect(tool.parameters[k], `缺参数 ${k}`).toBeDefined()
     }
+  })
+
+  /**
+   * 🔴 **退役动作的「残留引用」钉（同族 D151）**：某动作被砍后，**schema 与说明面仍写着它**，
+   * 下一个模型就会去调一个不存在的动作 —— 而**它拿到的错误里没有一句说"这个动作没了"**。
+   *
+   * ⚠️ 为什么必须有这一条（本轮实证）：我把 `switch` 与 `enum` 都改干净后，`test` **照样全绿** ——
+   * 因为**没有任何用例断言 description 或 `lookbackHours`**。判据写在源码注释里不构成约束（#105 形态）。
+   * ⇒ 这三条断言把「退役动作不许在说明面复活」变成机械可检的。
+   */
+  it('🔴 反向钉：退役的 `interrupted`/`continue-all-interrupted` 不得残留在说明面与参数表里', () => {
+    const desc = String((tool as unknown as { description?: string }).description ?? '')
+    const actionDesc = String(
+      (tool.parameters.action as unknown as { description?: string } | undefined)?.description ?? '',
+    )
+    // ① 动作清单里不许把两个退役动作当成**可用动作**列出来。
+    //    ⚠️ 允许它们以「已退役（RETIRED）」的身份被提及 —— 那是有价值的路标，
+    //    所以这里钉的不是「不出现」，而是「不以可用形态出现」：不许出现 `continue-all-interrupted (ACTION:`。
+    expect(actionDesc).not.toContain('continue-all-interrupted (ACTION:')
+    expect(actionDesc).not.toContain('interrupted (READ-ONLY:')
+    // ② 必须留下"它没了、而这件活已经自动化"的路标 —— 否则模型会一直找一个不存在的入口
+    expect(actionDesc).toMatch(/RETIRED/)
+    expect(actionDesc).toMatch(/scheduler|automatic/i)
+    // ③ 顶层 description 不再把 inspection 当成本工具的一个动作组
+    expect(desc).not.toContain('The inspection action is read-only')
+    // ④ 死参数必须从参数表里消失：`lookbackHours` 唯一的消费者是被删的两个动作。
+    //    与 D310（声明⊆读取／读取⊆声明）同一族 —— 留着它 = 声明了一个实现会静默忽略的参数。
+    expect(tool.parameters).not.toHaveProperty('lookbackHours')
   })
 
   it('render：字符串原样；非字符串 ⇒ JSON 缩进（覆盖 renderText）', () => {

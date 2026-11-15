@@ -14,7 +14,50 @@
 
 ---
 
-## v1.136.4 — 2026-11-15（`cognitive_trajectory` 移除两个续跑动作：删入口，不删能力）
+## v1.136.5 — 2026-11-15（说明面残留补齐：退役动作还在被广告给模型）
+
+> 来源 = **v1.136.4 自己被自己的判据抓到**的一处漏项。没有外部报障。
+
+### 缺陷
+
+v1.136.4 把 `switch` 与 `ACTION` 枚举都删干净了，`test` **照样全绿** —— 因为**没有任何用例断言
+`description` 或 `parameters`**。而这两处**仍在向模型广告两个已经不存在的动作**：
+
+| 面 | 残留 |
+|---|---|
+| 顶层 `description` | `The inspection action is read-only: interrupted returns …` 整句仍在 |
+| `parameters.action.description` | `INSPECTION: interrupted (READ-ONLY: …) / continue-all-interrupted (ACTION: …)` 仍在 |
+| `parameters.lookbackHours` | **唯一的消费者是被删的两个动作** ⇒ 成了声明了但永不读的死参数 |
+| `parameters.dryRun` | 描述里还写着 `continue-all-interrupted: preview …` |
+
+🔴 **为什么这比"少写一段文档"更严重**：模型照着 schema 调一个不存在的动作，
+**它拿到的错误里没有一句说"这个动作没了"** —— 于是它会重试、会绕路、会自己编一个替代流程。
+同族判据 = **D151（退役功能的残留引用是零信号熵）** ＋ **D310（声明⊆读取／读取⊆声明，双向都要对）**。
+
+### 修法
+
+- `action.description` 的 INSPECTION 段改成**路标**而非删空：写明「已 RETIRED（2026-11-15）」＋
+  「这件活已由容器唤醒调度器的 60s tick 自动完成，不需要你调」。
+  ⇒ **留路标比抹掉好**：抹掉会让模型去找一个它隐约记得存在的入口；路标直接掐掉那个念头。
+- 顶层 `description` 删掉 `The inspection action is read-only: …` 整句（动作清单里不再有 inspection 组）。
+- **删 `lookbackHours`**（无剩余消费者）；`dryRun` 描述收回到只讲 `create`。
+
+### 判据（含变异检验）
+
+新增 `trajectory-tool.test.ts` 一条四向反向钉：
+① 动作清单里不许以**可用形态**出现这两个动作（`continue-all-interrupted (ACTION:` ／ `interrupted (READ-ONLY:`）；
+② 必须留下 `RETIRED` ＋ `scheduler|automatic` 的路标；③ 顶层描述不再列 inspection 组；
+④ `parameters` 不得再有 `lookbackHours`。
+
+**变异已验**：把 `INSPECTION: interrupted (READ-ONLY: …` 贴回去 ⇒ **精确红 1 条并指向该断言行**；
+还原后 `test` **239 files / 3647 tests** 全绿。
+
+### 门禁
+
+`typecheck` ✓ ／ `test` **239 files / 3647 tests** ✓
+
+---
+
 
 owner 令（逐字）：**「我要删的是 我们acc提供的trajectory tool 中的 恢复能力」**
 
