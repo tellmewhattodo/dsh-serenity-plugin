@@ -254,7 +254,7 @@ describe('registerBootstrap: agent/pre-step —— 首锚剥离注入上下文',
 
 // ── fake-initial-turns：注入（agent/inbox/inserted）＋ 短路（llm/stream）──────
 
-describe('registerBootstrap: fake-initial-turns —— 注入两轮 ＋ 短路模型回复', () => {
+describe('registerBootstrap: fake-initial-turns —— 注入假首轮（2026-11-16 起一条）＋ 短路模型回复', () => {
   type Queued = {
     role?: string
     content?: Array<{ text?: string }>
@@ -347,7 +347,7 @@ describe('registerBootstrap: fake-initial-turns —— 注入两轮 ＋ 短路�
     }
   })
 
-  it('🔴 两轮兑现完之后：真实用户消息**必须放行**给模型（不许被吞）', async () => {
+  it('🔴 假首轮兑现完之后：真实用户消息**必须放行**给模型（不许被吞）', async () => {
     const ctx = fakeCtx()
     registerBootstrap(ctx as never)
     const { agent } = inboxAgent('main-boot-14', { header: { cwd: dir }, events: [] })

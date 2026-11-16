@@ -36,10 +36,17 @@ import {
 // 不硬编码字面量：插件来源 kind 的**单一真相源**在 kernel/message-source.ts
 import { ACC_MESSAGE_KIND } from '../src/kernel/message-source.js'
 
-/** 默认登记（= 刚注入完两条） */
+/** 默认登记（= 刚注入完全部假首轮） */
 function pending(remaining = DEFAULT_FAKE_INITIAL_MESSAGES.length): PendingFakeTurn {
   return { remaining, texts: [...DEFAULT_FAKE_INITIAL_MESSAGES] }
 }
+
+/**
+ * 取**最后一轮**假首轮的正文。
+ * 🔴 2026-11-16：原先硬取 `[1]`，而 `DEFAULT_FAKE_INITIAL_MESSAGES` 已由两条合并为一条
+ * ⇒ `[1]` 是 `undefined` ⇒ 判据拿 undefined 比对，恒 false。改取末尾一条与条数**解耦**。
+ */
+const LAST = DEFAULT_FAKE_INITIAL_MESSAGES[DEFAULT_FAKE_INITIAL_MESSAGES.length - 1]!
 
 /** 造一条消息（文本块数组形态，与宿主一致） */
 function message(text: string, kind?: string): Record<string, unknown> {
@@ -85,7 +92,7 @@ describe('fake-initial-turns: isFakeInitialTurn —— 拦截判据', () => {
     const options = request([
       message(DEFAULT_FAKE_INITIAL_MESSAGES[0]!, ACC_MESSAGE_KIND),
       { role: 'assistant', content: [{ type: 'text', text: FAKE_TURN_ACK_TEXT }] },
-      message(DEFAULT_FAKE_INITIAL_MESSAGES[1]!, ACC_MESSAGE_KIND),
+      message(LAST, ACC_MESSAGE_KIND),
       { role: 'assistant', content: [{ type: 'text', text: FAKE_TURN_ACK_TEXT }] },
       message('现在开始干活吧', 'user'),
     ])
@@ -95,7 +102,7 @@ describe('fake-initial-turns: isFakeInitialTurn —— 拦截判据', () => {
 
   it('末条是宿主注入的上下文（非人、非我们）⇒ 跳过它往前找，仍能认出假首轮', () => {
     const options = request([
-      message(DEFAULT_FAKE_INITIAL_MESSAGES[1]!, ACC_MESSAGE_KIND),
+      message(LAST, ACC_MESSAGE_KIND),
       message('context injected by host', 'runtime-context'),
     ])
     expect(isFakeInitialTurn(options, pending())).toBe(true)

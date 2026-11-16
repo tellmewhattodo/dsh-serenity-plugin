@@ -57,14 +57,39 @@ export const DEFAULT_COMPACTION_TOOLS = ['read', 'write', 'edit', 'glob', 'grep'
 
 /**
  * 协议级「假首轮」话语序列（用户确认固化，2026-08-24 S142）：任何 CCC 在抽象层都是
- * 宁静号/ACC——假首轮话语统一，无 CCC 配置面。两轮递进：
- *  ① ACC 身份 + EAP 原则 + we/us 人称 + 先锚定后行动
- *  ② 协作协议 5 条 + acknowledge 要求（只回确认，不做事）
- * 文本 = 原 home-serenity CCC 配置，随零配置化固化进代码。
+ * 宁静号/ACC——假首轮话语统一，无 CCC 配置面。
+ *
+ * 🔵 **2026-11-16 合并：两条 → 一条**（owner 令「合并吧」）。
+ *
+ * 判据（为什么合并安全 · 逐条对读过系统提示词**才**动的手）：
+ *   · 本文件这两条**只出现一次**（`hasUserMessageHistory` 守卫：有真人说话就不再插），
+ *     而系统提示词里的 EAP 块**每轮注入** ⇒ 两者不构成第二真相源，但确实**功能重叠**。
+ *   · 重叠的那一块 = EAP 是什么。系统提示词的 `eapBlock()` 给的是**更详细的操作定义**
+ *     （E↑/R↓/S↑ 各自查什么）⇒ 这里**不必复述**，压成一句指认即可。
+ *   · ⛔ **不可省的四处，条条只在 bootstrap 有**：
+ *       ① `personal pronoun is us/we` —— 系统提示词零处（grep 过）
+ *       ② `We anchor first, then act` —— 同上
+ *       ③ 协作五条 —— 系统提示词零处
+ *       ④ 身份句 `operator agent of Serenity…ACC protocol` —— 开场语境
+ *   · `Please simply reply "acknowledge"` 原本**两条各写一遍**（重复两次），合并后一处。
+ *
+ * 🔴 **为什么"合并"而不是"删第一条"**：删掉第一条会连同 ①②③④ 一起消失；
+ *   合并只是去掉 EAP 的**展开复述**与重复的 acknowledge 指令，语义面零损失。
+ *   ⚠️ 轮数因此 2 → 1：`requiredSignals` 与 `pendingFakeTurns.remaining` 都由
+ *   `DEFAULT_FAKE_INITIAL_MESSAGES.length` 派生，**跟着自动变**，无需另改。
  */
 export const DEFAULT_FAKE_INITIAL_MESSAGES: string[] = [
-  'You are the operator agent of Serenity — a cognitive container governed by the Abstract Cognitive Container (ACC) protocol.\nWe operate under the Explicit Abstraction Principle (EAP): the functional value of a thought equals its external reconstructability — every output we produce must be explicit (E↑), reconstructable (R↓), and stable (S↑).\nThe personal pronoun is us/we.\nWe anchor first, then act: the abstract layer precedes the concrete.\nPlease simply reply "acknowledge" — no action needed.',
-  'Before we proceed, align on how we work:\n1. We read before we write — every decision grounds in what already exists in the container.\n2. Every output records its reasoning (R↓): decisions carry reasons and alternatives.\n3. We never jump levels — abstract layer first, then specifics.\n4. Every artifact we create is a durable cognitive anchor for the work that follows.\n5. We keep the container\'s state coherent (SESSION.md) as we advance.\nPlease simply reply "acknowledge" — no action needed.',
+  'You are the operator agent of Serenity — a cognitive container governed by the Abstract Cognitive Container (ACC) protocol.\n'
+    + 'We operate under the Explicit Abstraction Principle (EAP), whose operational self-check (E↑ explicit / R↓ reconstructable / S↑ stable) is given in full in the system prompt — apply it there, do not restate it here.\n'
+    + 'The personal pronoun is us/we.\n'
+    + 'We anchor first, then act: the abstract layer precedes the concrete.\n'
+    + 'How we work:\n'
+    + '1. We read before we write — every decision grounds in what already exists in the container.\n'
+    + '2. Every output records its reasoning (R↓): decisions carry reasons and alternatives.\n'
+    + '3. We never jump levels — abstract layer first, then specifics.\n'
+    + '4. Every artifact we create is a durable cognitive anchor for the work that follows.\n'
+    + "5. We keep the container's state coherent (SESSION.md) as we advance.\n"
+    + 'Please simply reply "acknowledge" — no action needed.',
 ]
 
 /**
@@ -211,8 +236,10 @@ interface PromotionTracker {
 /**
  * 构建一个 epoch 感知晋升跟踪器（纯逻辑，可单测）。
  * requiredSignals：晋升所需信号数（boundary 后累计；默认 1）。
- * 多轮锚定（v4）：两轮递进锚定时 requiredSignals = 锚定轮数——
- * 每条锚定回复（assistant/message）计一次，最后一条回复后晋升。
+ * 多轮锚定（v4）：N 轮递进锚定时 requiredSignals = N——每条锚定回复
+ * （assistant/message）计一次，最后一条回复后晋升。
+ * 🔵 2026-11-16：`DEFAULT_FAKE_INITIAL_MESSAGES` 由两条合并为一条 ⇒ 缺省 N = **1**
+ *    （仍由 `.length` 派生，不写死；本函数对 N 的语义未变）。
  *
  * maxRoundsFallback：**轮次兜底**（v1.19.3 修复 responses API 兼容）。
  * 某些模型/协议（如 opencode-go-responses）的会话可能不产生标准

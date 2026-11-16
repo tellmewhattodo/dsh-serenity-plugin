@@ -123,7 +123,13 @@ describe('轨迹跟踪器 rebuild（v1.22.4 定稿：复用旧会话 + turn 结�
     expect(a).toContain('Abstract Cognitive Container')
     expect(a).toContain('Explicit Abstraction Principle')
     expect(a).toContain('We anchor first, then act')
-    expect(a).toContain('Before we proceed')
+    // 🔵 2026-11-16：假首轮由两条合并为一条 ⇒ 协作协议的引导句从
+    //    `Before we proceed, align on how we work` 变为 `How we work:`（同一条消息里）。
+    //    断言改为钉**协议内容本身**（五条），比钉那句过渡语更承重。
+    expect(a).toContain('How we work:')
+    expect(a).toContain('We read before we write')
+    expect(a).toContain('We never jump levels')
+    expect(a).toContain('SESSION.md')
     // 去掉 acknowledge 尾句（重建后不重走确认轮）
     expect(a).not.toContain('acknowledge')
     expect(a).not.toContain('no action needed')

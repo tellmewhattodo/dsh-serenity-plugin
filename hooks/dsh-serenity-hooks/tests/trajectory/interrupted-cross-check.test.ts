@@ -74,7 +74,19 @@ const CCC_ROOT = join(HERE, '..', '..', '..', '..', '..', '..')
  */
 const GUARD_CRO =
   process.env.GUARD_CRO_PATH ??
-  join(CCC_ROOT, 'AGENT_SESSIONS', '2026-10-22--guard--中断守护', 'continuous-re-occurrence.ts')
+  firstExisting([
+    // 活跃位置（轨迹在用时）
+    join(CCC_ROOT, 'AGENT_SESSIONS', '2026-10-22--guard--中断守护', 'continuous-re-occurrence.ts'),
+    // 🔵 2026-11-16：该轨迹已被**归档**到 `_archived/`（实测目录确已搬走），
+    //    本文件因此 7/7 红。归档**不注销**轨迹，程序本体仍在 ⇒ 这里跟一步到归档位置。
+    //    ⚠️ 两处都找不到时**仍然显式红**（下面的前置断言），⛔ 绝不改成静默跳过。
+    join(CCC_ROOT, 'AGENT_SESSIONS', '_archived', '2026-10-22--guard--中断守护', 'continuous-re-occurrence.ts'),
+  ])
+
+/** 取第一个存在的候选；都不存在则返回第一个（由调用方的显式断言去红，不在这里吞掉）。 */
+function firstExisting(paths: string[]): string {
+  return paths.find((p) => existsSync(p)) ?? paths[0]!;
+}
 
 /**
  * 🔴 **bun 的可执行路径必须是「解析出来的绝对路径」，不能是裸名 `'bun'`**（2026-11-09 实测）。

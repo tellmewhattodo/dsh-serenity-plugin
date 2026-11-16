@@ -245,7 +245,7 @@ describe('bootstrap: hasUserMessageHistory（v1.28.1 根会话重锚判定；v1.
 })
 
 describe('bootstrap: resolveBootstrapSettings 协议固有默认值（零配置面，S142）', () => {
-  it('无参返回唯一固化设置：zeroTools + 两条协议假首轮消息', () => {
+  it('无参返回唯一固化设置：zeroTools + 协议假首轮消息（2026-11-16 起合并为一条）', () => {
     const s = resolveBootstrapSettings()
     expect(s.bootstrapTools).toEqual(DEFAULT_BOOTSTRAP_TOOLS)
     expect(s.promoteEvents.has('assistant/message')).toBe(true)
@@ -253,9 +253,9 @@ describe('bootstrap: resolveBootstrapSettings 协议固有默认值（零配置�
     expect([...s.suppressedSources]).toEqual(DEFAULT_SUPPRESSED_SOURCES)
     expect(s.compactionTools).toEqual(DEFAULT_COMPACTION_TOOLS)
     expect(s.fakeInitialMessages).toEqual(DEFAULT_FAKE_INITIAL_MESSAGES)
-    expect(s.fakeInitialMessages).toHaveLength(2)
-    expect(s.requiredSignals).toBe(2) // 两轮假首轮：每条回复计一次，第 2 条回复后晋升
-    expect(s.zeroTools).toBe(false) // v1.70：假首轮真跑两轮但模型侧短路 ⇒ 首请求须给完整目录
+    expect(s.fakeInitialMessages).toHaveLength(1)
+    expect(s.requiredSignals).toBe(1) // 一条假首轮：每条回复计一次，该条回复后晋升
+    expect(s.zeroTools).toBe(false) // v1.70：假首轮真跑但模型侧短路 ⇒ 首请求须给完整目录
   })
 
   it('协议固有设置：zeroTools=false 是**结构性要求**，不是调参', () => {
@@ -266,15 +266,31 @@ describe('bootstrap: resolveBootstrapSettings 协议固有默认值（零配置�
     expect(s.zeroTools).toBe(false)
   })
 
-  it('协议假首轮消息内容不可配置：含 ACC 身份 + acknowledge 要求（S142 用户确认固化）', () => {
-    const [first, second] = DEFAULT_FAKE_INITIAL_MESSAGES
-    expect(first).toContain('Abstract Cognitive Container (ACC) protocol')
-    expect(first).toContain('Explicit Abstraction Principle')
-    expect(first).toContain('The personal pronoun is us/we.')
-    expect(first).toContain('We anchor first, then act: the abstract layer precedes the concrete.')
-    expect(first).toContain('Please simply reply "acknowledge" — no action needed.')
-    expect(second).toContain('Before we proceed, align on how we work')
-    expect(second).toContain('SESSION.md')
-    expect(second).toContain('Please simply reply "acknowledge" — no action needed.')
+  it('协议假首轮消息内容不可配置：含 ACC 身份 + 协作五条 + acknowledge（S142 固化；2026-11-16 合并为一条）', () => {
+    const [only] = DEFAULT_FAKE_INITIAL_MESSAGES
+    // ① 身份与原则（系统提示词的 eapBlock 给操作定义，此处只指认不复述）
+    expect(only).toContain('Abstract Cognitive Container (ACC) protocol')
+    expect(only).toContain('Explicit Abstraction Principle')
+    expect(only).toContain('The personal pronoun is us/we.')
+    expect(only).toContain('We anchor first, then act: the abstract layer precedes the concrete.')
+    // ② 协作五条（系统提示词零处，只在 bootstrap 有 ⇒ 合并时一条都不许丢）
+    expect(only).toContain('We read before we write')
+    expect(only).toContain('Every output records its reasoning')
+    expect(only).toContain('We never jump levels')
+    expect(only).toContain('durable cognitive anchor')
+    expect(only).toContain('SESSION.md')
+    // ③ acknowledge 要求只出现一次（原两条各写一遍 = 重复）
+    expect(only).toContain('Please simply reply "acknowledge" — no action needed.')
+    expect(only.match(/simply reply "acknowledge"/g)).toHaveLength(1)
+  })
+
+  it('🔴 反向钉：假首轮合并为**一条**（防止有人拆回两条而不自知）', () => {
+    expect(DEFAULT_FAKE_INITIAL_MESSAGES).toHaveLength(1)
+    // 合并后的那条必须同时承载"身份"与"协作协议"两半
+    const [only] = DEFAULT_FAKE_INITIAL_MESSAGES as [string]
+    expect(only).toContain('operator agent of Serenity')
+    expect(only).toContain('How we work:')
+    // EAP 的展开复述不该回来（操作定义归系统提示词）
+    expect(only).not.toContain('every output we produce must be explicit')
   })
 })
