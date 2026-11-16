@@ -14,6 +14,65 @@
 
 ---
 
+## v1.137.2 — 2026-11-17（`rebuild` 入口按累计用量机械改道 `reconstruct`）
+
+> 来源 = **owner 令**（逐字）：「当 rebuild 被调用 且发现输入量已经超过 1000M 自动变成执行 reconstruct」
+> ⚠️ 不是"自动触发"，不是"提醒模型"，是**在 rebuild 入口按累计量改道**。
+
+### 缺陷：判据早就有了，缺的是"执行面"
+
+v1.121.0 起 `reconstruct` 是**条件可见工具**（超阈值时提醒模型自己调），
+而 `selectHandoverPath`（`trajectory/reconstruct.ts`）**早就算得出**该走 `new-log` ——
+但它只把结果写进 `st.path` **仅供记录**，模型仍按 `rebuild` 原地清空。
+
+🔴 **为什么这很贵**：**原地清空不会让累计量回落**（换讲者，日誌还是那么大）⇒
+超限会话每轮都会重新超限，而 `rebuild` 在那个量上一分钱也降不下来 ——
+**判据恒真、动作恒错**，且没有任何读数会告诉你这件事。
+
+### 改了什么
+
+`src/tools/cognitive-trajectory.ts` 的 `case 'rebuild'`，在 `queueRebuild` **之前**插入路由块：
+读 `tokenUsage` 四桶 → `cumulativeTokens(...) >= RECONSTRUCT_TOKEN_THRESHOLD`（10 亿）⇒
+调 `queueReconstruct`，回执带 `rerouted: 'reconstruct'` ＋ `cumulativeTokens` ＋
+一句说清「原地清空**不会**让它回落」的 `instruction`。
+
+- **判据口径不动**：读 `tokenUsage`（四桶全加 = 累计输入），⛔ 不读 `contextPressure` ——
+  owner 要的是累计量，后者是"当前 prompt 有多大"。
+- **fail-open**：读不到 `tokenUsage`（投影未装配 / 抛异常）⇒ **照常走 rebuild**。
+  路由失败若退化成"什么都不做"，一次超限会话会**彻底卡住**；退回 rebuild 至少完成它请求的那件事。
+- **换载体不换轨迹**：改道后 `sessionMdPath` 仍是同一条轨迹的 SESSION.md。
+
+### 顺带更正一条错的注释（实测推翻）
+
+`cumulativeTokens` 原先写着「= 宿主界面 pill 同口径（`billedInputTokens + output`）」——
+2026-11-17 真机对照：本会话 `tokenUsage` 累计 ≈ **423 M**，同刻界面显示的是**另一个量级**的数
+（界面读 `contextPressure.projectedTokens`）。两者**不同源**。注释已按事实改写，
+⛔ 判据与阈值**不变**（owner 要的是累计量，那才是 `tokenUsage`）。
+
+### 验收
+
+- **门禁六项全绿**：typecheck ✓ ／ typecheck-host 0.2.2-rc.1（node ＋ client）✓ ／
+  test **241 files / 3660 tests** ✓ ／ coverage **91.92%** ✓ ／ build ✓ ／ pack-check **193 文件** ✓
+- **新增 3 条用例**（配对，缺一不可）：
+  ① **423M（未达）⇒ 必须仍走 rebuild** —— 防"每次都改道"的假实现（那比不路由更坏）；
+  ② **≥1000M ⇒ 改道 reconstruct**，且 `sessionMdPath` 仍是**同一条**轨迹（字面路径断言，非自证）；
+  ③ **读不到 tokenUsage ⇒ fail-open 到 rebuild**。
+- **变异检验两处各自精确红**：
+  M1 把判据改成 `>= 0` ⇒ 红在**配对用例 ①**（`expected 'reconstruct' to be undefined`）——
+  证明这组用例能抓到"每次都改道"，不是只有"超了就改道"那条在起作用；
+  M2 在改道分支里注入 `throw` ⇒ 红在**用例 ②**（fail-open 把它吞了，回落到 rebuild）——
+  证明 `catch` 不是空分支、也确实不阻断调用。
+
+### 测试夹具的一处更正（值得记）
+
+handover 便签写「预置 `AGENT_SESSIONS/.bindings.json` 权威绑定」——**那个路径已不存在**：
+D172（2026-10-20）起归属住在**轨迹目录里的 `current.dsh_session_bind`**，读取入口是
+`appendBound(session, 'activate', {dirName, mdPath})`。照旧路径去写 ⇒ 写到一个**没人读的文件**上，
+而现象与"未达阈值"**在读数上不可分**（都是 `rerouted === undefined`）。
+⇒ 便签不是判据，它与事实同权需要先对账。
+
+---
+
 ## v1.137.1 — 2026-11-16（注入面：Session 块点明 `LOG/LOG.md` 是过程留痕的落点）
 
 > 来源 = **owner 真机观察**：「轨迹日常的进度性记录仍然只写 SESSION.md 不写 LOG」。

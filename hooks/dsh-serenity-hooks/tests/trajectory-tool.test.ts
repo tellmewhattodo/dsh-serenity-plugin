@@ -43,7 +43,7 @@ vi.mock('../src/trajectory/cleanup.js', async (importOriginal) => {
 import { createCognitiveTrajectoryTool } from '../src/tools/cognitive-trajectory.js'
 import { hasSessionLogById } from '../src/trajectory/cleanup.js'
 import { resetActiveSessionStore, COGNITIVE_TRAJECTORY_ACTIONS } from '../src/trajectory/core.js'
-import { BIND_FILENAME } from '../src/trajectory/bound.js'
+import { BIND_FILENAME, appendBound } from '../src/trajectory/bound.js'
 import { NO_CCC_FROM_AGENT_CWD } from '../src/kernel/ccc-roots.js'
 
 const mockHasLog = vi.mocked(hasSessionLogById)
@@ -591,6 +591,76 @@ describe('cognitive_trajectory：其余动作的守卫与纯读面', () => {
     await expect(run({ action: 'rebuild', summary: '概' }, noId as never)).rejects.toThrow(
       'Unable to determine the current dsh session id',
     )
+  })
+
+  /**
+   * 🔴🔴 **机械选路的执行面（2026-11-16，owner 令）**：
+   * 「当 rebuild 被调用 且发现输入量已经超过 1000M ⇒ 自动变成执行 reconstruct」
+   *
+   * 这一组**必须是配对的**：只测"超了就改道"会漏掉"没超也改道"那种假实现
+   * （那会让每一次 rebuild 都变成换会话，比不路由更坏）。
+   */
+  describe('rebuild 入口的机械路由（累计用量超阈值 ⇒ 改重建 reconstruct）', () => {
+    /**
+     * 造一对（ctx, exec）：
+     *  · **ctx** 供 `sessionProjections`（读 tokenUsage）＋ `sessions.get`（rebuild/reconstruct 定位会话）；
+     *  · **exec** 只带 agent.session（工具从其取 `session.id`）。
+     * ⚠️ 两个是**不同的入参**：ctx 在构造期注入，exec 在调用期传入 —— 混成一个必然定位不到会话。
+     */
+    function pair(id: string, totals: Record<string, number> | null): { ctx: never; exec: never } {
+      const session: Record<string, unknown> = { id, header: { id, cwd: ccc }, append: () => {} }
+      // 🔴 **必须显式绑定**（`appendBound` ⇒ 写 `current.dsh_session_bind` 权威声明）。
+      //    不绑 ⇒ `resolveSessionMdPath` 四个候选（内存激活 / [SESSION CONTEXT] 事件 /
+      //    权威绑定 / surface 锚点）全落空 ⇒ 恒抛。⚠️ `writeSession()` 只建磁盘目录、**不做绑定**；
+      //    而 v1.30.13（D4）起不再有「全局最新会话」兜底 ⇒ 靠目录存在**不可能**被解析到。
+      appendBound(session, 'activate', { dirName: '2026-09-25--S900--alpha', mdPath: writeSession('2026-09-25--S900--alpha') })
+      const ctx = {
+        get: (n: string) =>
+          n === 'sessionProjections' && totals !== null
+            ? {
+                snapshot: (_s: unknown, keys?: readonly string[]) =>
+                  !keys?.includes('tokenUsage') ? { values: {} } : { values: { tokenUsage: totals } },
+              }
+            : undefined,
+        sessions: { get: (want: string) => (want === id ? session : undefined) },
+      }
+      return { ctx: ctx as never, exec: { agent: { session } } as never }
+    }
+
+    it('🔴 累计 ≈423M（未达 1000M）⇒ **仍走 rebuild**，回执不出现 rerouted', async () => {
+      const { ctx, exec } = pair('dsh-1', {
+        uncachedInputTokens: 7_459_295,
+        outputTokens: 433_583,
+        cacheReadTokens: 415_448_320,
+        cacheWriteTokens: 0,
+      })
+      const out = (await toolWith(ctx).execute({ action: 'rebuild', summary: '概' }, exec)) as Record<string, unknown>
+      expect(out.rerouted).toBeUndefined()
+      expect(String(out.instruction)).toContain('Queued clear-and-rebuild')
+    })
+
+    it('🔴 累计 ≥1000M ⇒ **改道 reconstruct**，且回执说清"为什么原地清空没用"', async () => {
+      const { ctx, exec } = pair('dsh-1', {
+        uncachedInputTokens: 10_000_000,
+        outputTokens: 500_000,
+        cacheReadTokens: 1_000_000_000,
+        cacheWriteTokens: 0,
+      })
+      const out = (await toolWith(ctx).execute({ action: 'rebuild', summary: '概' }, exec)) as Record<string, unknown>
+      expect(out.rerouted).toBe('reconstruct')
+      expect(Number(out.cumulativeTokens)).toBeGreaterThanOrEqual(1_000_000_000)
+      expect(String(out.instruction)).toContain('NEW dsh session')
+      expect(String(out.instruction)).toContain('would NOT bring it down')
+      // 换载体不换轨迹：改道后仍指向**同一条** SESSION.md
+      expect(String(out.sessionMdPath)).toBe(join(ccc, 'AGENT_SESSIONS', '2026-09-25--S900--alpha', 'SESSION.md'))
+    })
+
+    it('🔴 读不到 tokenUsage ⇒ **fail-open 到 rebuild**（不因判据缺失卡住会话）', async () => {
+      const { ctx, exec } = pair('dsh-1', null)
+      const out = (await toolWith(ctx).execute({ action: 'rebuild', summary: '概' }, exec)) as Record<string, unknown>
+      expect(out.rerouted).toBeUndefined()
+      expect(String(out.instruction)).toContain('Queued clear-and-rebuild')
+    })
   })
 
   it('cro-guide ⇒ 纯读返回 CRO 指南正文（不抛、不写盘）', async () => {

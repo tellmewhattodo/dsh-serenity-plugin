@@ -36,8 +36,8 @@
  *   会让阈值 10 亿**永远不触发**——而两个读数在代码里长得一样，谁都"像对的"
  *   （D252 同族：读数器在跑，读的不是那个量）。
  * ⇒ 所以本文件把口径**写死成一个函数** {@link cumulativeTokens}。
- *   宿主自己的界面 pill 用的是同一口径（`dsh-client-ui-chat` 的
- *   `billedInputTokens(usage) + usage.outputTokens`，逐字 = 三桶输入相加再＋输出）。
+ *   ⚠️ 宿主界面 pill 用的是**另一个量**（`contextPressure`），与本口径**不同源** ——
+ *   2026-11-17 实测更正，详见 {@link cumulativeTokens} 的注释。两者别互相当证据。
  *
  * ## 🔴 为什么用 `register(def, { when })`，而不是 `restrict({deny})`
  *
@@ -143,8 +143,13 @@ export function readTokenTotals(ctx: unknown, session: unknown): TokenTotals | n
 /**
  * **累计口径的唯一真相源**：四桶全加。
  *
- * = 宿主界面 pill 的口径（`billedInputTokens = uncachedInput + cacheRead + cacheWrite`，再加 `output`）。
- * ⛔ 不要在这里"优化"成只加输入侧、更不要只加 `uncachedInputTokens` —— 见文件头注那张对照表。
+ * ⚠️ **与宿主界面 pill 不同源，别把两者当同一个量**（2026-11-17 实测更正）：
+ * 本函数读的是 `tokenUsage` 投影（四桶全加，跨轮累加）；界面那个 `NNNNM tok` 来自
+ * `ContextMeter` 读的 **`contextPressure.projectedTokens`**（当前 prompt 有多大）。
+ * 真机对照：本会话 `tokenUsage` 累计 ≈ **423 M**，同刻界面显示的是**另一个量级**的数。
+ * ⇒ owner 要的是**累计输入**，所以阈值判据用本函数，**不改**；
+ *   但本文件早先那句「= 宿主界面 pill 同口径」是**错的**，已删。
+ * ⛔ 也不要在这里"优化"成只加输入侧、更不要只加 `uncachedInputTokens` —— 见文件头注那张对照表。
  */
 export function cumulativeTokens(totals: TokenTotals): number {
   return totals.uncachedInputTokens + totals.outputTokens + totals.cacheReadTokens + totals.cacheWriteTokens

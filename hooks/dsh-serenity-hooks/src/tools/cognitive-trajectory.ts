@@ -722,6 +722,62 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
         }
         const dshSessionId = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? ''
         if (!dshSessionId) throw new Error('Unable to determine the current dsh session id')
+
+        // 🔴🔴 **机械选路的执行面（2026-11-16，owner 令）**：
+        //    「当 rebuild 被调用 且发现输入量已经超过 1000M ⇒ 自动变成执行 reconstruct」
+        //
+        // ## 为什么路由点必须在这里，而不能只靠注入提醒
+        //   v1.137.0 起 `selectHandoverPath` 已经**算得出**该走 `new-log`（累计量超），
+        //   但它只把结果写进 `st.path` **仅供记录** ⇒ 模型仍按 `rebuild` 原地清空。
+        //   而**原地清空不会让累计量回落**（换讲者，日誌还是那么大）⇒ 下一轮又超，
+        //   反复 rebuild 而累计量只增不减 = 那个量**永远降不下来**。
+        //   ⇒ 判据（`totalOver`）本来就存在，缺的是**在 rebuild 入口按它改道**。
+        //
+        // ## 为什么不让调用方自己选
+        //   对会话而言 `rebuild` 与 `reconstruct` 是**同一件事**（"把我换掉"）；
+        //   走哪条是机械的账（D 判据：累计超 ⇒ `new-log`）。让模型判断一次
+        //   只会多一次思考、多一次选错的机会。
+        //
+        // ## 判据来源与失败方向
+        //   读 `tokenUsage.totals` 四桶；**读不到 ⇒ 不路由**（fail-open 到 rebuild）。
+        //   ⚠️ fail-open 的理由：路由失败若退化成"什么都不做"，一次超限会话会**彻底卡住**；
+        //      而退回 rebuild 至少完成"清空"这件它就请求了的事。
+        {
+          try {
+            const { readTokenTotals, cumulativeTokens, RECONSTRUCT_TOKEN_THRESHOLD } =
+              await import('../trajectory/reconstruct.js')
+            const session = (exec as { agent?: { session?: unknown } }).agent?.session
+            const totals = session ? readTokenTotals(ctx, session) : null
+            const cumulative = totals ? cumulativeTokens(totals) : null
+            if (cumulative !== null && cumulative >= RECONSTRUCT_TOKEN_THRESHOLD) {
+              const { queueReconstruct } = await import('../trajectory/reconstruct.js')
+              const rerouted = queueReconstruct(ctx, {
+                root,
+                note: args.note as string | undefined,
+                summary: args.summary as string,
+                dshSessionId,
+              })
+              return {
+                ok: true,
+                queued: rerouted.queued,
+                rerouted: 'reconstruct',
+                cumulativeTokens: rerouted.cumulative,
+                threshold: RECONSTRUCT_TOKEN_THRESHOLD,
+                anchor: rerouted.anchor,
+                sessionMdPath: rerouted.sessionMdPath,
+                instruction:
+                  `Rebuild was rerouted to reconstruct: this session's cumulative usage is ${rerouted.cumulative} `
+                  + `≥ threshold ${RECONSTRUCT_TOKEN_THRESHOLD}, and clearing in place would NOT bring it down. `
+                  + 'When this turn ends: a NEW dsh session is created, this cognitive trajectory is bound to it, '
+                  + 'the continue anchor is injected there, and the current session is archived. '
+                  + 'Resume from SESSION.md in the new conversation — do not keep working in this one.',
+              }
+            }
+          } catch {
+            /* 路由判据异常 ⇒ fail-open 到 rebuild（见上方理由），绝不因此阻断调用 */
+          }
+        }
+
         const { queueRebuild } = await import('../trajectory/rebuild.js')
         const result = await queueRebuild(ctx, {
           root,
