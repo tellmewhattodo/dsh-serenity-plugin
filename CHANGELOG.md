@@ -14,6 +14,62 @@
 
 ---
 
+## v1.137.1 — 2026-11-16（注入面：Session 块点明 `LOG/LOG.md` 是过程留痕的落点）
+
+> 来源 = **owner 真机观察**：「轨迹日常的进度性记录仍然只写 SESSION.md 不写 LOG」。
+> 这一版**只改措辞**，不动机制。
+
+### 缺陷：静态提示词里 `LOG` 一次都没出现
+
+每轮注入的 Session 块（`seams/system-prompt.ts` 的 `sessionBlock()`）通篇只讲 `SESSION.md`：
+
+| 面 | 原文 | 后果 |
+|---|---|---|
+| 命名 | `Rules (SESSION.md is the cognitive trajectory **log** …)` | SESSION.md 被称作 "the log"，而 `LOG/` 目录也叫 log ⇒ 模型读到「写 log」就写 SESSION.md |
+| 去处 | `Execution detail … belongs in the **COMMIT MESSAGE**, not here` | 过程性记录**只有一个下家 = commit message**；`LOG/LOG.md` **0 次命中** |
+| ACK 语义 | `recorded-{code} — if you recorded progress **to SESSION.md**` | 「记录」被锚死在 SESSION.md ⇒ 想诚实回 ACK 就只能污染 SESSION.md，否则假装 skipped |
+
+🔴 **为什么它比"少写一段文档"严重**：`PROMPT.md` 与 `home-serenity` skill 里**都写了** LOG 分工，
+但它们**不是每轮注入** —— 读一次就沉到上下文深处，被这 30 行高频规则压过去。
+⇒ 判据：**写在"会被读一次"的地方，压不过写在"每轮都重述"的地方**。
+
+### 改了什么（三处，均为同一块文本）
+
+1. `log` → **`BODY — judgement only`**（与 ACC 既有术语 `persistent body` 一致，立刻划出"只放判断"）
+2. 过程性记录的落点从「只有 commit message」改为 **`LOG/LOG.md`，随发生随写**；
+   commit message 退到只装「diff 级别的琐碎」
+3. ACK 语义改为 **`SESSION.md for judgement, LOG/LOG.md for process`**
+
+净增 ≈ **95 字符/轮**（≈25 token），比预估的 150 小 —— 因为第 2 处顺手压掉了原句的啰嗦。
+
+### 已知取舍（照实登记）
+
+过程写 LOG 成了**每轮硬规则**，而 LOG **没有写入频率限制** ⇒ 可能产生新的噪声。
+接受它，理由是 **LOG 有机械轮转**（`carrier-log.ts`）⇒ 过量的代价**有上界**；
+而 SESSION.md 没有轮转，污染它的代价**无上界**。
+
+### 跨实现分叉（须 osp 跟进）
+
+`tests/osp-alignment.test.ts` 存着 osp 侧 Session 块的**逐字节参照副本**，本版已同步更新。
+⚠️ 该文件自己的注释写着「两边一起改所以照旧绿 ⇒ 会**静默掩盖** osp 仍在注入旧文本」
+⇒ **osp 侧现在与 dsp 分叉**，需 S156 跟进才能重新对齐。登记在案。
+
+### 门禁
+
+`typecheck` ✓ ／ `typecheck-host 0.2.2-rc.1` ✓（node ＋ client）／ `test` **241 files / 3657 tests** ✓
+／ `coverage` **91.88%** ✓ ／ `build` ✓ ／ `pack-check` ✓
+
+### 附带：清掉一处跨轨迹污染（非本版引入）
+
+`coverage` 曾报 `ontology-engine` 红，真因 = CCC 的 `.opencode/skills/node_modules/.vite`
+被本体公理 `forall s in Skill: … implies s.hasSkillMd == true` 当成一个**缺 `SKILL.md` 的 skill**。
+🔴 **关键读数**：目录 mtime `08:12`，而其中 `results.json` 是 `13:11` ⇒ **不是本仓门禁建的**
+（删掉后连跑 `coverage` 与 `test` 两次**均未重建**，证明 v1.137.0 钉死的 `cacheDir` 有效）。
+⇒ 已清理 CCC；**根因未修**（第三方在 `.opencode/skills` 附近跑 vitest 会让它复现），
+dsp 侧无法关闭，登记给 owner。
+
+---
+
 ## v1.137.0 — 2026-11-16（交接协议重整：四入口、一条注入、便签入 LOG）
 
 > 来源 = **owner 与维护轨迹对"认知轨迹生命周期"故事的逐轮对齐**。owner 逐条裁定，
