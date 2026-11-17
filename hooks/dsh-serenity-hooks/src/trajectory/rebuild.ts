@@ -246,11 +246,20 @@ const PENDING_TTL_MS = 10 * 60 * 1000
 //         `performRebuild` 的两处 `return false`）⇒ 落 `empty-surface` 事件，而下方增量只认
 //         4 类事件名 ⇒ **它既不进 rebuilt 也不进 dropped/failed**。识别法：`lastEvent === 'empty-surface'`。
 //      P2 **同会话在消费前重复排队**——`queueRebuild` 用 `pendingRebuilds.set()`（语义 = 覆盖同会话旧队列）
-//         ⇒ N 条 `queued` 只对应 1 条 `rebuilt` ⇒ 差值 +(N−1)。**良性**：重建仍恰好发生一次。
+//         ⇒ N 条 `queued` 只对应 1 条 `rebuilt` ⇒ 差值 +(N−1)。
+//         🔴 **2026-11-17 更正：这**不是**良性的**（旧注释写"良性：重建仍恰好发生一次"是错的）。
+//            它此前还挂着 LOG 轮转 ⇒ **每一条被覆盖的排队都白轮转了一代**，
+//            真机实测 `queueCount=11 / rebuiltCount=4` ⇒ **7 次轮转是为不会发生的重建付的**（管家读数）。
+//            ⇒ 本版起**单独计数** `supersededCount`（见下），且轮转已迁到执行侧（不再按排队计）。
 //      P3 **进程重启**——`pendingRebuilds` 是内存 Map：重启即丢（**不产生任何事件**）；同时
 //         `diagState` 归零 ⇒ **计数不可跨重启累加比较**，且**文件在下次事件前仍留着死进程的数值**。
 //  · 🔴 **读这个文件的纪律**：必须同时读 `acc-diag` 的「武装于」——若 `lastTs < 武装于`，
 //    则文件是**上一个进程的残留**，其计数与当前进程无关（判据可机械执行，别凭感觉）。
+//  · 🔴🔴 **`supersededCount` 是 2026-11-17 补的**（管家报「`droppedCount: 0` 是个会骗人的零」）：
+//    在此之前，"排队被后一次覆盖"**不产生任何事件** ⇒ `droppedCount` 恒 0 而实际有 7 条被吞。
+//    这正是 D-20「零不需要证据就能写出来」那一类。
+//    ⇒ 判据：**凡"某条路径会静默丢弃一条待办"，就必须有字段为它计数**；
+//       让 `queueCount − rebuiltCount − supersededCount − droppedCount − failedCount` 只剩已知的 P1/P3。
 interface RebuildDiagState {
   lastTs: string
   lastSessionId: string
@@ -260,9 +269,19 @@ interface RebuildDiagState {
   rebuiltCount: number
   droppedCount: number
   failedCount: number
+  /**
+   * 被后一次排队**覆盖**掉的条数（2026-11-17 补）。
+   * 🔴 为什么必须有：覆盖发生在 `pendingRebuilds.set()`，**不产生任何事件** ⇒
+   * 在补这个字段之前，那 7 条被吞的排队在 `droppedCount` 里是 **0**，
+   * 而"0"看起来像"没发生过"。这正是「零不需要证据就能写出来」那一类失效。
+   */
+  supersededCount: number
 }
 
-let diagState: RebuildDiagState = { lastTs: '', lastSessionId: '', lastEvent: '', queueCount: 0, rebuiltCount: 0, droppedCount: 0, failedCount: 0 }
+let diagState: RebuildDiagState = {
+  lastTs: '', lastSessionId: '', lastEvent: '',
+  queueCount: 0, rebuiltCount: 0, droppedCount: 0, failedCount: 0, supersededCount: 0,
+}
 
 function writeRebuildDiag(root: string, entry: { sessionId: string; event: string; detail?: string }): void {
   try {
@@ -274,6 +293,7 @@ function writeRebuildDiag(root: string, entry: { sessionId: string; event: strin
     if (entry.event === 'rebuilt') s.rebuiltCount += 1
     if (entry.event === 'ttl-dropped') s.droppedCount += 1
     if (entry.event === 'failed') s.failedCount += 1
+    if (entry.event === 'superseded') s.supersededCount += 1
     s.lastTs = isoLocal()
     s.lastSessionId = entry.sessionId
     s.lastEvent = entry.event
@@ -348,28 +368,35 @@ export async function queueRebuild(
   //     ⇒ owner 2026-11-15 给了这个裁决。原型 soft 版的失效形态正是「agent 忘了轮转，
   //       且无信号」（LOG 无限长、代数不增）—— 现在它挂在 rebuild 路径上，忘不忘都一样。
   //
-  //     🔴 **失败不阻断 rebuild**：rebuild 是"把上下文救回来"的动作，日志归档是**次要**的；
-  //        让归档失败挡住重建，等于用秩序换可用性，方向反了。
-  //        失败**必须被说出来**（⛔ 不静默），见下方 console.warn 的判据。
-  try {
-    const trajDir = dirname(mdPath)
-    const rot = rotateCarrierLog(trajDir)
-    if (rot.rotated) {
-      // 🔴 回执只说明"我做了 rename"，**不说明目标对** ⇒ 必须查 verified。
-      //    （同族：rename 成功但字节数不同 = 内容没搬全，而那不会自己报错。）
-      if (!rot.verified) {
-        console.warn(`[serenity-hooks] ⚠️ LOG 轮转回读校验失败：${rot.frozenAs} 的字节数不等于轮转前的 ${rot.bytesBefore} B。`
-          + ' rebuild 照常进行；请人工核对 LOG/ 目录。')
-      } else {
-        console.log(`[serenity-hooks] ✓ LOG 轮转：${rot.bytesBefore} B → LOG/${rot.frozenAs}（回读校验通过）`
-          + (rot.renamedFrom !== null ? `；原定名 ${rot.renamedFrom} 已存在 ⇒ 改名避让（⛔ 未覆盖）` : ''))
-      }
-    }
-  } catch (e) {
-    console.warn(`[serenity-hooks] ⚠️ LOG 轮转未执行（${(e as Error).message}）—— rebuild 不受影响`)
-  }
-
+  // 🔴🔴 **2026-11-17 迁移：轮转从「排队时」挪到「执行时」**（真机缺陷，管家报）：
+  //
+  //     现场：某轨迹 74 秒内连出 **7 代**（3,131 B → 26,739 B → 2,787 → 2,786 → 3,748 → 2,189 → 1,229 B）。
+  //     成因不是"重建了 7 次"，而是**排队 7 次、只执行 1 次**：
+  //       · 本函数（排队）每次都轮转；
+  //       · 而 `pendingRebuilds.set(...)` 是**覆盖写**，同一会话只留一条 ⇒ 只有最后一次被执行。
+  //     ⇒ **代数 ≠ 交接次数**，且每一次多余的轮转都在**切碎日志并搬运交接节**，
+  //       把人的手写增量一代一代磨没（配合"只取第一条"那个缺陷，损失被放大）。
+  //
+  //     ⇒ 判据：**轮转必须与"这次交接确实会发生"对齐**，所以改在 `performRebuild` 成功之后做。
+  //       `performRebuild` 返回 true = surface 真的被替换了 = 交接真的发生了 ⇒ 此刻轮转才成立。
+  //
+  //     ⚠️ 失败方向不变：轮转失败**绝不**回滚重建、也**不**让重建失败（重建是救上下文的动作，
+  //       归档是次要的）。差异只在**什么时候**做，不在做不做。
+  //
   // ③ 排队（覆盖同会话旧队列）——需求②：存 summary + mdPath（turn-stopping 重建后重命名标题）
+  //
+  // 🔴🔴 **2026-11-17：覆盖旧队列必须留下一条事件**（管家报「droppedCount: 0 是个会骗人的零」）。
+  //    旧写法是裸 `set()` —— 被覆盖掉的那次排队**不产生任何读数**，
+  //    于是 `droppedCount` 恒 0 看起来像"没发生过"，而实测有 7 条被吞。
+  //    ⇒ 判据：**凡"某条路径会静默丢弃一条待办"，就必须有字段为它计数**。
+  if (pendingRebuilds.has(dshSessionId)) {
+    writeRebuildDiag(root, {
+      sessionId: dshSessionId,
+      event: 'superseded',
+      detail: 'same session queued again before turn end — the earlier queue entry was REPLACED '
+        + '(its rebuild will never run; with LOG rotation this used to cost one whole generation per replacement)',
+    })
+  }
   pendingRebuilds.set(dshSessionId, { anchor, summary, mdPath, focus, queuedAt: Date.now() })
   writeRebuildDiag(root, { sessionId: dshSessionId, event: 'queued' })
   return { queued: true, anchor, sessionMdPath: mdPath }
@@ -468,6 +495,38 @@ export function performRebuild(
 const REBUILD_ANCHOR_SOURCE: MessageSource = { kind: 'user' }
 
 /**
+ * 交接**确实发生之后**的 LOG 轮转（2026-11-17 从 `queueRebuild` 迁来）。
+ *
+ * ## 为什么迁移（真机缺陷，管家报，逐字坐标）
+ * 旧实现挂在**排队**路径上 ⇒ 同一会话连续调 N 次 `rebuild` 会产生 N 次轮转，
+ * 而 `pendingRebuilds` 是覆盖写 ⇒ **只执行 1 次**。
+ * 实测现场：74 秒内连出 **7 代**（3,131 B → 26,739 B → 2,787 → 2,786 → 3,748 → 2,189 → 1,229 B）。
+ * 每一次多余的轮转都在**切碎日志并搬运交接节**，把人的手写增量一代一代磨没。
+ *
+ * ## 失败方向（刻意保留原语义）
+ * 轮转失败 **不** 回滚重建、**不** 让重建失败 —— rebuild 是"把上下文救回来"的动作，
+ * 归档是次要的；让归档挡住重建 = 用秩序换可用性，方向反了。
+ * 但失败**必须被说出来**（⛔ 不静默）。
+ */
+function rotateLogAfterRebuild(mdPath: string): void {
+  try {
+    const trajDir = dirname(mdPath)
+    const rot = rotateCarrierLog(trajDir)
+    if (!rot.rotated) return
+    // 🔴 回执只说明"我做了 rename"，**不说明目标对** ⇒ 必须查 verified。
+    if (!rot.verified) {
+      console.warn(`[serenity-hooks] ⚠️ LOG 轮转回读校验失败：${rot.frozenAs} 的字节数不等于轮转前的 ${rot.bytesBefore} B。`
+        + ' 重建已完成；请人工核对 LOG/ 目录。')
+      return
+    }
+    console.log(`[serenity-hooks] ✓ LOG 轮转：${rot.bytesBefore} B → LOG/${rot.frozenAs}（回读校验通过）`
+      + (rot.renamedFrom !== null ? `；原定名 ${rot.renamedFrom} 已存在 ⇒ 改名避让（⛔ 未覆盖）` : ''))
+  } catch (e) {
+    console.warn(`[serenity-hooks] ⚠️ LOG 轮转未执行（${(e as Error).message}）—— 重建不受影响`)
+  }
+}
+
+/**
  * 重建后重命名 dsh 会话标题（需求② S142 用户拍板：rebuild 后标题带新阶段概括）。
  * 标题 = S###-YYYY-MM-DD-<summary>——S### 与日期从持久轨迹目录名派生（不信任 LLM），
  * 概括来自 queueRebuild 的 summary 参数（服务端清洗截断）。
@@ -527,6 +586,12 @@ export function registerRebuildTurnHook(ctx: Context): void {
           : undefined
       const rebuilt = performRebuild(agent.session, pending, meter)
       if (rebuilt) {
+        // 🔴 **LOG 轮转移到此处**（2026-11-17，真机缺陷：此前在排队时轮转 ⇒ 排队 N 次切碎 N 代、
+        //    而只执行 1 次 ⇒ 代数 ≠ 交接次数，且把人的手写交接节一代代磨没）。
+        //    判据：`rebuilt === true` ⇒ surface 真被替换 ⇒ 交接**确实发生** ⇒ 此刻轮转才成立。
+        //    ⚠️ 失败方向：轮转失败**不**回滚重建、不**让重建失败**（重建救上下文，归档次要）；
+        //       但必须**说出来**（⛔ 不静默）。
+        rotateLogAfterRebuild(pending.mdPath)
         // 需求②：重建后重命名 dsh 会话标题为 S###-日期-概括（重建代表新工作阶段；
         // 编号日期从持久轨迹目录派生，概括来自 summary 参数——与 use/create 命名一致）
         renameAfterRebuild(ctx, agent, pending)

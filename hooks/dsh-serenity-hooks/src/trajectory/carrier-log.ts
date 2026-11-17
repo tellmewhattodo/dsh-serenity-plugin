@@ -120,21 +120,51 @@ function listFrozen(dir: string): string[] {
  * @returns 该节全文（含标题、去掉尾部空行）；没有该节 ⇒ `null`
  */
 export function extractHandoverNote(text: string): string | null {
+  const notes = extractAllHandoverNotes(text)
+  return notes.length > 0 ? notes[0]! : null
+}
+
+/**
+ * 抽出**全部** `## Handover note` 节（保持原序）。
+ *
+ * 🔴🔴 **2026-11-17 真机缺陷（管家报「74 秒连出 7 代，手写交接详节从 gen 6 起整段消失」）**：
+ *
+ * 旧实现是 `lines.findIndex(...)` —— **只取第一条**。而真实文件里出现过**两个**交接节：
+ * 模板短节在前（由上一次轮转搬运而来）、人写详节在后（本轮真正想交代的内容）。
+ * ⇒ 搬运只取第一条 ⇒ **人写的那一节被静默丢弃**，而它恰好是**模板没覆盖、只有人写得出来**的增量
+ *   （该现场丢的是四条「别重做」＋一条容器级发现）。
+ *
+ * ⚠️ **为什么当时没有报错**：轮转的 `verified` 只校验**字节数**（rename 搬全了没有），
+ *   **从不校验"该搬的搬全了没有"**。⇒ 这是「判据量错了对象」的形态（D252 同族）。
+ *
+ * ⇒ 判据：**搬运必须取全部，不允许"取第一条就够了"**。多节并存本身合法
+ *   （人可能续写、模板可能先占位），所以正确做法是**全搬**，不是"规定只能有一个"。
+ */
+export function extractAllHandoverNotes(text: string): string[] {
   const lines = text.split('\n')
-  const head = lines.findIndex((l) => l.trim() === HANDOVER_NOTE_HEADING)
-  if (head < 0) return null
-  // 节止于下一个 `## ` 或更高级标题（`# `/`### ` 之下仍属本节 ⇒ 只有 `## ` 与 `# ` 才算边界）
-  let end = lines.length
-  for (let i = head + 1; i < lines.length; i++) {
-    const t = lines[i]!.trim()
-    if (t.startsWith('## ') || t.startsWith('# ')) {
-      end = i
-      break
+  const out: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    if (lines[i]!.trim() !== HANDOVER_NOTE_HEADING) {
+      i++
+      continue
     }
+    const head = i
+    // 节止于下一个 `## ` 或更高级标题（`# `/`### ` 之下仍属本节 ⇒ 只有 `## ` 与 `# ` 才算边界）
+    let end = lines.length
+    for (let j = head + 1; j < lines.length; j++) {
+      const t = lines[j]!.trim()
+      if (t.startsWith('## ') || t.startsWith('# ')) {
+        end = j
+        break
+      }
+    }
+    const section = lines.slice(head, end)
+    while (section.length > 0 && section[section.length - 1]!.trim() === '') section.pop()
+    out.push(section.join('\n'))
+    i = end
   }
-  const section = lines.slice(head, end)
-  while (section.length > 0 && section[section.length - 1]!.trim() === '') section.pop()
-  return section.join('\n')
+  return out
 }
 
 /** 读一个轨迹目录的日志状态（只读，不改任何东西）。 */
@@ -246,11 +276,11 @@ export function rotateCarrierLog(trajectoryDir: string, now: Date = new Date()):
   if (!existsSync(live)) {
     const frozen = listFrozen(dir)
     let header = birthHeader(frozen.length + 1, now, target)
-    // 🔴 搬运 `## Handover note` 整节：不搬 ⇒ 新代空白 ⇒ 新会话读到空 LOG ⇒ 交接断开且无报错。
+    // 🔴 搬运 **全部** `## Handover note` 节（2026-11-17 修正：旧实现只搬第一条 ⇒ 人写的第二节被静默丢弃）。
     //    顺序不可换：必须在 rename **之后**从冻结代读（轮转前读也一样，但从 dst 读最贴近真相）。
-    const note = extractHandoverNote(readFileSync(dst, 'utf-8'))
-    if (note !== null) {
-      header += `${note}\n\n`
+    const notes = extractAllHandoverNotes(readFileSync(dst, 'utf-8'))
+    if (notes.length > 0) {
+      header += `${notes.join('\n\n')}\n\n`
     }
     writeFileSync(live, header, 'utf-8')
   }

@@ -246,7 +246,19 @@ describe('rebuild-executor：LOG 轮转的接线（v1.136.0）', () => {
     }
   }
 
-  it('W1 rebuild 排队 ⇒ 当前代被冻结、新代出生（**走 queueRebuild，不是直接调 rotate**）', async () => {
+  /**
+   * 🔴🔴 **2026-11-17 语义迁移（真机缺陷，管家报「74 秒连出 7 代」）**：
+   *
+   * 轮转从**排队时**挪到**执行时**。旧用例钉的是"排队 ⇒ 冻结"，那正是缺陷本身 ——
+   * 因为 `pendingRebuilds` 是覆盖写，同一会话排队 N 次只执行 1 次，
+   * 而旧实现在排队时就轮转 ⇒ **N 代被切碎、只有 1 次交接发生**。
+   * 真机实测 `queueCount=11 / rebuiltCount=4` ⇒ 7 次轮转是为不会发生的重建付的。
+   *
+   * ⇒ 新判据（成对，缺一不可）：
+   *   ① **排队不轮转**（否则重复排队照旧切碎日志）；
+   *   ② **执行才轮转**（`performRebuild` 成功之后）。
+   */
+  it('🔴 W1 排队**不**轮转（重复排队不得切碎日志）', async () => {
     const session = fakeSession([10, 11])
     const md = mkSessionDir('2026-11-15--S200--log-rotate')
     writeLog(md, '# LOG — generation 1\n\n- 有真内容\n')
@@ -254,19 +266,32 @@ describe('rebuild-executor：LOG 轮转的接线（v1.136.0）', () => {
 
     await queueRebuild(qctx(session), { root: dir, summary: 'x', agentCwd: dir, dshSessionId: 's1' })
 
+    // 🔴 判据：排队阶段一个字节都不许动日志
+    expect(frozenLogs(md)).toHaveLength(0)
+    expect(existsSync(join(dirname(md), 'LOG', 'LOG.md'))).toBe(true)
+  })
+
+  it('🔴 W1b 执行成功 ⇒ 当前代被冻结、新代出生，归档件保留原内容', async () => {
+    const session = fakeSession([10, 11])
+    const md = mkSessionDir('2026-11-15--S200--log-rotate-exec')
+    writeLog(md, '# LOG — generation 1\n\n- 有真内容\n')
+    bindSession(session, md)
+    await queueRebuild(qctx(session), { root: dir, summary: 'x', agentCwd: dir, dshSessionId: 's1' })
+
+    // 执行（turn-stopping）—— 轮转就在这一步发生
+    const { fire } = hookCtx()
+    fire({ agent: { id: 's1', session, steer: () => {} }, turn: 1 })
+
     const frozen = frozenLogs(md)
     expect(frozen).toHaveLength(1) // 轮转真的发生了
     expect(frozen[0]).toMatch(/^LOG-\d{4}-\d{2}-\d{2}T\d{4}\.md$/)
     // 新代存在且**非空**（下一个人打开不是白板）
-    const live = join(dirname(md), 'LOG', 'LOG.md')
-    expect(existsSync(live)).toBe(true)
-    expect(statSync(live).size).toBeGreaterThan(0)
+    expect(existsSync(join(dirname(md), 'LOG', 'LOG.md'))).toBe(true)
     // 归档件保留原内容（⛔ 不是被"新代"顶掉）
     expect(readFileSync(join(dirname(md), 'LOG', frozen[0]!), 'utf-8')).toContain('有真内容')
   })
 
-  it('W2 没有 LOG 目录 ⇒ 轮转是空操作，**rebuild 照常排队**（⛔ 不为没有日志的轨迹造假归档）', async () => {
-    const session = fakeSession([10, 11])
+  it('W2 没有 LOG 目录 ⇒ 轮转是空操作，**rebuild 照常排队**（⛔ 不为没有日志的轨迹造假归档）', async () => {    const session = fakeSession([10, 11])
     const md = mkSessionDir('2026-11-15--S200--no-log')
     bindSession(session, md)
 
@@ -286,15 +311,57 @@ describe('rebuild-executor：LOG 轮转的接线（v1.136.0）', () => {
 
     const r = await queueRebuild(qctx(session), { root: dir, summary: 'x', agentCwd: dir, dshSessionId: 's1' })
 
-    // 判据：主流程（排队 ＋ 绑定）一切正常 —— 这是 D157 的"只有成功才会产生的副作用"那一侧
+    // 🔴 判据：主流程（排队 ＋ 绑定）一切正常 —— 这是 D157 的"只有成功才会产生的副作用"那一侧
     expect(r.queued).toBe(true)
     expect(pendingRebuildSnapshot().has('s1')).toBe(true)
     expect(r.sessionMdPath).toBe(md)
 
-    // 🔴 且失败**被说出来**（⛔ 不静默）—— 静默的失败等于"看起来像没轮转"，下一个人无从发现
+    // 执行阶段轮转失败 ⇒ rebuild 仍成功、**失败被说出来**（⛔ 不静默）
+    const { fire } = hookCtx()
+    fire({ agent: { id: 's1', session, steer: () => {} }, turn: 1 })
     expect(warn.mock.calls.some((c) => String(c[0]).includes('LOG 轮转未执行'))).toBe(true)
     // 仍然没有归档产物（不是"轮转成了"）
     expect(frozenLogs(md)).toHaveLength(0)
+  })
+
+  /**
+   * 🔴🔴 **2026-11-17 补：被覆盖的排队必须留下计数**（管家报「`droppedCount: 0` 是个会骗人的零」）
+   *
+   * 背景读数（管家实测）：`.rebuild-diag.json` = `queueCount: 11 / rebuiltCount: 4 / droppedCount: 0`。
+   * ⇒ `11 − 4 = 7` 条被覆盖掉的排队**没有任何字段为它们计数** ⇒ `droppedCount` 恒 0 看起来像"没发生过"。
+   * 这正是「零不需要证据就能写出来」那一类失效。
+   *
+   * 判据：**凡"某条路径会静默丢弃一条待办"，就必须有字段为它计数。**
+   */
+  it('🔴 W4 同一会话重复排队 ⇒ `supersededCount` 递增（旧实现这里恒 0，是假零）', async () => {
+    const session = fakeSession([10, 11])
+    const md = mkSessionDir('2026-11-15--S200--superseded')
+    bindSession(session, md)
+
+    // ⚠️ 计数是**进程内累计**（模块级 diagState，跨用例存活），而 `dir` 每个用例都新建
+    //    ⇒ 「读文件当基线」行不通（新目录里文件还不存在，读到的恒是 0）。
+    //    ⇒ 正确做法：**先做一次已知的排队**（= 一条新事件 ⇒ 文件必然被写出且带着累计值），
+    //       以它之后的值作基线，再断言后续增量。
+    await queueRebuild(qctx(session), { root: dir, summary: 'baseline', agentCwd: dir, dshSessionId: 's1' })
+    const before = readDiag() as ReturnType<typeof readDiag> & { supersededCount?: number }
+    const q0 = before.queueCount
+    const s0 = before.supersededCount ?? 0
+
+    // 再排队 3 次（只有最后一条会被执行；前两条被覆盖）
+    for (let i = 0; i < 3; i++) {
+      await queueRebuild(qctx(session), { root: dir, summary: `x${i}`, agentCwd: dir, dshSessionId: 's1' })
+    }
+
+    const d = readDiag() as ReturnType<typeof readDiag> & { supersededCount?: number }
+    expect(d.queueCount - q0).toBe(3)
+    // 🔴 承重断言：**3 次全都覆盖了一条已有排队**（基线那次仍在队列里，
+    //    所以后续每一次 `set()` 都是覆盖 ⇒ 3，不是 2）。
+    //    ⚠️ 我第一版期望值写成 2（"排 3 次只执行最后一次 ⇒ 覆盖 2 次"）——
+    //       那个算法漏了基线那一条仍在队列里。**正确值是 3**。
+    //    这条差 1 正是"靠减法猜计数"会错的活例：字段必须由写入点自己记，不能事后减。
+    expect((d.supersededCount ?? 0) - s0).toBe(3)
+    // 对照：旧口径只有 ttl-dropped，一条都不涨（正是"会骗人的零"）
+    expect(d.droppedCount).toBe(0)
   })
 })
 
