@@ -163,4 +163,85 @@ describe('v1.23.3 重建提醒：不做节流（每轮都催）+ 连续 3 轮升
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  /**
+   * 🔴🔴 **2026-11-17 owner 定第一原则：不打扰轨迹自身的节奏。**
+   *
+   * 「只有超过**上下文**阈值的时候提醒它 rebuild。它会根据自己节奏决定何时调 rebuild。」
+   * ⇒ 累计量（`tokenUsage` 四桶 ≥ 1000M）**不是提醒触发源**。它对"这一轮好不好过"
+   * 毫无影响（原地清空也不会让它回落），拿它去催就是**在轨迹干到一半时把它叫停**。
+   *
+   * ## 这条用例钉的是哪一类假实现
+   * 旧实现的条件是 `contextOver || totalOver` ⇒ 累计量一超就每步都催，
+   * 而且因为提醒挂在 **每调用一次工具** 上，`consecutive` 会飞快冲到升级档，
+   * 模型被反复 STOP 催促 —— 正是 owner 要消灭的那种打扰。
+   *
+   * ## 必须配对（否则改法可以被"永不提醒"骗绿）
+   * 第二条是正控：同样的累计量，只要把压力拉过阈值就**必须**提醒。
+   * 两条一起才能区分「不打扰」与「彻底不提醒」。
+   */
+  function captureWith(tokens: number, cumulativeOver: boolean): PostExecuteListener {
+    let captured: PostExecuteListener = async () => undefined
+    const ctx = {
+      on: (event: string, listener: PostExecuteListener) => {
+        if (event === 'tools/post-execute') captured = listener
+        return () => {}
+      },
+      get: (name: string) =>
+        name === 'sessionProjections'
+          ? {
+              snapshot: (_s: unknown, keys?: readonly string[]) => ({
+                values: keys?.includes('tokenUsage')
+                  ? {
+                      tokenUsage: cumulativeOver
+                        ? {
+                            uncachedInputTokens: 10_000_000,
+                            outputTokens: 500_000,
+                            cacheReadTokens: 1_000_000_000,
+                            cacheWriteTokens: 0,
+                          }
+                        : { uncachedInputTokens: 1000, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 },
+                    }
+                  : { contextPressure: { projectedTokens: tokens, contextWindow: 100_000 } },
+              }),
+            }
+          : undefined,
+    } as any
+    registerKeeper(ctx, { defaultThreshold: 200 })
+    __setSimpleSourceForTest(() => ({ gatewayEnabled: false, rebuildThresholdK: 8, 轨迹约束Enabled: false, 轨迹约束DebugPort: 3099, croEnabled: true }))
+    return captured
+  }
+
+  it('🔴 累计量超 1000M 但上下文未超 ⇒ **不提醒**（累计量不是触发源）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'keeper-norush-'))
+    writeFileSync(join(dir, '.serenity'), 'test')
+    try {
+      // 上下文远低于阈值（阈值 8K，这里只给 1000）＋ 累计量远超 10 亿
+      const listener = captureWith(1000, true)
+      const t1 = await runOnce(listener, 's3', dir)
+      const t2 = await runOnce(listener, 's3', dir)
+      const t3 = await runOnce(listener, 's3', dir)
+      expect(t1).not.toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      expect(t2).not.toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      expect(t3).not.toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      // 反向：催促状态根本没被累加（证明不是"提醒了但没渲染"）
+      expect(rebuildReminderStateSnapshot().get('s3')).toBeUndefined()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('🔴 正控（与上条配对）：同样的累计量，上下文一旦超阈 ⇒ **必须**提醒', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'keeper-rush-'))
+    writeFileSync(join(dir, '.serenity'), 'test')
+    try {
+      const listener = captureWith(9000, true)
+      const t1 = await runOnce(listener, 's4', dir)
+      expect(t1).toContain('[COGNITIVE-TRAJECTORY-ASSISTANT · HANDOVER]')
+      // 提醒只指名 rebuild（1.A），⛔ 不出现 reconstruct（走哪条路由机械层定）
+      expect(t1).not.toContain('reconstruct')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

@@ -14,7 +14,6 @@ import {
   readTokenTotals,
   cumulativeTokens,
   shouldOfferReconstruct,
-  reconstructReminderText,
   makeReconstructWhen,
   queueReconstruct,
   registerReconstructTurnHook,
@@ -24,6 +23,9 @@ import {
   __resetPendingReconstructForTest,
   type TokenTotals,
 } from '../src/trajectory/reconstruct.js'
+// 🔴 1.A（owner 2026-11-17）：交接提醒的唯一实现住在 keeper 那一侧，
+//    `reconstruct` 侧不再有自己的注入文案（原 `reconstructReminderText` 已删）。
+import { handoverReminderText } from '../src/seams/cognitive-trajectory-lifecycle.js'
 
 /** 造一个只有 `sessionProjections` 的 ctx */
 function ctxWithTotals(totals: Partial<TokenTotals> | null | undefined): unknown {
@@ -140,21 +142,40 @@ describe('reconstruct: 阈值判定', () => {
   })
 })
 
-describe('reconstruct: 注入文案', () => {
-  it('含会话 id ＋ 动作名 ＋ "过于庞大"语义 ＋ 与 rebuild 的区别；不含 token 数值（D64）', () => {
-    const t = reconstructReminderText('session-abc123')
-    expect(t).toContain('session-abc123')
-    expect(t).toContain('reconstruct')
-    expect(t).toContain('too large')
-    expect(t).toContain('rebuild')
-    // D64：不透露上下文消耗/阈值数值
+/**
+ * 🔴 **2026-11-17 owner 裁定 1.A：交接提醒只指名 `rebuild`，⛔ 绝不出现 `reconstruct`。**
+ *
+ * 这一组替代原先「reconstruct 注入文案」的两条用例 —— 那个函数
+ * （`reconstructReminderText`）**自 v1.121.0 起从未接线**（全仓零调用点，只有测试在调），
+ * 已随本版删除。留着它 = 第二真相源（D151：有函数、有测试、没有接线）。
+ *
+ * 新判据的承重点不是"文案好读"，而是**注入面与实际执行面不能脱节**：
+ * 模型只该知道**一个**动作名；"走哪条路"由 `case 'rebuild'` 的机械改道算，
+ * 不由模型猜。⇒ 断言必须是**双向**的（正向有 rebuild ＋ 反向无 reconstruct），
+ * 只断正向的话，把两个名字都塞进去照样绿。
+ */
+describe('交接提醒（1.A：只指名 rebuild，机械层负责改道）', () => {
+  it('🔴 正向：指名 `cognitive_trajectory rebuild`（模型只需这一个动作名）', () => {
+    expect(handoverReminderText()).toContain('cognitive_trajectory rebuild')
+    expect(handoverReminderText(true)).toContain('cognitive_trajectory rebuild')
+  })
+
+  it('🔴 反向：**绝不出现 `reconstruct`** —— 那是机械改道的事，不该让模型去选', () => {
+    // 逐字钉：一旦有人把 reconstruct 塞回注入文案，这条立刻红
+    expect(handoverReminderText()).not.toContain('reconstruct')
+    expect(handoverReminderText(true)).not.toContain('reconstruct')
+  })
+
+  it('D64：不透露 token 数值（模型无法据以行动，且占用注意力）', () => {
+    const t = handoverReminderText()
     expect(t).not.toMatch(/\b1000000000\b/)
     expect(t).not.toMatch(/\b1e9\b/)
     expect(t).not.toContain('1391')
   })
 
-  it('是单一事件 token（[RECONSTRUCT]），与 keeper 的其他提醒可区分', () => {
-    expect(reconstructReminderText('s')).toContain('[RECONSTRUCT]')
+  it('升级态与常规态都指向 `LOG/LOG.md` 的交接便签（落点是同一块地）', () => {
+    expect(handoverReminderText()).toContain('LOG/LOG.md')
+    expect(handoverReminderText(true)).toContain('LOG/LOG.md')
   })
 })
 

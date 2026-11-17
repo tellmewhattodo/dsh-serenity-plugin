@@ -196,24 +196,12 @@ export function selectHandoverPath(input: { contextOver: boolean; totalOver: boo
   return null // 两个量都没超 ⇒ 不需要交接
 }
 
-/**
- * 达到阈值时注入的那句话（owner 给的语义，逐要素保留：**会话 id ＋ "过于庞大" ＋ 动作名**）。
- *
- * 🔴 与 `rebuildReminderText` 同一门禁口径（D64）：**不给 token 数值**——
- *   "当前有多大"是模型无法据以行动的信息，"该调用 reconstruct"才是。
- *   ⚠️ 会话 id **必须给**：owner 原话里就有它，且它是唯一能让模型分辨"说的是哪条"的锚。
- */
-export function reconstructReminderText(dshSessionId: string): string {
-  return [
-    `[RECONSTRUCT] The carrier session of this cognitive trajectory — ${dshSessionId} — has grown too large: `
-    + `its cumulative token usage passed the configured ceiling, so keeping it as the carrier costs every future turn.`,
-    `Call the reconstruct tool. It behaves exactly like rebuild with one difference: it creates a NEW conversation, `
-    + `binds this cognitive trajectory to it, injects the continue anchor there, and then archives the current session. `
-    + `Nothing is lost — SESSION.md stays where it is and the new carrier resumes from it.`,
-    `Call it with --summary "<content summary ≤20 chars>" naming the next phase (same parameter as rebuild), `
-    + `optionally with --note "<task focus ≤200 chars>". It queues and runs when this turn ends, so finish the step you are in first.`,
-  ].join(' ')
-}
+// 🔴 **`reconstructReminderText()` 已于 2026-11-17 删除**（owner 裁定 1.A）：
+//    它自 v1.121.0 起**从未接线**（全仓零调用点，只有测试在调），而动态注入面
+//    统一由 `seams/cognitive-trajectory-lifecycle.ts` 的 `handoverReminderText()` 承担，
+//    那条文案**只指名 `rebuild`** —— 因为 `case 'rebuild'` 会在累计量超阈值时
+//    机械改道到 `reconstruct`，模型不需要第二个动作名。
+//    ⇒ 留着它就是第二真相源（D151 同族：有函数、有测试、没有接线）。
 
 // ── 诊断（复用 `.rebuild-diag.json` 先例：单文件覆盖 ＋ 进程内累计；判据同族，别各造一套）──
 

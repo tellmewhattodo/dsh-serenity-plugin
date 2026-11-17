@@ -132,13 +132,21 @@ export function reminderText(code: string): string {
  * 理由见该常量的头注（持久文件 vs 只用一次的交界材料必须分家）。
  */
 /**
- * 交接提醒（**rebuild 与 reconstruct 共用同一条文案**，2026-11-16 owner 裁定）。
+ * 交接提醒（**rebuild 与 reconstruct 共用同一条文案**，2026-11-16 owner 裁定；
+ * 2026-11-17 owner 再裁 **1.A：文案统一指名 `rebuild`**）。
  *
  * 🔴 为什么必须无差别：`rebuild`（原地清空、会话 id 不变）与 `reconstruct`
  * （另开日志、旧会话归档）对**会话本身**做的是同一件事——**把它换掉**。
  * 旧日志封不封存、id 变不变，是**机械层的账**，会话不需要知道，也不该据此改变行为。
  * 让模型看见两条不同文案 ⇒ 它要判断"我该调哪个" ⇒ 把一个机械决定变成一次思考，
  * 既浪费注意力，又可能选错。
+ *
+ * 🔴🔴 **1.A 的落地（2026-11-17）**：本函数**只指名 `rebuild`**，绝不出现 `reconstruct`。
+ *   理由是执行面已经接好了：`cognitive-trajectory.ts` 的 `case 'rebuild'` 会在
+ *   **累计量 ≥ `RECONSTRUCT_TOKEN_THRESHOLD`** 时把它**机械改道**成 `reconstruct`。
+ *   ⇒ 模型只需知道**一个**动作名；"哪条路"由 ACC 算，不由模型猜。
+ *   ⚠️ 这条裁定同时废止了 `trajectory/reconstruct.ts` 的 `reconstructReminderText()`
+ *   （它自 v1.121.0 起**从未接线**，一直是死代码）——已随本版删除。
  *
  * 选路由本文件的 `registerKeeper` 一侧机械完成（`selectHandoverPath` 只是纯函数），规则见那里的注释。
  *
@@ -444,13 +452,21 @@ export function registerKeeper(ctx: Context, opts: KeeperRegistration = {}): voi
       blocks.push({ type: 'text', text: reminderText(code) })
     }
 
-    // ② **交接**（2026-11-16 裁定：rebuild ≡ reconstruct 合并为一条注入 ＋ 机械选路）
+    // ② **交接提醒**（⚠️ 2026-11-17 owner 定第一原则：**不打扰轨迹自身的节奏**）
     //
-    // 两个量、一条注入：
-    //   · `contextPressure.projectedTokens` —— **当前** prompt 有多大，原地清空后回落；
-    //   · `tokenUsage.totals` 四桶全加     —— **跨轮累加**的用量，原位清空**永不回落**。
-    // ⇒ 必须分开采，但**只能合成一条话**：对会话而言两者都是"你该被换掉了"，
-    //   走哪条路是机械的账（见下方 selectHandoverPath 的判据）。
+    // 🔴🔴 **只由上下文压力触发，累计量（`totalOver`）不是提醒触发源** —— 这是本轮修正的核心。
+    //
+    // 两个量治的不是同一件事，**触发权也不同**：
+    //   · `contextPressure.projectedTokens` —— **当前** prompt 有多大。
+    //     它会让**这一次请求**变贵/逼近上限 ⇒ **必须提醒**，且要模型去处理。
+    //   · `tokenUsage.totals` 四桶累加     —— **跨轮累加**的用量。
+    //     ⚠️ 它对"这一轮好不好过"**毫无影响**（原地清空也不会让它回落）。
+    //     ⇒ **拿它去催模型，就是打扰轨迹自己的节奏**：模型正干到一半，却被一个
+    //       与当下无关的累计数叫停。owner 明令：交给模型按自己节奏决定何时交接。
+    //
+    // ⇒ 累计量的唯一用武之地在**机械接手那一侧**：模型一旦调了 `rebuild`，
+    //   `tools/cognitive-trajectory.ts` 的 `case 'rebuild'` 会按它分流
+    //   （不到 1000M ⇒ rebuild；超过 ⇒ reconstruct）。**提醒与分流各管一段，不重叠。**
     if (participatesRebuild) {
       const session = (exec as { agent?: { session?: unknown } }).agent?.session
       if (session) {
@@ -458,26 +474,26 @@ export function registerKeeper(ctx: Context, opts: KeeperRegistration = {}): voi
         const pressure = readContextPressure(ctx, session)
         const contextOver = pressure !== null && pressure.projectedTokens > 0
           && pressure.projectedTokens >= thresholdK * 1000
-        let totalOver = false
-        try {
-          totalOver = shouldOfferReconstruct(ctx, session)
-        } catch {
-          /* 判据异常不得打断本缝（它每轮都跑）；工具可见性那条 `when` 会独立再判一次 */
-        }
-        if (contextOver || totalOver) {
+        if (contextOver) {
           const key = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? 'global'
           const st = rebuildReminderStates.get(key) ?? { consecutive: 0 }
           st.consecutive += 1
           rebuildReminderStates.set(key, st)
-          // 🔴 机械选路（2026-11-16）：`selectHandoverPath` 只用来**记录**本呆会走哪条路，
-          //    ⛔ 不进注入正文 —— 会话不需要知道，也不该据此改变行为（rebuild ≡ reconstruct）。
+          // 🔴 选路只**记录**（诊断/测试可观测），⛔ 不进注入正文：
+          //    提醒只指名 `rebuild`，走哪条路由机械层决定，模型不需要知道。
+          let totalOver = false
+          try {
+            totalOver = shouldOfferReconstruct(ctx, session)
+          } catch {
+            /* 判据异常不得打断本缝；工具可见性那条 `when` 会独立再判一次 */
+          }
           st.path = selectHandoverPath({ contextOver, totalOver }) ?? undefined
           blocks.push({
             type: 'text',
             text: handoverReminderText(st.consecutive >= REBUILD_ESCALATE_AFTER),
           })
         } else {
-          // 两个量都回到阈值内（交接已完成）→ 清零，提醒自动停止
+          // 上下文回到阈值内 → 清零，提醒自动停止
           const key = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? 'global'
           rebuildReminderStates.delete(key)
         }

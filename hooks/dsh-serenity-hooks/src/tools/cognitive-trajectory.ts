@@ -723,20 +723,27 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
         const dshSessionId = (exec as { agent?: { session?: { id?: string } } }).agent?.session?.id ?? ''
         if (!dshSessionId) throw new Error('Unable to determine the current dsh session id')
 
-        // 🔴🔴 **机械选路的执行面（2026-11-16，owner 令）**：
-        //    「当 rebuild 被调用 且发现输入量已经超过 1000M ⇒ 自动变成执行 reconstruct」
+        // 🔴🔴 **机械接手的执行面（2026-11-16 owner 令；2026-11-17 明确其边界）**：
+        //    「rebuild 一旦被调用 就是 acc 机械接手了。此时如果整体输入不到 1000m 则正常
+        //      rebuild，超过则 reconstruct。」
         //
-        // ## 为什么路由点必须在这里，而不能只靠注入提醒
-        //   v1.137.0 起 `selectHandoverPath` 已经**算得出**该走 `new-log`（累计量超），
-        //   但它只把结果写进 `st.path` **仅供记录** ⇒ 模型仍按 `rebuild` 原地清空。
-        //   而**原地清空不会让累计量回落**（换讲者，日誌还是那么大）⇒ 下一轮又超，
-        //   反复 rebuild 而累计量只增不减 = 那个量**永远降不下来**。
-        //   ⇒ 判据（`totalOver`）本来就存在，缺的是**在 rebuild 入口按它改道**。
+        // ## 分工（两条令合成的完整语义，⚠️ 别只读一半）
+        //   · **提醒**（`seams/cognitive-trajectory-lifecycle.ts` 的 `handoverReminderText`）：
+        //     **只由上下文压力触发**，⛔ 累计量不是提醒触发源 —— owner 定第一原则是
+        //     **不打扰轨迹自身的节奏**，何时交接由模型按自己节奏决定。
+        //     提醒文案**只指名 `rebuild`**（owner 裁 1.A：模型只需一个动作名）。
+        //   · **分流**（就是本段）：模型一旦**真的调了** `rebuild`，就是 ACC 机械接手，
+        //     此刻才看累计量：不到 1000M ⇒ 正常 rebuild；≥1000M ⇒ reconstruct。
         //
-        // ## 为什么不让调用方自己选
+        // ## 为什么分流必须在这里（而不是让模型选）
         //   对会话而言 `rebuild` 与 `reconstruct` 是**同一件事**（"把我换掉"）；
-        //   走哪条是机械的账（D 判据：累计超 ⇒ `new-log`）。让模型判断一次
-        //   只会多一次思考、多一次选错的机会。
+        //   走哪条是机械的账。让模型判断一次只会多一次思考、多一次选错的机会。
+        //   ⚠️ 这**不是**"ACC 自行换载体"：触发权在模型（它先调了 rebuild），
+        //      ACC 只决定**用哪种方式**兑现这次调用。
+        //
+        // ## 为什么"不改道"是个缺陷（v1.137.0 及以前）
+        //   **原地清空不会让累计量回落**（换讲者，日志还是那么大）⇒ 超限会话每轮重新超限，
+        //   `rebuild` 在那个量上一分钱也降不下来 —— 判据恒真、动作恒错，且无读数会说出来。
         //
         // ## 判据来源与失败方向
         //   读 `tokenUsage.totals` 四桶；**读不到 ⇒ 不路由**（fail-open 到 rebuild）。
