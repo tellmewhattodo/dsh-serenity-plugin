@@ -14,6 +14,65 @@
 
 ---
 
+## v1.137.4 — 2026-11-17（🔴 权限面缺陷：宿主重启后，长期存活轨迹的**工具/路径白名单整个失效**）
+
+> 来源 = **operator 在真机上直接观察到**「某条长期存活的轨迹拿到了白名单外的工具」，
+> 经管家交证据、本轨迹定因并修复。
+
+### 缺陷（安全面，不是观感面）
+
+`trajectoryConstraintForSession()`（`trajectory/policy/profile.ts`）在"这条会话属于哪条轨迹"
+这一步**只读进程内内存表**（`policy/window.ts` 的 `trajectorySessions`），
+**从不回落持久绑定**（`current.dsh_session_bind`）。
+
+而 `window.ts` 自己的文件头**逐字承诺**「两个来源并取（内存注册表 ＋ 持久绑定），都不中才判不是」，
+`trajectoryCodeForSession` 也是照那条承诺写的 —— **只有这一处漏了第二个来源**。
+
+失效链（每一步都有确定证据）：
+
+| 步 | 发生什么 |
+|---|---|
+| 1 | 宿主进程重启（每次发版装机都会发生）⇒ 内存 Map 清空 |
+| 2 | `registerTrajectorySession` 全仓**只有一处调用**（`trajectory/session.ts:374`，建/恢复轨迹会话时） |
+| 3 | **长期存活**的载体会话没有任何路径重新登记它 |
+| 4 | 本函数返回 `null` ⇒ `computeVisibilitySources` 第 ⑥ 源贡献 `deny: []` |
+| 5 | **工具白名单与路径白名单同时失效**（两者同走 `decideGuard`，由同一个 `trajectoryConstraint` 驱动） |
+
+🔴 **路径面（`writes`）比工具面更重**：`tools` 外露只是"多做了一件事"，而 `writes` 失效意味着
+该轨迹可以写到声明范围之外的任何 CCC 路径 —— 包括**别的轨迹的载体**。
+两者是**同一个根因、同一次修复**，不是两个独立问题。
+
+⚠️ **这个缺陷此前无任何读数信号**：配置读起来完全正确，诊断表也是空的，测试全绿 ——
+因为既有用例全部走"内存已登记"或"外部传入 boundDirName"这两条岔路，
+**从未表达过"内存空、但持久绑定在"这个跨进程状态**。
+
+### 改法
+
+新增 `resolveDirNameForSession()`：① 内存注册表（覆盖"刚 use、绑定还没落盘"的窗口期）
+→ ② **持久绑定回落**（`listBindDeclarations` 扫 `current.dsh_session_bind`，跨重启成立）。
+两个来源都不中才返回 `null`。与 `trajectoryCodeForSession` 同口径。
+
+**无需重建会话** —— 判断在**每次 `tools/pre-execute` 都重算**（`computeVisibilitySources` 是纯函数），
+所以下一次工具调用即恢复约束。老会话不必 rebuild。
+
+### 验收（判据是本版的主体，不只是修改）
+
+- **新增回归钉**（`tests/trajectory-constraint-profile.test.ts`）：构造"内存无登记 ＋ 持久绑定在"
+  的跨进程状态，断言仍判为约束，且 `tools` 与 `writes` **两个白名单都回来**；
+  另加配对反控（持久绑定指向别的 sessionId ⇒ 本会话仍判 null，不串味）。
+- **变异检验**：删掉持久绑定回落 ⇒ **精确红 1 条**，红在那条回归钉
+  （`expected null not to be null`）⇒ 证明它真的在跑回落路径，而不是只在描述它。
+- **门禁六项全绿**：typecheck ✓ ／ typecheck-host 0.2.2-rc.1 ✓ ／
+  test **241 files / 3666 tests** ✓ ／ coverage **91.92%** ✓ ／ build ✓ ／ pack-check ✓
+
+### 判据沉淀
+
+**任何"内存 ＋ 持久"双来源的设计，两处都必须真的取两个。**
+只写在文件头的注释不能替代另一处的实现 —— 那条注释会让下一个读者以为已经有两道保险，
+而实际只有一道（D151 同族：文档承诺与实现脱节，且**零机械信号**）。
+
+---
+
 ## v1.137.3 — 2026-11-17（第一原则：不打扰轨迹自身的节奏 —— 提醒只看上下文压力）
 
 > 来源 = **owner 定第一原则**（逐字）：

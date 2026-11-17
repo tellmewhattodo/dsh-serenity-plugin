@@ -343,9 +343,50 @@ export function trajectoryConstraintForSession(
   sessionId: string | undefined,
   boundDirName?: string | null,
 ): TrajectoryConstraint | null {
-  const dirName = boundDirName ?? registeredDirName(sessionId)
+  const dirName = boundDirName ?? resolveDirNameForSession(root, sessionId)
   if (dirName === null || dirName === '') return null
   return readTrajectoryConstraintAt(join(sessionsRoot(root), dirName), root)
+}
+
+/**
+ * **会话 → 轨迹目录名**（两来源并取，本文件内唯一入口）。
+ *
+ * 🔴🔴 **2026-11-17 真机缺陷（某条长期存活轨迹拿到白名单外的工具）—— 这一格曾经只取 ①**：
+ *
+ * 旧实现是 `boundDirName ?? registeredDirName(sessionId)` —— **只读进程内内存表**
+ * （`policy/window.ts` 的 `trajectorySessions`）。而 `window.ts` 的文件头**逐字承诺**
+ * 「两个来源并取，都不中才判不是」，`trajectoryCodeForSession` 也是照那条承诺写的
+ * ⇒ **只有本函数漏了 ②**。后果不是"少一条兜底"，是**权限面静默松开**：
+ *
+ * | 步 | 发生什么 |
+ * |---|---|
+ * | 1 | 宿主进程重启（每次发版装机会发生）⇒ 内存 Map 清空 |
+ * | 2 | `registerTrajectorySession` 全仓**只有一处调用**（`trajectory/session.ts:374`，建/恢复轨迹会话时） |
+ * | 3 | **长期存活**的载体会话没有任何路径重新登记它 |
+ * | 4 | 本函数返回 `null` ⇒ `computeVisibilitySources` 第 ⑥ 源贡献 `deny: []` |
+ * | 5 | **工具白名单整个不生效**，模型看得到全部工具 |
+ *
+ * 而这一点在当时**没有任何读数信号**：诊断 Map 也是空的，配置读起来完全正确。
+ * ⇒ 判据：**任何"内存 + 持久"双来源的设计，两处都必须真的取两个**；
+ * 只写在一处的注释不能替代另一处的实现（D151 同族：文档承诺与实现脱节）。
+ *
+ * @returns 轨迹目录名；两来源都不中 ⇒ `null`（= 这条会话不属任何轨迹）
+ */
+function resolveDirNameForSession(root: string, sessionId: string | undefined): string | null {
+  // ① 内存注册表（快）—— 覆盖「轨迹已定、绑定还没落盘」的窗口期
+  const fromMemory = registeredDirName(sessionId)
+  if (fromMemory !== null && fromMemory !== '') return fromMemory
+  // ② 持久绑定（权威，跨重启成立）——按 sessionId 反查哪个轨迹目录的交代指向它。
+  //    ⚠️ 这一步是**必需**的，不是"兜底"：重启后内存必空，只有它能认出老会话的归属。
+  if (typeof sessionId !== 'string' || sessionId === '') return null
+  try {
+    for (const { dirName, decl } of listBindDeclarations(sessionsRoot(root))) {
+      if (decl.sessionId === sessionId) return dirName
+    }
+  } catch {
+    /* 读盘失败 ⇒ 当作"解析不到"（与 `trajectoryCodeForSession` 同口径，由调用方决定方向） */
+  }
+  return null
 }
 
 /** 内存登记的轨迹目录名（注册表单一真相源在 `./registry.ts`；此处只做一次转发） */

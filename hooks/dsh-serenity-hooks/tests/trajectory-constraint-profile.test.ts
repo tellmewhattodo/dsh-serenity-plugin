@@ -11,6 +11,8 @@ import {
   TRAJECTORY_CONSTRAINT_FILENAME,
 } from '../src/trajectory/policy/profile.js'
 import { registerTrajectorySession, unregisterTrajectorySession, resetTrajectorySessions } from '../src/trajectory/policy/window.js'
+import { trajectoryDirNameForSession } from '../src/trajectory/policy/window.js'
+import { BIND_FILENAME } from '../src/trajectory/bind-file.js'
 
 /**
  * 轨迹约束的唯一判据（owner 2026-10-19 重做令）：**目录下有 `trajectory-constraint.json` 的认知轨迹**。
@@ -222,5 +224,50 @@ describe('轨迹约束-profile: J2 —— 会话级判据（两来源并取）',
     const { dirName } = mkTraj('plain-registered')
     registerTrajectorySession('sess-plain', dirName, root)
     expect(trajectoryConstraintForSession(root, 'sess-plain')).toBeNull()
+  })
+
+  /**
+   * 🔴🔴 **2026-11-17 真机缺陷的回归钉（某条长期存活轨迹拿到白名单外的工具）**
+   *
+   * ## 这一格为什么此前从来没被测到
+   * 上面六条用例**全部**走的是"内存已登记"或"调用方外部传了 boundDirName"。
+   * 而本 bug 的真身**只在跨进程边界上出现**：宿主重启 ⇒ 内存 Map 清空 ⇒
+   * 老会话没有任何路径重新登记（`registerTrajectorySession` 只在建/恢复轨迹会话时调）。
+   * ⇒ **只造内存态的测试，永远抓不到它**（这正是 `D-16` 那类「改坏会红吗」的问题）。
+   *
+   * ## 状态怎么表达
+   * · **内存里没有** —— 不调 `registerTrajectorySession`（并且 `beforeEach` 已 `resetTrajectorySessions()`）；
+   * · **但持久绑定在** —— 真写一份 `current.dsh_session_bind` 到轨迹目录（D172 的真相源形态）。
+   * 两者同时成立 = 重启后的真实形态。
+   *
+   * ## 变异判据
+   * 删掉 `resolveDirNameForSession` 里的 ② 持久绑定回落 ⇒ 本用例**精确红**（返回 null）。
+   */
+  it('🔴 内存无登记 + 持久绑定在（= 宿主重启后的真实形态）⇒ **仍判为 轨迹约束**', () => {
+    const { dirName, dir } = mkTraj('restarted', { tools: ['read'], writes: ['_tmp/'] })
+    // 只写持久绑定，⛔ 不登记内存 —— 模拟"进程重启过、这条老会话没被重新登记"
+    writeFileSync(
+      join(dir, BIND_FILENAME),
+      JSON.stringify({ version: 1, sessionId: 'sess-restarted', dirName, action: 'activate' }),
+      'utf-8',
+    )
+    // 正控：内存确实是空的（否则本用例会在"内存已登记"这条岔路上假绿）
+    expect(trajectoryDirNameForSession('sess-restarted')).toBeNull()
+    const p = trajectoryConstraintForSession(root, 'sess-restarted')
+    expect(p, '重启后必须靠持久绑定认出归属，否则白名单整个静默失效').not.toBeNull()
+    expect(p!.code).toBe('restarted')
+    // 两个白名单都要回来（tools 与 writes 同一条判断链 ⇒ 必须一起验）
+    expect(p!.tools).toEqual(['read'])
+    expect(p!.writes).toEqual(['_tmp/'])
+  })
+
+  it('🔴 配对反控：持久绑定指向**别的** sessionId ⇒ 本会话仍判 null（不串味）', () => {
+    const { dirName, dir } = mkTraj('otherholder', { tools: ['read'] })
+    writeFileSync(
+      join(dir, BIND_FILENAME),
+      JSON.stringify({ version: 1, sessionId: 'someone-else', dirName, action: 'activate' }),
+      'utf-8',
+    )
+    expect(trajectoryConstraintForSession(root, 'sess-not-me')).toBeNull()
   })
 })
