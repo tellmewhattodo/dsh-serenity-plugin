@@ -14,6 +14,43 @@
 
 ---
 
+## v1.137.5 — 2026-11-17（文档补写：`prompt` 字段此前只在代码里存在）
+
+> 来源 = **管家读 `config docs trajectory-constraint` 时发现野字段**（其纪律是"我不判你的实现、只报现象"）。
+
+`trajectory.json` 的 `prompt: { injection, replaces }` **一直被解析并生效**
+（`policy/profile.ts` 读它、`trajectory/prompt-injection.ts` 执行它），
+但 `config docs trajectory-constraint` 的 schema 示例里**从未列出它** ——
+下一个读该章的人会把它当成"野字段"（管理器的判断是对的）。
+
+本版只在 schema 示例里补上，并明确一条**边界**：
+
+- `prompt` 是**替换面**，不属于**限制面**（该章主体讲限制面，故此前没写）；
+- `injection: "replace"` = 用本轨迹自己的 `PROMPT.md` 整体取代 `replaces` 列出的注入块；
+- 🔴 **身份块（`=== Serenity ACC ===`）刻意不可替换** —— 换掉它就不再是同一个容器。
+
+判据与允许清单的唯一真相源仍是 `trajectory/prompt-injection.ts`（文档不抄第二份）。
+
+### 顺带核实（同一份报告里的另外两条，结论是"不是缺陷"）
+
+- **`"model": ""`**：`readTrajectoryConstraintAt` 的判据是
+  `typeof x === 'string' && x.trim() !== ''`（`profile.ts` 的 `model` 归一化行）
+  ⇒ 空串与纯空白**都归一成 `undefined`**，等同"没写" ⇒ **不会**被当成合法模型值。
+  行为正确，**不改**；`validate` 面 `model: p.model ?? '(unchanged)'` 也会照实印 `(unchanged)`。
+- **`tools`/`writes` 之外的第三个白名单**：本报告的另一半（重启后白名单失效）已在 v1.137.4 修复。
+
+### 门禁
+
+typecheck ✓ ／ test **241 files / 3666 tests** ✓ ／ coverage **91.92%** ✓ ／ build ✓ ／ pack-check ✓
+
+### 判据沉淀（本仓第七次）
+
+**模板字符串里的反引号必须转义**。本次我在 schema 示例（模板串内）直接写了 `` `prompt` ``，
+`typecheck` 会红在**语法层**（`Expected ";" but found "prompt"`）——
+⚠️ 与既有记录一致：**改完必须真跑一遍那个子命令 / 相关测试**，不能只看 diff 顺眼。
+
+---
+
 ## v1.137.4 — 2026-11-17（🔴 权限面缺陷：宿主重启后，长期存活轨迹的**工具/路径白名单整个失效**）
 
 > 来源 = **operator 在真机上直接观察到**「某条长期存活的轨迹拿到了白名单外的工具」，

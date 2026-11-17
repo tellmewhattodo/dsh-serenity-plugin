@@ -55,8 +55,16 @@ becomes a 轨迹约束; delete it and it goes back to being an ordinary trajecto
     "writes": ["AGENT_SESSIONS/<我的目录>/"], // optional; **不写 = 不收窄**。显式 [] = 一个写都落不下
     "cognitiveTrajectory": { "session": true, "keeper": true, "rebuild": true },  // 缺省 TRUE（见下）
     "resident": { "serves": "..." },    // optional; 对外用途自述（见 trajectory-self 章）
-    "cro": { "host": "<machine name>" } // optional: which machine may run this trajectory's CRO program
+    "cro": { "host": "<machine name>" },// optional: which machine may run this trajectory's CRO program
+    "prompt": { "injection": "replace", "replaces": ["metaphor","cce"] } // optional; 注入面（见下）
   }
+
+  🔴 **\`prompt\` 是「替换面」，不属于上面的限制面**（2026-11-17 补写，此前只在代码里存在）：
+     它决定**哪些 ACC 注入块被本轨迹自己的 PROMPT.md 取代**。
+     · \`injection\`：\`"replace"\` = 用 PROMPT.md 整体取代 \`replaces\` 列出的那些块；
+     · \`replaces\`：块名列表（例 \`["metaphor","cce"]\`）。
+     🔴 **身份块（\`=== Serenity ACC ===\`）刻意不可替换** —— 那是容器的身份，换掉它就不再是同一个容器。
+     判据与允许清单的唯一真相源 = \`trajectory/prompt-injection.ts\`（此处不重复抄）。
 
   🔴 **所有 key 都是可选的：不写 = 不设定 = 不影响默认行为**（owner 2026-10-20 裁决）。
      ⛔ **"没写" ≠ "写了空数组"**：\`"tools": []\` 是"我一个都不给"（除 \`skill\` 外全隐藏）；
