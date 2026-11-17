@@ -86,6 +86,18 @@ becomes a 轨迹约束; delete it and it goes back to being an ordinary trajecto
   🔴 判据是**字段在不在**，不是**数组空不空**（D181）。旧版把两者混成"空 = 全拒"，
      于是「只想声明常驻」的人被静默锁死 —— 那是本仓实测踩过的坑（D179(b)）。
 
+  🔴🔴 **管辖范围（2026-11-17 限定，此前这句话说得太满）**：
+     \`tools\` 只管辖**本插件（ACC）贡献的工具**（当前 13 个：
+     \`container_fs\`/\`container_git\`/\`container_admin\`/\`cognitive_trajectory\`/\`dashboard\`/\`msm\`/
+     \`praxis\`/\`ontology\`/\`serenity-skill-creator\`/\`localstore\`/\`browser_slot\`/\`im-bridge\`/\`diagram\`）。
+     **宿主平台自带的工具恒可用、不受这份声明约束** —— 例：\`read\`/\`write\`/\`grep\`/\`glob\` 这类基础工具、
+     \`todo_write\`、目标类（\`create_goal\`/\`get_goal\`/\`update_goal\`）、\`present\`、
+     子代理类（\`subagent\`/\`subagent_fork\`/\`list_agents\`/\`interrupt_agent\`/\`send_message\`）、
+     \`list_subagent_models\`。
+     ⚠️ **不要把它读成"白名单外一切不可见"** —— 那句话只对 ACC 工具成立。
+     ⇒ 要判"某个平台工具能不能给某条轨迹"，那是**宿主的能力面**，不是本文件的管辖面；
+        真正的收紧办法是不给那条轨迹 \`subagent\` 之类的**宿主级配置**（属另一层裁决）。
+
 ── \`writes\`: the THIRD whitelist — the PATH dimension（owner 2026-10-20 令）──
   \`tools\` 管的是**工具名**，管不了"这个工具能写哪儿"：给了 \`write\` 之后，路径守卫只拦
   「逃出 CCC」与黑名单，**拦不住它去写别人的轨迹或 docs/**。\`writes\` 补的正是这一维。

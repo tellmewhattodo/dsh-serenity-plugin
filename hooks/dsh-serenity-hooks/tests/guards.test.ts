@@ -551,8 +551,47 @@ describe('guards: 轨迹约束 工具白名单（F4b ⑧）', () => {
     }
   })
 
-  it('🔴 D181：tools/msms **字段缺省** ⇒ 不收窄（写文件≠要限制）', () => {
-    // 🔴 语义于 2026-10-20 被 owner 裁定替换（**不是放宽，是前提变了**）：
+  it('🔴 白名单只管 ACC 工具：宿主平台工具**不在管辖面**（2026-11-17 定性，防文档说满）', () => {
+    // 起因：真机检查里，一条白名单只有 11 个工具（read/write/edit/grep/glob/web_search/
+    // web_fetch/read_image/cognitive_trajectory/msm/im-bridge）的轨迹，实际还看得见
+    // 目标类（create_goal/get_goal/update_goal）、todo_write、present、子代理类
+    // （subagent/subagent_fork/list_agents/interrupt_agent/send_message）、list_subagent_models。
+    //
+    // 🔴 这是**设计如此**，不是漏过滤：
+    //   · schema 面：`computeVisibilitySources` ⑥ 源的 deny 取自 `REGISTERED_TOOLS`（本插件工具面），
+    //     宿主的平台工具根本不在那张表里 ⇒ 它**进不了 deny**；
+    //   · 调用面：`decideGuard` 的白名单判定（:169）对**任何**工具名生效，但只有
+    //     ⑥ 源把它算进 deny 才会隐藏。两者结论必须一致 —— 所以这里成对断言。
+    //
+    // ⚠️ 为什么值得钉：文档那句「anything outside a declared whitelist is invisible in the schema」
+    //   不限定范围就会被读成"白名单外一切不可见" ⇒ 下一个人会以为家人通道拿不到子代理。
+    const ONLY_ACC = profile({
+      dirName: '2026-10-19--plat--t',
+      code: 'plat',
+      tools: ['read', 'grep'],
+      msms: undefined,
+    })
+    const HOST_TOOLS = [
+      'create_goal', 'get_goal', 'update_goal', 'todo_write', 'present',
+      'subagent', 'subagent_fork', 'list_agents', 'interrupt_agent', 'send_message',
+      'list_subagent_models',
+    ]
+    // ① schema 面：这些名字**根本不在**本插件的工具表里 ⇒ ⑥ 源永远算不出它们的 deny。
+    //    🔴 这是本条真正的承重断言：不是"算出来是空"，而是"它们从未被纳表"。
+    for (const t of HOST_TOOLS) {
+      expect(REGISTERED_TOOLS as readonly string[], `${t} 不该出现在本插件的工具表里`).not.toContain(t)
+    }
+    // ② 正控：本插件的工具**确实**在表里（证明 ① 不是"表是空的"这种假通过）
+    expect(REGISTERED_TOOLS as readonly string[]).toContain('container_fs')
+    expect(REGISTERED_TOOLS as readonly string[]).toContain('cognitive_trajectory')
+    // ③ 调用面与 schema 面必须同向：通过 decideGuard 直接问平台工具 —— 白名单不含它，
+    //    所以**调用面会拒**。⚠️ 这是已知的两面差异（schema 可见但调不动），如实钉出来：
+    //    修法属"宿主级配置"层面（不给那条轨迹子代理），不在本插件的白名单里做。
+    const d = decideGuard(base({ root: dir, toolName: 'subagent', trajectoryConstraint: ONLY_ACC }))
+    expect(d.kind, '调用面：白名单外一律拒（含平台工具）').toBe('deny')
+  })
+
+  it('🔴 D181：tools/msms **字段缺省** ⇒ 不收窄（写文件≠要限制）', () => {    // 🔴 语义于 2026-10-20 被 owner 裁定替换（**不是放宽，是前提变了**）：
     //    旧判据的前提是"写了 trajectory.json 就是要限制自己"，故当时把"白名单全空 ⇒ 保守 deny"
     //    钉成 fail-closed。owner 现在确立的原则是 **「这个 json 统一存放各类结构化设定」**
     //    ⇒ 写文件表达的是**任何一种设定**（常驻、章程指针、模型…），**不必然是限制**。

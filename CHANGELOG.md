@@ -14,6 +14,44 @@
 
 ---
 
+## v1.137.6 — 2026-11-17（文档限定管辖范围：白名单只管 ACC 工具，平台工具恒可用）
+
+> 来源 = **管家在真机验收 v1.137.4 时的顺手观察**：修复生效后（10/10 消失），
+> 那条轨迹的工具清单里**仍有 11 个不在它白名单里**的工具 ——
+> 目标类（`create_goal`/`get_goal`/`update_goal`）、`todo_write`、`present`、
+> 子代理类（`subagent`/`subagent_fork`/`list_agents`/`interrupt_agent`/`send_message`）、
+> `list_subagent_models`。它问：这是设计如此，还是第二个洞？
+
+### 判定：**设计如此**，但文档那一句说满了
+
+**源码判据**：隐藏名单 = `REGISTERED_TOOLS.filter(n => !allowed.has(n))`。
+`REGISTERED_TOOLS` 是**本插件自己的工具表（13 个）**，宿主的平台工具**从来不在那张表里**
+⇒ 它们**进不了** deny ⇒ schema 面自然看得见。**不是漏过滤，是管辖范围本来就不含它们。**
+
+🔴 **但文档原文「anything outside a declared whitelist is invisible in the schema」
+没有限定范围** ⇒ 会被读成"白名单外一切不可见"，下一个人会以为家人通道拿不到子代理。
+本版把它限定为「**只对 ACC 贡献的工具成立**」，并逐字列出那 13 个名字。
+
+### 同时如实登记三条后果（不粉饰）
+
+1. **子代理不受此约束**：平台工具不在管辖面 ⇒ 那条轨迹能起子代理，**子代理同样看得见平台工具**。
+2. **跨 agent 通信「授权一条、白送一条」**：那条轨迹的白名单里有 `cognitive_trajectory`
+   （= 已授权的跨轨迹通道），而 `send_message`/`list_agents` **不在白名单里却可见**
+   ⇒ 实际存在**两条**通往别的轨迹的路，声明只挡住了其中一条。
+3. **`goal`/`todo_write` 改的是会话自身行为**（持久目标、待办），不是容器权限面。
+   ⇒ 判据：**权限面归本白名单，行为面归人判** —— 不擅自把平台工具收进管辖面
+   （那会改变"白名单"的语义边界，属另一层裁决）。
+
+### 验收
+
+- 新增用例（`tests/guards.test.ts`）：钉住那 11 个平台工具**不在** `REGISTERED_TOOLS`，
+  并以本插件工具与之对照作正控；另钉**调用面**（`decideGuard` 对白名单外的 `subagent` 仍拒）
+  —— 即「schema 可见但调不动」这一已知两面差异被显式写出，而不是留成暗坑。
+- **变异检验**：把 `subagent` 塞进 `REGISTERED_TOOLS` ⇒ **精确红 1 条**。
+- 门禁：typecheck ✓ ／ test **241 files / 3667 tests** ✓ ／ coverage **91.92%** ✓ ／ build ✓ ／ pack-check ✓
+
+---
+
 ## v1.137.5 — 2026-11-17（文档补写：`prompt` 字段此前只在代码里存在）
 
 > 来源 = **管家读 `config docs trajectory-constraint` 时发现野字段**（其纪律是"我不判你的实现、只报现象"）。
