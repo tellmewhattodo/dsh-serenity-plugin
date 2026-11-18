@@ -32,7 +32,7 @@ import {
   parsePsTime,
   MAC_CHROME_CANDIDATES,
 } from '../src/browser/platform.js'
-import { chromeCandidatesFor, chromeCandidatesForMessage, findChromeFor, resolveDisplay } from '../src/browser/process.js'
+import { chromeCandidatesFor, chromeCandidatesForMessage, findChromeFor, pidClaimsProfile, resolveDisplay } from '../src/browser/process.js'
 
 /**
  * 🔴🔴 **判别力教训（本文件第一版栽的一次，值得留在代码里）**
@@ -209,6 +209,43 @@ describe('macOS 兼容：采样口径与 Linux 同源（增量，⛔ 不是 %cpu
 describe('macOS 兼容：进程认领与端口反查的失败方向', () => {
   it('空 profile ⇒ 空数组（⛔ 不把空串当"匹配所有行"）', () => {
     expect(macFindPidsByProfile('')).toEqual([])
+  })
+
+  /**
+   * 🔴 **本组是 v1.137.9 的补漏钉**（自查发现，⛔ 不是用户报障）。
+   *
+   * `pidClaimsProfile` 原来**没有 mac 分支** ⇒ macOS 上恒 `false`。
+   * 而 `destroySlot` 拿这个返回值决定"台账那条 pid 是不是陈旧/被污染" ⇒
+   * 会印出「台账那条记录是陈旧的或被污染」—— **一句在 mac 上恒假的话**。
+   *
+   * `findPidsByProfile` 回空是安全的（不杀），但**归因文案**会替一个不存在的成因作证。
+   */
+  it('🔴 pidClaimsProfile 在 darwin 上真的走 mac 分支（⛔ 不靠 /proc 的 catch 兜出 false）', () => {
+    // 记录调用次数：这个探针**只有 mac 分支才会被调**
+    let macCalls = 0
+    const macClaim = (): boolean => {
+      macCalls += 1
+      return true
+    }
+    const profile = '/tmp/serenity-browser-slots/b1/user-data'
+    // darwin ⇒ 走 macClaim（Linux 上 /proc 里根本没有这个 pid，靠 /proc 会得到 false）
+    expect(pidClaimsProfile(4242, profile, 'darwin', macClaim)).toBe(true)
+    expect(macCalls).toBe(1)
+    // 反控：同一个 pid 走 linux ⇒ 不调 macClaim，且 /proc 里没有 ⇒ false
+    expect(pidClaimsProfile(4242, profile, 'linux', macClaim)).toBe(false)
+    expect(macCalls).toBe(1) // 仍为 1 ⇒ linux 分支没碰 mac 探针
+  })
+
+  it('pidClaimsProfile：非法 pid 在两条分支上都不调 mac 探针（⛔ 不为无效输入做归属判定）', () => {
+    let macCalls = 0
+    const macClaim = (): boolean => {
+      macCalls += 1
+      return true
+    }
+    expect(pidClaimsProfile(0, '/p', 'darwin', macClaim)).toBe(false)
+    expect(pidClaimsProfile(-1, '/p', 'darwin', macClaim)).toBe(false)
+    expect(pidClaimsProfile(1.5, '/p', 'darwin', macClaim)).toBe(false)
+    expect(macCalls).toBe(0)
   })
 
   it('不存在的 profile ⇒ 空数组（不会误认领用户自己的浏览器）', () => {

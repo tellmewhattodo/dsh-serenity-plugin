@@ -14,6 +14,51 @@
 
 ---
 
+## v1.137.9 — 2026-11-18（自查补漏：mac 上 `pidClaimsProfile` 恒 false，会让一句假话通过归因）
+
+> 来源 = **我自己的 diff 复核**（⛔ 不是用户报障，也⛔ 不是测试红——测试当时**全绿**）。
+> 复核 `process.ts` 的 15 处 `/proc/` 时发现 **有一处没做 mac 分派**。
+
+### 缺陷：`pidClaimsProfile` 是 `destroySlot` 的**归因依据**
+
+原实现：`readFileSync('/proc/<pid>/cmdline')` 失败 ⇒ `catch → false`。
+macOS 上**没有 `/proc`** ⇒ 这函数**恒返回 false**（每一个 pid 都"不属于"本槽位）。
+
+而 `destroySlot` 拿它决定**归因文案**：
+
+```
+if (pidClaimsProfile(pidHint, paths.profile)) … else → 
+  ⚠️ 台账记的 pid N **未被杀死** —— 它的命令行里没有本槽位的 profile，
+  说明台账那条记录是陈旧的或被污染（⛔ 不按台账杀陌生进程）。
+```
+
+⇒ macOS 上只要 `reap` 遇到台账里有个 pid，就会印出**「台账那条记录是陈旧的或被污染」**
+—— **一句恒假的话**，把一次正常的回收说成"台账脏了"。
+
+🔴 **为什么测试没抓到**：`findPidsByProfile` 在 mac 上回空是**安全的**（不杀进程），
+我据此以为"失败方向正确"就够了。**但归因文案不是失败方向，它是一个断言。**
+⇒ 判据沉淀：**失败方向正确 ≠ 每条路径都正确** —— 安全的返回**值**与诚实的**归因**是两件事
+（D253「恒空读数器」同族：恒 `false` 的读数器会让相邻的两种成因同形）。
+
+### 改法
+
+新增 `macPidClaimsProfile(pid, profileDir)`（`ps -ww -p <pid> -o command=`；
+`-ww` 理由同 `macFindPidsByProfile`）；`pidClaimsProfile` 增加 `platform` 与 `macClaim`
+两个**可注入参数** —— 理由与 `chromeCandidatesFor` 完全相同：否则"分派真的发生了"
+这件事**在 Linux 上永远读不出对错**。
+行为面：Linux 分支逐字未改（`/proc` 那条仍在，仅在其前面加一次分派）。
+
+### 验收
+
+- **+2 用例**（本文件 24 例）：① darwin 真走 mac 分支（**用调用计数证明**，⛔ 不是只看返回值）＋
+  linux 反控不碰该探针；② 非法 pid（0 / −1 / 1.5）两条分支都**不**调探针。
+- **变异精确红已验**：把分支改成 `platform === 'darwin' && false` ⇒
+  红在 `expected false to be true`，**指向那一行**；还原后 24/24 绿。
+- 门禁：typecheck ✓ ／ test **242 files / 3695 tests** ✓ ／ coverage **91.97%** ✓ ／
+  typecheck-host 0.2.2-rc.1 ✓ ／ build ✓ ／ pack-check **194 文件** ✓
+
+---
+
 ## v1.137.8 — 2026-11-18（`browser_slot` 兼容 macOS：把"平台"从环境里取出来，变成可注入的参数）
 
 > 来源 = **owner 真机报障（逐字）**：「需要兼容mac」—— macOS 上跑 `browser_slot`，回执说

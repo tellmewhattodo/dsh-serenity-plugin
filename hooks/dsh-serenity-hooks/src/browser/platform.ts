@@ -224,6 +224,33 @@ export function macSample(pids: number[], prev: MacProcSample | null, now = Date
 }
 
 /**
+ * 某 pid 的**命令行是否属于**这个 profile（macOS 版 `pidClaimsProfile` 的判据来源）。
+ *
+ * 🔴 为什么要单独有它（2026-11-18 自查补漏）：`process.ts` 的 `pidClaimsProfile` 原实现在
+ *   **没有 `/proc` 时直接 `catch → false`** ⇒ macOS 上**每一个 pid 都"不属于"本槽位**。
+ *   而 `destroySlot` 用它的返回值决定"台账那条 pid 是不是陈旧/被污染"：
+ *   `false` ⇒ 会印出「**台账那条记录是陈旧的或被污染**」—— 一句**在 mac 上恒假的话**。
+ *   ⇒ 判据：**失败方向正确 ≠ 每条路径都正确**。`findPidsByProfile` 回空是安全的（不杀），
+ *     但**归因文案**会替一个不存在的成因作证（D253「恒空读数器」同族）。
+ *
+ * ⚠️ `ps` 查不到该 pid ⇒ **false**（与 Linux 侧"读不到 = 不属于"同向，保守：不杀）。
+ */
+export function macPidClaimsProfile(pid: number, profileDir: string): boolean {
+  if (!Number.isInteger(pid) || pid <= 1 || profileDir === '') return false
+  let out: string
+  try {
+    out = execFileSync('ps', ['-ww', '-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3000,
+    })
+  } catch {
+    return false
+  }
+  return out.includes(profileDir)
+}
+
+/**
  * 该 pid 是否活着（`kill(pid, 0)` 语义）。
  *
  * 🔴 **不是"进程名存在"、也不是"目录存在"**（Linux 侧为此付过代价：僵尸进程会让

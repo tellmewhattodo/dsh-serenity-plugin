@@ -39,6 +39,7 @@ import {
   macIsAlive,
   macPortHolders,
   macSample,
+  macPidClaimsProfile,
   MAC_CHROME_CANDIDATES,
   type MacProcSample,
 } from './platform.js'
@@ -810,13 +811,28 @@ export function destroySlot(n: number, pidHint = 0): { killed: number[]; detail:
 }
 
 /**
- * 某 pid 是否**真的**属于这个 profile（读 `/proc/<pid>/cmdline`）。
+ * 某 pid 是否**真的**属于这个 profile（Linux：读 `/proc/<pid>/cmdline`；macOS：`ps`）。
  *
  * 判据与 `findPidsByProfile` 同源：命令行里必须出现本槽位专属的 `--user-data-dir`。
  * ⚠️ 单独包一个函数是为了让「pid 归属校验」这件事有一个**可被点名测试**的落点。
+ *
+ * 🔴 **2026-11-18（自查补漏，v1.137.9）**：原实现**没有 mac 分支** ⇒ macOS 上恒 `false`。
+ *    而 `destroySlot` 用这个返回值决定"台账那条 pid 是不是陈旧/被污染" ⇒
+ *    会印出「**台账那条记录是陈旧的或被污染**」——**一句在 mac 上恒假的话**。
+ *    ⇒ 判据：**失败方向正确 ≠ 每条路径都正确**；回空集合是安全的（不杀），
+ *      但**归因文案**会替一个不存在的成因作证（D253 同族）。
+ *
+ * 🔴 `platform` 与 `macClaim` 都是**可注入参数**（与 {@link chromeCandidatesFor} 同一理由）：
+ *    否则"分派真的发生了"这件事在 Linux 上**永远读不出对错** —— 删掉 darwin 分支测试也不会红。
  */
-export function pidClaimsProfile(pid: number, profileDir: string): boolean {
+export function pidClaimsProfile(
+  pid: number,
+  profileDir: string,
+  platform: string = process.platform,
+  macClaim: (pid: number, profileDir: string) => boolean = macPidClaimsProfile,
+): boolean {
   if (!Number.isInteger(pid) || pid <= 1) return false
+  if (platform === 'darwin') return macClaim(pid, profileDir)
   try {
     return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(profileDir)
   } catch {
