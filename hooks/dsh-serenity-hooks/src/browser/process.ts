@@ -30,6 +30,18 @@ import {
 import { dirname, join } from 'node:path'
 import { SLOT_RESOLUTION, slotPort, type SlotId, slotNumber, slotLabel } from './state.js'
 import { slotsHomeDir } from './home.js'
+import {
+  isMac,
+  macChromeCandidates,
+  macDisplayDetail,
+  macFindChrome,
+  macFindPidsByProfile,
+  macIsAlive,
+  macPortHolders,
+  macSample,
+  MAC_CHROME_CANDIDATES,
+  type MacProcSample,
+} from './platform.js'
 
 /**
  * 槽位工作目录 —— **全局唯一，不跟着 CCC 走**。
@@ -163,9 +175,60 @@ const CHROME_CANDIDATES = [
   '/snap/bin/chromium',
 ]
 
+/**
+ * 找 Chrome。
+ *
+ * 🔴 **2026-11-18（owner 令「需要兼容 mac」）**：macOS 分派到 `platform.ts` ——
+ *    那边的路径在 `.app/Contents/MacOS/` 下，与上面六条**一条都不重合**
+ *    （原实现在 mac 上必然"未找到 Chrome"，而回执照样印 Linux 路径，把人指错方向）。
+ * ⚠️ Linux 分支**逐字未改**。
+ */
 export function findChrome(): string | null {
-  for (const p of CHROME_CANDIDATES) if (existsSync(p)) return p
+  return findChromeFor(process.platform)
+}
+
+/**
+ * 按平台找 Chrome（**平台可注入**，理由见 {@link chromeCandidatesFor}）。
+ *
+ * ⚠️ 这里的 `platform` 参数不只是为了测试：它是**让"mac 分支存在"这件事在 Linux 上可判**的唯一办法。
+ *    否则删掉 mac 分支，Linux 上的测试**一条都不会红**。
+ *
+ * @param exists 可选存在性探针（测试用；生产是 `existsSync`）
+ */
+export function findChromeFor(
+  platform: string,
+  exists: (p: string) => boolean = existsSync,
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  if (platform === 'darwin') {
+    for (const p of macChromeCandidates(env)) if (exists(p)) return p
+    return null
+  }
+  for (const p of CHROME_CANDIDATES) if (exists(p)) return p
   return null
+}
+
+/** 错误回执要印出的候选路径（**按平台给**，⛔ 别在 mac 上印 Linux 路径） */
+/**
+ * 按平台选候选路径清单（**纯函数，平台可注入**）。
+ *
+ * 🔴🔴 **为什么要抽成纯函数**（2026-11-18，我在这里踩了一次）：
+ *    第一版写成 `isMac() ? MAC : LINUX`，然后写测试断言"Linux 上不得印 .app 路径"——
+ *    **变异把 `isMac()` 删掉后测试照样全绿**，因为本机是 Linux，两条分支**结果相同**。
+ *    ⇒ 这正是本仓反复踩的「判据没有判别力」：`process.platform` 在测试里改不了，
+ *      于是"平台分派"这件事**在 Linux 上永远读不出对错**。
+ *    ⇒ 修法：把平台作为**参数**传进来，测试即可构造 `'darwin'` 走真分派。
+ *    ⚠️ 生产调用点仍走默认参数（`process.platform`），行为零变化。
+ */
+export function chromeCandidatesFor(
+  platform: string = process.platform,
+): readonly string[] {
+  return platform === 'darwin' ? MAC_CHROME_CANDIDATES : CHROME_CANDIDATES
+}
+
+/** 生产包装（默认当前平台） */
+export function chromeCandidatesForMessage(): readonly string[] {
+  return chromeCandidatesFor()
 }
 
 /**
@@ -193,8 +256,8 @@ export function findChrome(): string | null {
 export interface DisplayChoice {
   args: string[]
   env: Record<string, string | undefined>
-  /** 选中的后端（诊断用） */
-  backend: 'wayland' | 'x11' | 'headless'
+  /** 选中的后端（诊断用；macOS 上是 `cocoa`） */
+  backend: 'wayland' | 'x11' | 'cocoa' | 'headless'
   /** 人话说明（进日志/回执，别让下一个我重查一遍） */
   detail: string
 }
@@ -221,7 +284,18 @@ export interface DisplayProbe {
 export function resolveDisplay(
   env: Record<string, string | undefined> = process.env,
   probe: DisplayProbe = {},
+  platform: string = process.platform,
 ): DisplayChoice {
+  // 🔴 **2026-11-18：macOS 分支**（owner 令「需要兼容 mac」）。
+  //    macOS 用的是 Cocoa，**没有 Wayland/X11 socket** ⇒ 原实现在 mac 上必然落到
+  //    `headless` 那一支，而那是**静默降级**：页面还能求值、截图也出得来，
+  //    但"人能在屏幕上看见它"这件槽位价值没了，且回执照样写"无显示服务"（一句假话）。
+  // ⚠️ `platform` 是**可注入参数**（理由见 `chromeCandidatesFor`）：否则 mac 分支
+  //    在 Linux 上永远读不出对错，删掉它测试也不会红。
+  // ⚠️ Linux 分支（下面）逐字未改。
+  if (platform === 'darwin') {
+    return { args: [], env: { ...env }, backend: 'cocoa', detail: macDisplayDetail() }
+  }
   const exists = probe.exists ?? existsSync
   const uid = process.getuid?.() ?? 1000
   const runtimeDir = env.XDG_RUNTIME_DIR ?? `/run/user/${uid}`
@@ -326,8 +400,9 @@ export function launchSlot(n: number): LaunchResult {
       ok: false,
       pid: 0,
       detail:
-        '未找到 Chrome/Chromium。候选路径：' + CHROME_CANDIDATES.join(' / ') + '\n' +
-        '  ⇒ 装一个或用 `browser_slot` 的 --chrome 指定路径（该选项尚未实现）。',
+        '未找到 Chrome/Chromium（平台：' + (isMac() ? 'macOS' : process.platform) + '）。候选路径：'
+        + chromeCandidatesForMessage().join(' / ') + '\n'
+        + '  ⇒ 装一个 Chrome，或把路径加入上面任一位置。',
     }
   }
   const paths = slotPaths(n)
@@ -396,6 +471,8 @@ export function launchSlot(n: number): LaunchResult {
  *    本实现返回**全部**。
  */
 export function portHolders(port: number): number[] {
+  // 🔴 2026-11-18：macOS 走 `lsof`（Darwin 无 `/proc`）。⚠️ 能力降级已在 platform.ts 头注登记。
+  if (isMac()) return macPortHolders(port)
   // ① 从 /proc/net/tcp{,6} 找 inode：LISTEN 状态 = 0A
   const inodes = new Set<string>()
   for (const f of ['/proc/net/tcp', '/proc/net/tcp6']) {
@@ -469,6 +546,10 @@ function require_readlink(p: string): string {
  */
 export function findPidsByProfile(profileDir: string): number[] {
   if (!profileDir) return []
+  // 🔴 2026-11-18：macOS 走 `ps -ww`（Darwin 无 `/proc`）。
+  //    ⚠️ `-ww` 不可省 —— 不加它命令行被终端宽度截断，而 `--user-data-dir=<长路径>`
+  //       往往正好在被截掉的尾部 ⇒ 认领静默失败，且与"进程真的没了"同形。
+  if (isMac()) return macFindPidsByProfile(profileDir)
   const pids: number[] = []
   let names: string[]
   try {
@@ -513,6 +594,9 @@ export interface ProcSample {
  *    故 {@link sampleProcTree} 接受 `prev` 并返回本次样本供下次用。
  */
 export function sampleProcTree(pids: number[], prev: ProcSample | null, now = Date.now()): ProcSample {
+  // 🔴 2026-11-18：macOS 走 `ps -o time=,rss=`（Darwin 无 `/proc`）。
+  //    口径与下面 Linux 分支**相同**：累计 CPU 时间的增量，⛔ 不是 `%cpu`（累计÷存活时长）。
+  if (isMac()) return macSample(pids, (prev as MacProcSample | null) ?? null, now) as ProcSample
   let ticks = 0
   let rssKb = 0
   let anyAlive = false
@@ -621,6 +705,13 @@ export function killPidOutcome(pid: number, waitMs = 1500): KillOutcome {
  *    与 D253 同族：一个恒真的读数（`existsSync` 对僵尸为 true）会让相邻的两档同形。
  */
 export function pidIsAlive(pid: number): boolean {
+  // 🔴 2026-11-18：macOS 无 `/proc` ⇒ 用 `kill(pid, 0)`。
+  //    ⚠️ 两者语义**不完全等同**：Linux 版能识别僵尸（state=Z ⇒ 判死），
+  //       macOS 版对僵尸会返回 true（`kill 0` 对僵尸仍成功）。
+  //       ⇒ macOS 上"杀掉了但父进程还没回收"会短暂显示为活着，最长到父进程 wait 为止。
+  //       这是**降级**，不影响正确性方向：`killPidOutcome` 会重试并在超时后报 `denied`，
+  //       ⛔ 不会把"还活着"误报成"已回收"（方向是保守的）。
+  if (isMac()) return macIsAlive(pid)
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
     // 格式：`pid (comm) state ...`；comm 可能含空格/括号 ⇒ 以**最后一个 `)`** 为界

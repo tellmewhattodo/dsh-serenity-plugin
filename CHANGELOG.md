@@ -14,6 +14,84 @@
 
 ---
 
+## v1.137.8 — 2026-11-18（`browser_slot` 兼容 macOS：把"平台"从环境里取出来，变成可注入的参数）
+
+> 来源 = **owner 真机报障（逐字）**：「需要兼容mac」—— macOS 上跑 `browser_slot`，回执说
+> 「槽位只探测 Linux 路径，而当前在 macOS，Chrome 装在 `/Applications`」。
+> 根因：槽位整个建立在 `/proc` 之上（2026-11-09 耗电事故逼出来的设计），macOS 上它**一个都不存在**。
+
+### 变的不只是路径 —— macOS 上同时失效的有五处
+
+| 能力 | Linux 实现 | macOS 上会怎样 |
+|---|---|---|
+| Chrome 可执行文件 | `/usr/bin/google-chrome` 等 6 条 | **一条都没有**（在 `.app/Contents/MacOS/` 下） |
+| 显示后端 | Wayland / X11 socket | **都不要**（走 Cocoa） |
+| 按 profile 认领进程 | 读 `/proc/<pid>/cmdline` | **无 `/proc`** ⇒ 认领恒空 |
+| 端口占用反查 | `/proc/net/tcp` ＋ `/proc/<pid>/fd` | **无 `/proc`** ⇒ 恒空 |
+| CPU/RSS 采样 | `/proc/<pid>/stat` ＋ `/status` | **无 `/proc`** ⇒ 恒空 |
+
+🔴 这五处**在 Linux 上全都读不出来**（本机测试跑的是 Linux 分支，mac 分支从不执行、却从不报错）
+—— 即本仓反复踩的「假绿 / 判据没有判别力」形态。
+
+### 改法：新增 `src/browser/platform.ts`，作为 macOS 差异的**唯一归集处**
+
+`process.ts` 那 850 行里，两个平台**只在五个入口分岔**，其余（启动参数、杀进程三档、身份写盘、
+CDP 等待）完全共用 ⇒ **Linux 实现逐字未动**，只在原函数第一行做一次分派。
+
+mac 侧实现与**三处刻意不做的**：
+
+- `macChromeCandidates()`：系统级 `/Applications` → 用户级 `~/Applications` → Canary/Beta/Dev → Chromium。
+  ⚠️ **刻意不列 Playwright/Puppeteer 缓存那份**（`ms-playwright`）：它不是用户的浏览器，
+  拿它冒充"找到 Chrome"会让人误判成"我登着用户的浏览器"。
+- `macFindPidsByProfile()`：`ps -ww -Ao pid=,command=`。🔴 **`-ww` 不可省** —— 不加它 `ps` 按终端宽度
+  截断命令行，而 `--user-data-dir=<长路径>` 往往正好在被截掉的尾部 ⇒ 认领**静默失败**，
+  且表现与"进程真的没了"在读数上同形。
+  ⛔ **绝不用 `pgrep chrome`** —— 那会连用户自己的浏览器一起杀掉（2026-11-09 事故差点犯的第二个错）。
+- `macSample()`：`ps -o time=,rss=` ＋ `parsePsTime()`，口径与 Linux **同源**（累计时间增量，
+  ⛔ 不是 `%cpu`——后者是"累计 ÷ 存活时长"，事故里它给出 35.2% 而实际累计 12 小时）。
+  解析不出 ⇒ `null`，⛔ **不返回 0**（0 会让"读不到"伪装成"CPU 很低"）。
+- ⛔ 不把 Linux 改成 `ps`（`/proc` 的字段是内核契约，`ps` 的输出随版本/平台变）。
+- ⛔ 不引入可变全局策略：策略选择是**纯函数**，没有"注册/安装"那一层（那会让测试之间互相污染）。
+
+### 🔴 本版最值钱的一次自纠：判据在本机**结构上判不了**
+
+第一版把分派写成 `isMac() ? A : B`，再写测试断言「Linux 上不得印 `.app` 路径」——
+**变异把 `isMac()` 整个删掉，测试照样全绿**：本机是 Linux，两条分支**结果相同**。
+
+⇒ 修法不是"加断言"，而是**改被测对象**：把平台做成**可注入参数**
+（`chromeCandidatesFor(platform)` ／ `findChromeFor(platform, exists, env)` ／ `resolveDisplay(env, probe, platform)`）。
+之后**两处变异各自精确红**：① 删 darwin 分派 ⇒ 红在"两条分支都真走一遍"；
+② `platform === 'darwin' && false` ⇒ 红在 `expected 'headless' to be 'cocoa'`。
+生产调用点仍用默认参数（`process.platform`），行为零变化。
+
+### 验收
+
+- **新增 22 条用例**（`tests/browser-slot-macos.test.ts`），分两层：
+  ① **纯函数层**（任何平台真跑）：平台分派真的分岔 ／ `parsePsTime` 五种形态 ／ 候选与 Linux 一条不重合 ／
+  错误文案按平台切换；② **失败方向层**：mac 实现查不到 ⇒ **空集合而不抛**（⛔ 不假装能验 mac 的真实输出格式）。
+- 门禁：typecheck ✓ ／ typecheck-host 0.2.2-rc.1 ✓（node 100 ＋ client 193 文件）／
+  test **242 files / 3693 tests** ✓ ／ coverage **91.95%** ✓ ／ build ✓ ／ pack-check **194 文件** ✓
+
+### 两处按实登记（⛔ 别读成"mac 上已验证"）
+
+- 🔴 **诚实边界**：本机是 Linux，`process.platform` 改不了 ⇒ 「mac 上真能起 Chrome」**只能在 mac 上真机验**。
+  本版能保证的是：判据齐全、mac 分支**在 Linux 上可判**、失败方向正确（查不到 ⇒ 空集合，不抛）、Linux 行为零改变。
+- **已知降级**：`lsof` 对别人的端口可能因权限看不见 ⇒ 返回空，而空在调用方等价于"没人占"
+  ⇒ macOS 上端口判据**比 Linux 弱**。真正的兜底是 CDP 探活那一步。
+  `macIsAlive()` 对僵尸进程返回 true（Linux 版能判死）—— 同样登记在源码。
+- **未做**：`--chrome` 手动指定路径选项仍未实现（本轮只做平台兼容，⛔ 不是漏了）。
+
+### 顺手修掉的一处门禁自伤（同批）
+
+mac 测试夹具里写死的用户级候选路径**撞了本仓的隐私门禁** `absolute-macos-path`
+（该规则锁的是「macOS 家目录下的绝对路径」这个**形态**，占位用户名一样命中）——
+本轮**连红三次**：先写真人名 ⇒ 红；改成单字母占位 ⇒ **仍红**；把这条教训的注释写进文件 ⇒ **第三次红**
+（注释里的字面量同样在扫描域内）。
+⇒ 修法 = **由注入的 `HOME` 拼出期望值**，⛔ 不把整条路径写第二遍（顺带消掉"同一形状存两处"）。
+⇒ 判据沉淀：**公开面里连占位形态都不要写死，注释里也不要引用它的字面量。**
+
+---
+
 ## v1.137.7 — 2026-11-17（🔴 交接便签「只搬第一条」＋ 轮转与执行脱钩：LOG 里人写的增量会被静默磨没）
 
 > 来源 = **管家真机观察**：某轨迹 `LOG/` 在 **74 秒内连出 7 代**
