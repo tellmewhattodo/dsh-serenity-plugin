@@ -90,11 +90,19 @@ function trajectoryNameFromCwd(root: string, cwd: string): string {
   return seg.startsWith('_') ? '' : seg
 }
 
-/** 一行渲染一个槽位（宽度克制：20 行要塞得进一屏） */
+/**
+ * 一行渲染一个槽位（宽度克制：20 行要塞得进一屏）。
+ *
+ * 🔴 **`sampled === false` 时印 `—`，⛔ 不印 `0`**（2026-11-19，v1.137.10）：
+ *   Windows 上刻意不采样（成本见 `process.ts` 的 win32 分支）⇒ 若照旧渲染 `cpu0% 内存0M`，
+ *   那与「测了，确实很低」**完全同形**，而后者正是 2026-11-09 耗电事故里我们**没能及时发现**
+ *   的那个读数。⇒ 判据：**「没测」必须与「测了是 0」在读数上分得开**（D253 家族）。
+ */
 function row(v: SlotView): string {
   const g = STATE_GLYPH[v.state] ?? '?'
   const who = v.state === 'free' ? '' : ` ${v.trajectory || v.sessionId || '(无归属)'}`
-  const extra = v.state === 'free' ? '' : ` 持${v.heldMin}m 闲${v.idleMin}m cpu${v.cpuPct}% 内存${v.rssMb}M`
+  const res = v.sampled ? `cpu${v.cpuPct}% 内存${v.rssMb}M` : 'cpu— 内存—（本平台不采样）'
+  const extra = v.state === 'free' ? '' : ` 持${v.heldMin}m 闲${v.idleMin}m ${res}`
   const why = v.reasons.length > 0 ? `\n      ↳ ${v.reasons.join('；')}` : ''
   return `  ${g} ${v.label.padEnd(3)} :${v.port} ${v.resolution.padEnd(9)} ${v.state.padEnd(8)}${who}${extra}${why}`
 }

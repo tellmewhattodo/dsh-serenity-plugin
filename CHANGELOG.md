@@ -14,6 +14,85 @@
 
 ---
 
+## v1.137.10 — 2026-11-19（`browser_slot` 兼容 Windows；顺带修掉两处**平台专属参数被全局带上**）
+
+> 来源 = **owner 令（逐字）**：「做，，同意你的看法，在win上能用就行，linux和mac才是主要的」。
+> 定调很关键：**验收标准 = 「在 Windows 上能用」**，不是「与 Linux 逐项等同」。
+> 凡是做不到等同的地方一律**显式降级并让它在读数上看得见**（见下「三处降级」）。
+
+### 变的不只是路径 —— Windows 上有四处与 macOS **结构不同**的问题
+
+| # | 事项 | Linux / macOS | Windows |
+|---|---|---|---|
+| ① | 杀进程 | `SIGTERM` → 等 → `SIGKILL` | Node 的 `SIGTERM` 在 win32 上**就是** `TerminateProcess` ⇒ **没有优雅退出**，「先温和后强硬」这一层不存在 |
+| ② | 进程树 | 子进程命令行一般带 `--user-data-dir` ⇒ 按 profile 能认全 | **不保证**（renderer/GPU 未必带）⇒ 认领到主进程后要按树杀，否则留孤儿 renderer |
+| ③ | `--no-sandbox` | **必需**（容器内 sandbox 起不来 ⇒ 1.5s 自杀） | **⛔ 绝不能加** —— 没那个故障，加上等于**主动拆掉用户的浏览器沙箱** |
+| ④ | CPU/RSS 采样 | 读 `/proc`（零成本） | 只能起子进程（PowerShell，每次几百毫秒）⇒ 采样本身会变成耗电来源 |
+
+### 改法：新增 `src/browser/platform-win.ts`（win32 的归集处，与 `platform.ts` 平级）
+
+`process.ts` 每个入口第一行做一次**三向**分派（`win32 → platform-win` ／ `darwin → platform` ／ 其余 → 原 Linux 实现**逐字未动**）：
+
+- `winChromeCandidates()`：**`%LOCALAPPDATA%` 排第一**（Chrome 默认装这里，不是 Program Files）→
+  `%ProgramFiles%` → `%ProgramFiles(x86)%` → Chromium → **Edge 兜底**。
+  ⚠️ 把 Edge 放进来是刻意的：它是 Chromium 内核、支持同一套 CDP、且**每台 Windows 都预装** ⇒
+  没有 Chrome 的机器上槽位**真能跑起来**，而不是回一句「未找到」。
+  ⛔ 它与此前 mac 上刻意排除的 Playwright 缓存**不是同一类**：那份是「自动化副本、不是用户的浏览器」，
+  Edge 是**用户机器上真实存在的浏览器**。回执会印出实际选中的路径，选到 Edge 一眼看得出来。
+- `winPortHolders()`：`netstat -ano -p TCP`（**只认 `LISTENING`**；端口比对用**精确尾段**）。
+- `winFindPidsByProfile()`：一次 PowerShell `Win32_Process` 快照 ＋ **1s 缓存**，
+  路径比对**大小写不敏感**（Chrome 会规范化盘符/首字母，严格比对会静默漏认）。
+- `winKillTree()`：`taskkill /PID <pid> /T /F`（**按树**，见差异 ②）。
+- `winPidClaimsProfile()` ／ `winIsAlive()` ／ `winSample()`。
+
+### 🔴 三处**显式降级**（每一处都让它在读数上看得见）
+
+1. **不采样 CPU/RSS**（差异 ④）。`winSample` 返回 **`sampled: false`**，
+   `SlotView.sampled` 一路带到界面，渲染成 **`cpu— 内存—（本平台不采样）`**。
+   ⛔ 绝不渲染成 `cpu0% 内存0M` —— 那是「测了，很低」的**同形假读数**，
+   正是 2026-11-09 事故里我们**没能及时发现**的那个读数（D253 家族）。
+   后果如实登记：Windows 上**没有** CPU/内存两条看守判据，仍有效的三条 =
+   进程存活 ／ 闲置超时 ／ 租约超时。
+2. **端口反查权限面更弱**：别人的进程可能查不到 ⇒ 回空，而空在调用方等价于「没人占」。
+   真正的兜底是 CDP 探活那一步。已登记在 `platform-win.ts` 头注。
+3. **`killPidOutcome` 的两段式退化成一段**（差异 ①），三档语义（`killed`/`absent`/`denied`）**不变**。
+
+### 🔴 顺带修掉的一处**真实行为缺陷**：平台专属参数被全局带上
+
+`buildArgs` 原把 `--no-sandbox` 与 `--disable-dev-shm-usage` **写死在共用数组里**，所有平台一起带。
+这两条的成因**只存在于 Linux**（容器内 sandbox `Operation not permitted` ／ `/dev/shm` 只有 64MB）。
+
+⇒ 在 macOS / Windows 上带 `--no-sandbox` 是**主动关掉用户的浏览器沙箱**，收益为零。
+
+**改法**：`buildArgs(n, paths, display?, platform)` —— 那两条改成 `linuxOnly`，**按平台给**。
+⚠️ **macOS 一并修正**（v1.137.8 只把 mac 的启动跑通，没动这两条）：
+这是一处**行为变更，不是纯重构** —— 它在 mac 上是**变好**（沙箱回来了），
+但它属于「mac 上从未真机验过」的那一格，所以**只改参数、不改那段诚实边界声明**。
+
+🔴 **判据沉淀**：这是本轨迹「删值 = 删契约」的**反面** —— **「带值 = 造不存在的契约」**。
+一个成因只在一处成立的参数，⛔ 不能因为「统一好看」就全局带上。
+
+### 验收
+
+- **新增 45 条用例**（`tests/browser-slot-windows.test.ts`），两层：
+  ① **纯函数／可注入层**（Linux 上真跑，是判据主体）：三向平台分派**两两不重合** ／
+  `parseNetstatListeners`（LISTENING 专认 ／ 精确尾段 ／ IPv6 ／ 排除自身 ／ **`ESTABLISHED` 反控**）／
+  `parseCimProcesses`（**单条 JSON 是对象不是数组** ／ `CommandLine: null` ／ 坏 pid 逐条丢弃）／
+  `pickPidsByProfile`（**大小写不敏感** ／ 不认领用户自己的浏览器 ／ 排除自身）／
+  `buildArgs` 三平台参数**成对**验证 ／ `pidClaimsProfile(…, 'win32')` 用**调用计数**证明真走 win 分支；
+  ② **薄 I/O 包装**（本机无 `powershell.exe`/`taskkill` ⇒ 只验**失败方向**：回空或 `absent`，**绝不抛**）。
+- 门禁：typecheck ✓ ／ **typecheck-host 0.2.2-rc.1** ✓（node 100 ＋ client 193）／
+  test **243 files / 3740 tests** ✓ ／ coverage **92.03%** ✓ ／ build ✓ ／ pack-check **195 文件** ✓
+
+### 🔴 诚实边界（⛔ 别把"测试全绿"读成"win 上已验证"）
+
+本机是 **Linux**，`process.platform` 改不了 ⇒ **「Windows 上能起 Chrome、能连 CDP、能按树杀掉」
+只能在 Windows 上真机验**。本版能保证的是：判据齐全、win32 分支**在 Linux 上可判**（变异精确红）、
+失败方向正确（查不到 ⇒ 空集合／`absent`，不抛）、**Linux 与 macOS 行为按预期且 Linux 零改变**。
+⚠️ **一处未做**：`--chrome` 手动指定路径选项仍未实现（与 v1.137.8 同）。
+
+---
+
 ## v1.137.9 — 2026-11-18（自查补漏：mac 上 `pidClaimsProfile` 恒 false，会让一句假话通过归因）
 
 > 来源 = **我自己的 diff 复核**（⛔ 不是用户报障，也⛔ 不是测试红——测试当时**全绿**）。

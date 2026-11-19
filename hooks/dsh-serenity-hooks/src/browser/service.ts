@@ -208,6 +208,12 @@ export interface SlotView {
   rssMb: number
   pid: number
   nudges: number
+  /**
+   * 这次视图的 CPU/内存读数**是否真采过**。
+   * `false` ⇒ 渲染成 `cpu—` / `内存—`，⛔ 不能渲染成 `cpu0%`（那是「测了，很低」的同形假读数）。
+   * 当前只有 Windows 为 `false`（见 `process.ts` 的 `sampleProcTree` win32 分支）。
+   */
+  sampled: boolean
 }
 
 function toView(
@@ -235,6 +241,8 @@ function toView(
     rssMb: Math.round(proc.rssMb),
     pid: lease?.pid ?? 0,
     nudges: lease?.nudges ?? 0,
+    // `undefined` ⇒ `true`：Linux/macOS 一直在采；只有 Windows 显式给 `false`。
+    sampled: proc.sampled !== false,
   }
 }
 

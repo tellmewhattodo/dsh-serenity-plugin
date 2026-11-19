@@ -43,6 +43,33 @@ import {
   MAC_CHROME_CANDIDATES,
   type MacProcSample,
 } from './platform.js'
+import {
+  isWin,
+  winChromeCandidates,
+  winDisplayDetail,
+  winFindChrome,
+  winFindPidsByProfile,
+  winIsAlive,
+  winKillTree,
+  winPidClaimsProfile,
+  winPortHolders,
+  winSample,
+  WIN_CHROME_CANDIDATES,
+} from './platform-win.js'
+
+/**
+ * 平台的人话名（只用于**回执文案**，⛔ 不参与任何判定）。
+ *
+ * 🔴 为什么要有它（v1.137.8 的一处小疏漏）：原文案写的是
+ *   `isMac() ? 'macOS' : process.platform` ⇒ 在 mac 上印 `macOS`，
+ *   在 Windows 上会印出裸的 `win32` —— 而 `win32` 是 Node 的内部标识，
+ *   不是用户认得的名字（他会去搜"win32 是什么系统"）。
+ */
+function platformLabel(platform: string = process.platform): string {
+  if (platform === 'darwin') return 'macOS'
+  if (platform === 'win32') return 'Windows'
+  return platform
+}
 
 /**
  * 槽位工作目录 —— **全局唯一，不跟着 CCC 走**。
@@ -205,6 +232,10 @@ export function findChromeFor(
     for (const p of macChromeCandidates(env)) if (exists(p)) return p
     return null
   }
+  if (platform === 'win32') {
+    for (const p of winChromeCandidates(env)) if (exists(p)) return p
+    return null
+  }
   for (const p of CHROME_CANDIDATES) if (exists(p)) return p
   return null
 }
@@ -220,11 +251,16 @@ export function findChromeFor(
  *      于是"平台分派"这件事**在 Linux 上永远读不出对错**。
  *    ⇒ 修法：把平台作为**参数**传进来，测试即可构造 `'darwin'` 走真分派。
  *    ⚠️ 生产调用点仍走默认参数（`process.platform`），行为零变化。
+ *
+ * 🆕 **2026-11-19 三向**（owner 令「做」/「在 win 上能用就行」）：加 `win32` 一支。
+ *    Linux 与 darwin 两支**逐字未改**，只是 win32 分支插在它们之间。
  */
 export function chromeCandidatesFor(
   platform: string = process.platform,
 ): readonly string[] {
-  return platform === 'darwin' ? MAC_CHROME_CANDIDATES : CHROME_CANDIDATES
+  if (platform === 'darwin') return MAC_CHROME_CANDIDATES
+  if (platform === 'win32') return WIN_CHROME_CANDIDATES
+  return CHROME_CANDIDATES
 }
 
 /** 生产包装（默认当前平台） */
@@ -257,8 +293,13 @@ export function chromeCandidatesForMessage(): readonly string[] {
 export interface DisplayChoice {
   args: string[]
   env: Record<string, string | undefined>
-  /** 选中的后端（诊断用；macOS 上是 `cocoa`） */
-  backend: 'wayland' | 'x11' | 'cocoa' | 'headless'
+  /**
+   * 选中的后端（诊断用）。
+   * `cocoa` = macOS 原生窗口；`native` = Windows 原生窗口（DWM）。
+   * 🔴 两者**刻意不合并成 `native`**：回执要说清是哪个平台的原生栈，
+   *    否则「为什么这台 mac 上没有 `--ozone-platform` 参数」又要重查一遍。
+   */
+  backend: 'wayland' | 'x11' | 'cocoa' | 'native' | 'headless'
   /** 人话说明（进日志/回执，别让下一个我重查一遍） */
   detail: string
 }
@@ -296,6 +337,15 @@ export function resolveDisplay(
   // ⚠️ Linux 分支（下面）逐字未改。
   if (platform === 'darwin') {
     return { args: [], env: { ...env }, backend: 'cocoa', detail: macDisplayDetail() }
+  }
+  // 🔴 **2026-11-19：Windows 分支**（owner 令「做」/「在 win 上能用就行」）。
+  //    Windows 走原生窗口（DWM），同样**没有** Wayland/X11 socket ⇒ 不加这一支，
+  //    原实现会落到下面的 `headless` 兜底 —— 而那与 macOS 那次的失效形态**一模一样**：
+  //    页面求值/截图都还能用，但"人能在屏幕上看见它"这件槽位价值没了，
+  //    回执照样写「无显示服务」（一句在 Windows 上恒假的话）。
+  // ⚠️ 同样刻意**不加 `--headless`**，理由与 macOS 分支同。
+  if (platform === 'win32') {
+    return { args: [], env: { ...env }, backend: 'native', detail: winDisplayDetail() }
   }
   const exists = probe.exists ?? existsSync
   const uid = process.getuid?.() ?? 1000
@@ -356,10 +406,32 @@ export function resolveDisplay(
  * ⚠️ 同样刻意**不用** `--disable-gpu`：Chrome 的 GPU 进程崩溃是这次实打实的死因，
  *   但关掉 GPU 会让截图与 3D 页面拿到不同的渲染路径（软件光栅化）⇒ **取证条件变了**。
  *   两条实现都保留 GPU（只用 `--no-sandbox` 解决 sandbox 问题），本实现跟随。
+ *
+ * 🔴🔴 **`--no-sandbox` 与 `--disable-dev-shm-usage` 是 Linux 专属**（v1.137.10，2026-11-19）。
+ *
+ *   这两条都**不是**"为了跨平台统一"的通用参数，它们的成因**只存在于 Linux**：
+ *   - `--no-sandbox`：容器内 Chrome 自身 sandbox 初始化失败（`Operation not permitted`）。
+ *     macOS / Windows 上**没有这个故障** ⇒ 在那里加上它等于**主动拆掉用户的浏览器沙箱**，
+ *     把一个本可以正常工作的安全边界关掉，且**没有任何收益**。
+ *   - `--disable-dev-shm-usage`：容器 `/dev/shm` 只有 64MB。Windows 上没有 `/dev/shm` 这回事。
+ *
+ *   ⇒ 判据：**平台专属的参数必须按平台给，⛔ 不能因为"统一"就全局带上。**
+ *     这是本轨迹里"删值 = 删契约"的**反面**：这里是"**带值 = 造不存在的契约**"。
+ *   ⚠️ macOS 上原实现同样带着这两条（v1.137.8 没动它，那版只把启动跑通）；
+ *     本次**一并修正**：mac 上也不再带 `--no-sandbox`。
+ *     🔴 **这是一处行为变更，不是纯重构** —— 它在 mac 上是**变好**（沙箱回来了），
+ *        但属于"mac 上从未真机验过"的那一格里，所以只改参数、**不改那段诚实边界声明**。
  */
-export function buildArgs(n: number, paths: SlotPaths, display?: DisplayChoice): string[] {
+export function buildArgs(
+  n: number,
+  paths: SlotPaths,
+  display?: DisplayChoice,
+  platform: string = process.platform,
+): string[] {
   const { width, height } = SLOT_RESOLUTION(n)
-  const disp = display ?? resolveDisplay()
+  const disp = display ?? resolveDisplay(process.env, {}, platform)
+  // Linux 专属的两条（见上方注释）：容器内 sandbox 起不来 + /dev/shm 只有 64MB。
+  const linuxOnly = platform === 'win32' || platform === 'darwin' ? [] : ['--no-sandbox', '--disable-dev-shm-usage']
   return [
     `--user-data-dir=${paths.profile}`,
     `--remote-debugging-port=${slotPort(n)}`,
@@ -368,8 +440,7 @@ export function buildArgs(n: number, paths: SlotPaths, display?: DisplayChoice):
     ...disp.args,
     '--no-first-run',
     '--no-default-browser-check',
-    '--no-sandbox',
-    '--disable-dev-shm-usage',
+    ...linuxOnly,
     '--disable-extensions',
     `--force-device-scale-factor=1`,
     `--window-size=${width},${height}`,
@@ -401,7 +472,7 @@ export function launchSlot(n: number): LaunchResult {
       ok: false,
       pid: 0,
       detail:
-        '未找到 Chrome/Chromium（平台：' + (isMac() ? 'macOS' : process.platform) + '）。候选路径：'
+        '未找到 Chrome/Chromium（平台：' + platformLabel() + '）。候选路径：'
         + chromeCandidatesForMessage().join(' / ') + '\n'
         + '  ⇒ 装一个 Chrome，或把路径加入上面任一位置。',
     }
@@ -444,6 +515,9 @@ export function launchSlot(n: number): LaunchResult {
       detached: true,
       stdio: ['ignore', out, out],
       env: disp.env,
+      // 🔴 Windows 专属：不加它，从服务进程 spawn Chrome 会**弹出控制台窗口**，
+      //    且那个窗口会抢焦点（槽位是给"人能在屏幕上看见"用的，但不能把用户的焦点抢走）。
+      windowsHide: true,
     })
     child.unref()
     const pid = child.pid ?? 0
@@ -474,6 +548,9 @@ export function launchSlot(n: number): LaunchResult {
 export function portHolders(port: number): number[] {
   // 🔴 2026-11-18：macOS 走 `lsof`（Darwin 无 `/proc`）。⚠️ 能力降级已在 platform.ts 头注登记。
   if (isMac()) return macPortHolders(port)
+  // 🔴 2026-11-19：Windows 走 `netstat -ano`（无 `/proc`；且 win32 无 POSIX socket inode）。
+  //    ⚠️ 权限面比 Linux 弱（别人的进程可能查不到 ⇒ 回空），已在 platform-win.ts 头注登记。
+  if (isWin()) return winPortHolders(port)
   // ① 从 /proc/net/tcp{,6} 找 inode：LISTEN 状态 = 0A
   const inodes = new Set<string>()
   for (const f of ['/proc/net/tcp', '/proc/net/tcp6']) {
@@ -551,6 +628,11 @@ export function findPidsByProfile(profileDir: string): number[] {
   //    ⚠️ `-ww` 不可省 —— 不加它命令行被终端宽度截断，而 `--user-data-dir=<长路径>`
   //       往往正好在被截掉的尾部 ⇒ 认领静默失败，且与"进程真的没了"同形。
   if (isMac()) return macFindPidsByProfile(profileDir)
+  // 🔴 2026-11-19：Windows 走一次 PowerShell 进程快照（含 1s 缓存，见 platform-win.ts）。
+  //    ⚠️ 路径比对必须**大小写不敏感**（Chrome 会把盘符/首字母规范化），该判据在 platform-win 里。
+  //    ⚠️ 子进程（renderer/GPU）**不保证**命令行带 `--user-data-dir` ⇒ 认领可能只认到主进程，
+  //       所以回收必须走 `taskkill /T`（见 destroySlot 与 platform-win 的 winKillTree）。
+  if (isWin()) return winFindPidsByProfile(profileDir)
   const pids: number[] = []
   let names: string[]
   try {
@@ -582,6 +664,16 @@ export interface ProcSample {
   rssMb: number
   /** 采样时刻（ms） */
   at: number
+  /**
+   * 这次读数**是否真的采到了**资源量（CPU/RSS）。
+   *
+   * 🔴 为什么要这个字段（2026-11-19，v1.137.10）：Windows 上**刻意不采样**（成本见
+   *   {@link sampleProcTree} 的 win32 分支）。若不给这个字段，`cpuPct: 0 / rssMb: 0`
+   *   会在界面上渲染成 `cpu0% 内存0M` —— 与「测了，确实很低」**完全同形**。
+   *   ⇒ 判据（D253 家族）：**「没测」必须与「测了是 0」在读数上分得开。**
+   * `undefined` 视为 `true`（Linux/macOS 一直在采，历史调用方不必改）。
+   */
+  sampled?: boolean
 }
 
 /**
@@ -598,6 +690,17 @@ export function sampleProcTree(pids: number[], prev: ProcSample | null, now = Da
   // 🔴 2026-11-18：macOS 走 `ps -o time=,rss=`（Darwin 无 `/proc`）。
   //    口径与下面 Linux 分支**相同**：累计 CPU 时间的增量，⛔ 不是 `%cpu`（累计÷存活时长）。
   if (isMac()) return macSample(pids, (prev as MacProcSample | null) ?? null, now) as ProcSample
+  // 🔴 2026-11-19：Windows **刻意不采样**（owner 令「在 win 上能用就行」＋ 成本实测）。
+  //    为什么不做：Windows 上拿累计 CPU 时间只能起子进程
+  //    （`Get-CimInstance Win32_PerfRawData_PerfProc_Process` ／ `Get-Process`，每次几百毫秒），
+  //    而看守是**每 tick × 每槽位**都要读一次 ⇒ 采样本身会变成耗电来源，
+  //    正是 2026-11-09 事故要防的那一类。
+  //    ⇒ 退化成「只验存活」（`alive` 由调用方已算出的 pids 推出，零额外成本），
+  //      并把 `sampled: false` **一路带到界面上渲染成 `cpu—`**，
+  //      ⛔ 绝不能让它渲染成 `cpu0%` —— 那是「测了，很低」的同形假读数（D253 同族）。
+  //    ⚠️ 后果（如实登记）：Windows 上**没有 CPU/内存两条看守判据**，
+  //      仍有效的三条 = 进程存活 ／ 闲置超时 ／ 租约超时。
+  if (isWin()) return winSample(pids, now) as ProcSample
   let ticks = 0
   let rssKb = 0
   let anyAlive = false
@@ -633,6 +736,7 @@ export function sampleProcTree(pids: number[], prev: ProcSample | null, now = Da
     rssMb: rssKb / 1024,
     at: now,
     ticks,
+    sampled: true,
   }
   return out
 }
@@ -662,6 +766,13 @@ export type KillOutcome =
 
 export function killPidOutcome(pid: number, waitMs = 1500): KillOutcome {
   if (!Number.isInteger(pid) || pid <= 1) return 'absent'
+  // 🔴 2026-11-19：Windows 走 `taskkill /T /F`（**按进程树**）。
+  //    两个成因都在 platform-win.ts 头注里：① Windows 上 Node 的 SIGTERM 本来就是
+  //    `TerminateProcess`，没有"优雅退出"这一层；② Chrome 的 renderer/GPU **不保证**
+  //    命令行带 `--user-data-dir` ⇒ 只杀主进程会留下孤儿 renderer（= 耗电事故的形态，
+  //    且「进程少了但 CPU 还在」在读数上极难归因）。
+  //    ⚠️ 返回的三档语义与下面**完全一致**（`killed`/`absent`/`denied`），只是实现换成外部命令。
+  if (isWin()) return winKillTree(pid)
   // 动手之前先定格"它本来在不在" —— 这是区分 killed 与 absent 的唯一依据
   const existedBefore = pidIsAlive(pid)
   try {
@@ -713,6 +824,12 @@ export function pidIsAlive(pid: number): boolean {
   //       这是**降级**，不影响正确性方向：`killPidOutcome` 会重试并在超时后报 `denied`，
   //       ⛔ 不会把"还活着"误报成"已回收"（方向是保守的）。
   if (isMac()) return macIsAlive(pid)
+  // 🔴 2026-11-19：Windows 同样用 `kill(pid, 0)`（libuv 打开进程句柄）。
+  //    ✅ **这一格 Windows 比 Linux 简单**（如实登记，不假装处处更难）：
+  //      Windows 没有"僵尸"概念 —— 进程退出即回收，不存在 Linux 侧那个
+  //      「`/proc/<pid>` 还在、但 state=Z 已死」的坑。`kill(pid,0)` 在 win32 上
+  //      打不开句柄即 ESRCH ⇒ 与 POSIX 同语义，无需额外判据。
+  if (isWin()) return winIsAlive(pid)
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
     // 格式：`pid (comm) state ...`；comm 可能含空格/括号 ⇒ 以**最后一个 `)`** 为界
@@ -824,15 +941,23 @@ export function destroySlot(n: number, pidHint = 0): { killed: number[]; detail:
  *
  * 🔴 `platform` 与 `macClaim` 都是**可注入参数**（与 {@link chromeCandidatesFor} 同一理由）：
  *    否则"分派真的发生了"这件事在 Linux 上**永远读不出对错** —— 删掉 darwin 分支测试也不会红。
+ *
+ * 🔴 **2026-11-19（v1.137.10）**：加 `win32` 一支。**同一族的缺陷不该有第三个版本** ——
+ *    这次在加 Windows 支持时**主动**把它一起做了，而不是等 mac 那次的形态在 win 上重演一遍
+ *    （在 win 上重演的后果与 mac 完全相同：`destroySlot` 会印
+ *    「台账那条记录是陈旧的或被污染」—— 一句在 win 上恒假的话）。
+ * ⚠️ `winClaim` 同样是可注入参数，理由同上：⛔ 不能只靠"本机是 Linux"来验它。
  */
 export function pidClaimsProfile(
   pid: number,
   profileDir: string,
   platform: string = process.platform,
   macClaim: (pid: number, profileDir: string) => boolean = macPidClaimsProfile,
+  winClaim: (pid: number, profileDir: string) => boolean = winPidClaimsProfile,
 ): boolean {
   if (!Number.isInteger(pid) || pid <= 1) return false
   if (platform === 'darwin') return macClaim(pid, profileDir)
+  if (platform === 'win32') return winClaim(pid, profileDir)
   try {
     return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(profileDir)
   } catch {

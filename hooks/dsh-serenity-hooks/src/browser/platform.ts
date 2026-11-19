@@ -59,6 +59,8 @@ export interface MacProcSample {
   at: number
   /** 累计 CPU 时间（**秒 × 1000** 的整数，避免浮点漂移）；Linux 侧同名字段是 ticks */
   ticks?: number
+  /** 见 `ProcSample.sampled`：macOS **真的采**，故恒 `true`（与 Windows 的 `false` 成对） */
+  sampled?: boolean
 }
 
 /**
@@ -220,7 +222,7 @@ export function macSample(pids: number[], prev: MacProcSample | null, now = Date
     const dCpuSec = (ticks - prev.ticks) / 1000
     if (dtSec > 0 && dCpuSec >= 0) cpuPct = (dCpuSec / dtSec) * 100
   }
-  return { alive: anyAlive, cpuPct, rssMb: rssKb / 1024, at: now, ticks }
+  return { alive: anyAlive, cpuPct, rssMb: rssKb / 1024, at: now, ticks, sampled: true }
 }
 
 /**
