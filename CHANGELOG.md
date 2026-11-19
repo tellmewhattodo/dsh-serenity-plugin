@@ -14,6 +14,65 @@
 
 ---
 
+## v1.137.11 — 2026-11-19（只声明常驻的轨迹被静默剥夺 MSM 注册权：判据从「文件存在」改回「声明了 `msms`」）
+
+> 来源 = **butler 报障**（`container_admin msm register` 三次 ＋ `deregister` 两次实测）。
+> 它的 `trajectory.json` **全文只有 4 行**（只写 `resident.serves`），
+> 却照样拿到 `register/deregister is not allowed in trajectory-constraint sessions`。
+
+### 缺陷：注册权是**第四维**，却按「文件在不在」判
+
+文档两处逐字承诺「**不写 = 不收窄**」，并明确推荐「只想声明常驻 ⇒ **tools/msms 一个都不要写**」。
+而实现把 `register/deregister` 的拒绝挂在「**这个会话是轨迹约束会话**」上 ——
+只要那个文件存在就恒拒，**与 `msms` 写没写完全无关**。
+
+⇒ 后果不是「多一层保护」，而是：**「只想声明常驻」这个被本仓文档推荐的写法，
+静默附带了一个文档没写的代价**，而且没有任何读数说出这件事。
+
+### 为什么判「是 bug」而不是「改文档对齐实现」
+
+本轨迹自己的纪律是 **D181「不写当然不收窄」× 逐维成立**：`tools` ／ `msms` ／ `writes`
+三维各自按「字段在不在」判。**注册权是第四维，却绕过了那条规则** ——
+一条"只想声明常驻"的轨迹，**它的能力面与没有该文件时完全一样** ⇒ 拒它注册没有任何依据。
+
+**改法（判据与 `exec` 对齐，同一个函数里两套判据本来就不该有）**：
+
+| `msms` | register/deregister | 理由 |
+|---|---|---|
+| **缺省**（没写） | **放行** | 不收窄 ⇒ 注册权也不该被收窄 |
+| `[]`（显式空） | **拒绝** | 显式表达"我不要任何 MSM" ⇒ 注册权随之关掉（与 `exec` 语义一致：显式 `[]` 是全拒） |
+| 非空 | **拒绝** | 能力面已被收窄 ⇒ 不再给它改共享注册表（**原语义保留**） |
+
+### 反对面（butler 提了，我认，但不足以翻转结论）—— 照实记
+
+**注册表是容器级共享结构，任何轨迹写坏会影响全体** —— 这是当初"恒拒"的合理动机。
+但：① 恒拒**拦不住真正危险的写入**（那条轨迹只要还有 `write` 就能直接改注册表文件）；
+② 它拦住的是一个**正常且被文档推荐**的动作；③ **没有任何读数**说出这件事。
+⇒ 判据沉淀：**收窄必须发生在被声明的维度上，⛔ 不能是「写了某个文件」的副作用。**
+若真要收紧"共享结构只许某类角色写"，那是一份**显式的角色/权限声明**（属另一层裁决，本版不动）。
+
+### 拒绝文案同步改（⛔ 不再说一句不指路的话）
+
+旧：`register/deregister is not allowed in trajectory-constraint sessions`
+新：`register/deregister is not allowed: this trajectory declares an \`msms\` whitelist (narrowed capability)`
+⇒ 收到的人一眼知道**是哪一维**挡住的、**改什么才能放行**。
+
+### 验收
+
+- **+5 用例**（成对，`trajectory-session.test.ts`）：只写 `resident` ⇒ 放行（butler 那条 4 行文件的形态）／
+  写了 `tools` 但没写 `msms` ⇒ 放行（**逐维成立，不互相牵连**）／ 写了 `writes` 但没写 `msms` ⇒ 放行 ／
+  显式 `msms: []` ⇒ 拒 ／ 非空 `msms` ⇒ 拒 ／ 文案必须指名 `msms`。
+- **+1 用例**（`trajectory-session-branches.test.ts`）：同一会话的 `exec` 与 `register` **给出同一个答案**
+  （钉"两个动作不该用两套判据"）。
+- **变异精确红**：把 `if (profile.msms === undefined) return {}` 改成 `&& false` ⇒
+  **精确红 3 条**，正是"缺省应放行"那三条；还原后全绿。
+- 门禁：typecheck ✓ ／ **typecheck-host 0.2.2-rc.1** ✓ ／ test **243 files / 3747 tests** ✓ ／
+  coverage **91.96%** ✓ ／ build ✓ ／ pack-check **195 文件** ✓
+- 文档面同步（`trajectory-constraint` 章）：schema 注释 `msms` 那行 ＋ 新增一段
+  「register/deregister 按 `msms` 判，不按文件在不在判」，含反对面与判据。
+
+---
+
 ## v1.137.10 — 2026-11-19（`browser_slot` 兼容 Windows；顺带修掉两处**平台专属参数被全局带上**）
 
 > 来源 = **owner 令（逐字）**：「做，，同意你的看法，在win上能用就行，linux和mac才是主要的」。

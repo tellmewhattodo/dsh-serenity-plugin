@@ -754,15 +754,48 @@ interface TrajectoryConstraintMsmGate {
 
 /**
  * `msm` 工具的 轨迹约束门控：非 轨迹约束恒放行；轨迹约束会话——
- * exec 非白名单 MSM 拒绝（**不列名单**）、register/deregister 必拒、
+ * exec 非白名单 MSM 拒绝（**不列名单**）、register/deregister 按声明面判、
  * list 白名单过滤、check/guide/ccc-config 只读放行。
+ *
+ * 🔴🔴 **2026-11-19（v1.137.11）：register/deregister 的判据从「文件存在」改成「显式声明了 `msms`」**。
+ *
+ * 来源 = **butler 报障（三次 `register` ＋ 两次 `deregister` 实测）**：
+ * 它那条轨迹的 `trajectory.json` **只有 4 行**（只写 `resident.serves`），
+ * 却照样拿到 `register/deregister is not allowed in trajectory-constraint sessions`。
+ * 而文档两处逐字承诺「**不写 = 不收窄**」，并明确推荐「只想声明常驻 ⇒ 只写 `resident`」。
+ *
+ * ⇒ **这不是"多一层保护"，而是「只想声明常驻」这个官方推荐动作静默附带了文档没写的代价。**
+ *
+ * 判据（为什么该改成三维对齐，而不是只改文档）：
+ * 本轨迹自己的纪律是 **D181「不写当然不收窄」× 逐维成立** —— `tools` ／ `msms` ／ `writes`
+ * 三维各自按「字段在不在」判。**注册权是第四维，却按「文件存在」判** ⇒ 它绕过了那条规则。
+ * 一个"只想声明常驻"的轨迹，**它的能力面与没有该文件时完全一样** ⇒ 拒它注册没有任何依据。
+ *
+ * | `msms` | register/deregister | 理由 |
+ * |---|---|---|
+ * | **缺省**（没写） | **放行** | 不收窄 ⇒ 注册权也不该被收窄 |
+ * | `[]`（显式空） | **拒绝** | 显式表达"我不要任何 MSM" ⇒ 注册权随之关掉（语义一致） |
+ * | 非空 | **拒绝** | 能力面已被收窄 ⇒ 不再给它改共享注册表（**保留原有语义**） |
+ *
+ * ⚠️ **反对面（butler 提出，我认，但不足以翻转结论）**：注册表是容器级共享结构，
+ *    任何轨迹写坏会影响全体 —— 那是"恒拒"的合理动机。
+ *    ⇒ 但恒拒拦不住真正危险的写入（那条轨迹只要还有 `write` 就能直接改注册表文件），
+ *      它只是**拦住了一个正常的、文档推荐的动作**，且**没有任何读数说出这件事**。
+ *    ⇒ 若要真收紧"共享结构只许一类角色写"，那是一份**显式的角色/权限声明**，
+ *      不是"谁写了文件就一律不许写注册表"这种**副作用式**的收窄。
+ *
+ * 🔴 **一处刻意不做的**：`msm` 工具**只有一个会话类**（那三个分支全落在它里面），
+ *    所以"按会话类别放行"没有实现空间 —— 判据只能是声明面。这不影响结论：
+ *    本改动**不是**"放开给所有轨迹"，而是**把判据放回它本来该在的那一维**。
  */
 export function trajectoryConstraintMsmGate(root: string, sessionId: string | undefined, action: string, name?: string): TrajectoryConstraintMsmGate {
   if (sessionId === undefined) return {}
   const profile = trajectoryConstraintFor(root, sessionId)
   if (profile === null) return {}
   if (action === 'register' || action === 'deregister') {
-    return { reject: 'register/deregister is not allowed in trajectory-constraint sessions' }
+    // 🔴 缺省 `msms` = 不收窄 ⇒ 放行（与 exec 分支同一条判据，见上方表格）
+    if (profile.msms === undefined) return {}
+    return { reject: 'register/deregister is not allowed: this trajectory declares an `msms` whitelist (narrowed capability)' }
   }
   if (action === 'exec') {
     // ⚠️ D181：`msms` 缺省 = 不收窄（该轨迹没限制 MSM）⇒ 放行；显式 `[]` 才全拒

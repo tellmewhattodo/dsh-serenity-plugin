@@ -372,6 +372,16 @@ describe('trajectory-session: 门控函数的边角（轨迹没有 trajectory-co
     // 未声明的 MSM 仍拒绝（白名单是**逐条**判，不是"配过就全放"）
     expect(trajectoryConstraintMsmGate(dir, 'sess-with-msm', 'exec', 'other-msm').reject).toContain('MSM not allowed')
   })
+
+  it('🔴 D4（v1.137.11）：**register/deregister 与 exec 同一条判据** —— 缺 msms 就放行，与 exec 对齐', () => {
+    // 这条钉的是"两个动作不该用两套判据"：
+    // 旧实现里 exec 按 `msms` 判、register 按"文件存在"判 ⇒ 同一个会话、同一维声明，
+    // 两个动作给出**相反**的答案（exec 放行 / register 恒拒）。
+    // ⚠️ 夹具 sess-no-msm 在 D2 里已造（缺 msms 键）⇒ 复用同一个会话验另一动作。
+    expect(trajectoryConstraintMsmGate(dir, 'sess-no-msm', 'exec', 'anything')).toEqual({})
+    expect(trajectoryConstraintMsmGate(dir, 'sess-no-msm', 'register', 'anything')).toEqual({})
+    expect(trajectoryConstraintMsmGate(dir, 'sess-no-msm', 'deregister', 'anything')).toEqual({})
+  })
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -51,7 +51,7 @@ becomes a 轨迹约束; delete it and it goes back to being an ordinary trajecto
   {
     "model": "provider/model",          // optional; **不写 = 用会话当前模型**（不会回退到任何别处；每轮生效）
     "tools": ["read","grep","msm",...], // optional; **不写 = 不收窄**。显式 [] = 全隐藏（除 skill）
-    "msms":  ["msm-a","msm-b"],         // optional; **不写 = 不收窄**。register/deregister 恒拒
+    "msms":  ["msm-a","msm-b"],         // optional; **不写 = 不收窄**。显式 [] 或非空 = register/deregister 拒
     "writes": ["AGENT_SESSIONS/<我的目录>/"], // optional; **不写 = 不收窄**。显式 [] = 一个写都落不下
     "cognitiveTrajectory": { "session": true, "keeper": true, "rebuild": true },  // 缺省 TRUE（见下）
     "resident": { "serves": "..." },    // optional; 对外用途自述（见 trajectory-self 章）
@@ -76,6 +76,15 @@ becomes a 轨迹约束; delete it and it goes back to being an ordinary trajecto
 
   ⚠️ **只想声明常驻、不想限制自己**：只写 \`"resident"\` 字段，**tools/msms 一个都不要写**。
      ⇒ 不收窄任何工具面（见下方"两个默认"）。⛔ **不要**为了"空着"而写 \`"tools": []\` —— 那是全隐藏。
+
+  🔴🔴 **register/deregister 按 \`msms\` 判，不按"文件在不在"判**（2026-11-19 修正，此前是实现与文档不符）：
+     · **没写 \`msms\`** ⇒ 不收窄 ⇒ **\`container_admin msm register/deregister\` 放行**
+       （此前它对**任何**带该文件的轨迹恒拒 —— 于是"只写 resident"这个本文件推荐的写法，
+        静默附带了『注册权没了』这个代价，而文档一个字没提。butler 三次实测报出来的。）
+     · **写了 \`msms\`（含显式 \`[]\`）** ⇒ 那条轨迹的 MSM 能力面已被声明收窄 ⇒ **拒**（原语义保留）。
+     ⚠️ **反对面**：注册表是容器级共享结构，写坏会影响全体。但"恒拒"拦不住真正危险的写入
+        （那条轨迹只要还有 \`write\` 就能直接改注册表文件），它只拦住了一个**正常且被文档推荐**的动作，
+        且**没有任何读数**说出这件事。⇒ 判据：**收窄必须发生在被声明的维度上，⛔ 不能是"写了文件"的副作用。**
 
 ── Two whitelists: UNSET means unrestricted, EMPTY means nothing ──
   - **字段缺省（没写）** = **不收窄**（这条轨迹只放别的设定，比如只写 resident）

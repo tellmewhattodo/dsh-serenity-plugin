@@ -895,11 +895,61 @@ describe('trajectory-session: trajectoryConstraintMsmGate msm 白名单门控', 
     expect(g.reject).not.toContain('not-allowed')
   })
 
-  it('register/deregister 必拒', () => {
+  it('register/deregister：**声明了 msms 就拒**（原语义）', () => {
     // 🔴 2026-10-19 v1.75.0：文案从「…in 轨迹约束 sessions」改为英文
     // （原文是改名机把标识符改成中文后留下的中英混排，见 tests/identifier-ascii.test.ts）
-    expect(trajectoryConstraintMsmGate(root, qaId, 'register', 'x').reject).toContain('not allowed in trajectory-constraint')
-    expect(trajectoryConstraintMsmGate(root, qaId, 'deregister', 'x').reject).toContain('not allowed in trajectory-constraint')
+    // 🔴 2026-11-19 v1.137.11：**判据从"文件存在"改成"显式声明了 msms"** ⇒ 文案随之改。
+    expect(trajectoryConstraintMsmGate(root, qaId, 'register', 'x').reject).toContain('msms')
+    expect(trajectoryConstraintMsmGate(root, qaId, 'deregister', 'x').reject).toContain('msms')
+  })
+
+  /**
+   * 🔴🔴 **本组是 v1.137.11 的核心判据**（butler 报障逼出，2026-11-19）。
+   *
+   * 现场：一条轨迹的声明文件**只有 4 行**（只写 `resident.serves`），
+   * 却拿不到 MSM 注册权 —— 因为旧实现把拒绝**挂在"文件存在"上**，而不是"声明了 msms"。
+   * 而文档两处逐字承诺「不写 = 不收窄」，并推荐「只想声明常驻 ⇒ 只写 resident」。
+   *
+   * ⇒ 判据：**收窄必须发生在被声明的维度上**，⛔ 不能是"写了文件"的副作用。
+   * ⚠️ 成对测：只测"缺省放行"无法排除"整个分支被删掉"（那样显式 `msms` 也会放行）。
+   */
+  describe('🔴 v1.137.11：register/deregister 按 msms 声明面判（⛔ 不按"文件存在"）', () => {
+    it('缺省 msms（只写 resident）⇒ register **放行** —— 这是 butler 那条 4 行文件的形态', () => {
+      // 真造一份"只写 resident"的声明（⛔ 不复用 轨迹约束Json({})，那连字段都不带）
+      const dirName = make轨迹约束Session(root, 'sess-resident-only', 'resident-only', {
+        resident: { serves: '只声明常驻' },
+      })
+      expect(dirName).toBeTruthy()
+      expect(trajectoryConstraintMsmGate(root, 'sess-resident-only', 'register', 'vultr-tool')).toEqual({})
+      expect(trajectoryConstraintMsmGate(root, 'sess-resident-only', 'deregister', 'gone-tool')).toEqual({})
+    })
+
+    it('缺省 msms 但写了 tools（另一维收窄）⇒ register **仍放行**（逐维成立，⛔ 不互相牵连）', () => {
+      make轨迹约束Session(root, 'sess-tools-only', 'tools-only', 轨迹约束Json({ tools: ['read'] }))
+      expect(trajectoryConstraintMsmGate(root, 'sess-tools-only', 'register', 'x')).toEqual({})
+    })
+
+    it('缺省 msms 但写了 writes ⇒ register **仍放行**（同上，第三维不该牵连第四维）', () => {
+      make轨迹约束Session(root, 'sess-writes-only', 'writes-only', 轨迹约束Json({ writes: ['_tmp/'] }))
+      expect(trajectoryConstraintMsmGate(root, 'sess-writes-only', 'register', 'x')).toEqual({})
+    })
+
+    it('显式 msms: [] ⇒ **拒**（显式表达"我不要任何 MSM" ⇒ 注册权随之关掉）', () => {
+      make轨迹约束Session(root, 'sess-empty-msms', 'empty-msms', 轨迹约束Json({ msms: [] }))
+      expect(trajectoryConstraintMsmGate(root, 'sess-empty-msms', 'register', 'x').reject).toBeDefined()
+      expect(trajectoryConstraintMsmGate(root, 'sess-empty-msms', 'deregister', 'x').reject).toBeDefined()
+    })
+
+    it('非空 msms ⇒ **拒**（能力面已收窄，原语义保留）', () => {
+      make轨迹约束Session(root, 'sess-some-msms', 'some-msms', 轨迹约束Json({ msms: ['a'] }))
+      expect(trajectoryConstraintMsmGate(root, 'sess-some-msms', 'register', 'x').reject).toBeDefined()
+    })
+
+    it('拒绝文案必须指出**是哪一维**挡住的（⛔ 不说"not allowed in trajectory-constraint sessions"这种不指路的旧话）', () => {
+      const msg = trajectoryConstraintMsmGate(root, qaId, 'register', 'x').reject ?? ''
+      expect(msg).toContain('msms')
+      expect(msg).not.toContain('trajectory-constraint sessions')
+    })
   })
 
   it('list → 白名单过滤（来自 trajectory-constraint.json 的 msms）', () => {
