@@ -1694,6 +1694,54 @@ function cmdVersion(): void {
   const drift = new Set([v.pkg, v.plugin, v.changelog])
   if (drift.size > 1) console.log('⚠️ 版本漂移！三处不一致（ACC_VERSION 从 package.json 派生）')
   else console.log('✓ 版本一致')
+  // 🔴 第四个面：**正文最新版 ⊆ 跨版本索引行**（2026-11-21 补的机械钉）
+  //
+  // 为什么必须钉（R↓，「发版同批加索引行」已失效**三次**：v1.119.0 轮停在正文后五版、
+  // v1.128.2 轮停在后九版、v1.137.12 轮又停在 v1.128.2）：
+  // 那条纪律此前**只有措辞、没有读数** —— 失效时不报错、不告警、没有任何信号，
+  // 只能靠"下次有人翻开 CHANGELOG 并恰好注意到"。这正是本仓最贵的一类形态。
+  // ⇒ 判据：**把"索引是否覆盖正文最新版"变成 version 的一个读数**，不满足就**响亮报错**。
+  //
+  // ⚠️ 刻意**只钉最新版这一条**，不做"逐版全覆盖"校验：
+  //   全量校验会把历史上那些"标题被并进相邻版、压根没单独成条"的版本判成欠账，
+  //   而那些行**指不回正文**（补索引必须能指回正文，否则只是把猜测写进索引）。
+  //   ⇒ 钉「最新版」是唯一**既机械、又不会逼人编造**的那一格。
+  const idx = changelogIndexCoversLatest()
+  if (idx.kind === 'no-index-section') {
+    console.log('⚠️ CHANGELOG 里找不到「跨版本索引」段 —— 无法核对索引行（不当成失败）')
+  } else if (idx.kind === 'missing') {
+    fail(`CHANGELOG 跨版本索引缺少最新版 v${idx.version} 的行。\n`
+      + '  🔴 这条纪律已失效三次，所以现在有机械钉了：**发版同批加索引行**。\n'
+      + `  处置：在「跨版本索引」表里补一行 \`| v${idx.version} | <日期> | <一句话> |\`，`
+      + '该行必须能逐字指回正文里同版本的条目。', 2)
+  } else {
+    console.log(`✓ 索引行覆盖正文最新版（v${idx.version}）`)
+  }
+}
+
+/**
+ * 读 `CHANGELOG.md` 的「跨版本索引」段，判**正文最新版**在里面有没有行。
+ *
+ * 三态（⛔ 不压成布尔 —— "没有索引段"与"索引段在但缺这一版"处置完全不同）：
+ *   · `no-index-section` —— 找不到索引段 ⇒ 无法核对（警告，⛔ 不判失败）
+ *   · `missing`          —— 段在、但缺最新版那一行 ⇒ **真欠账**
+ *   · `ok`               —— 有
+ *
+ * ⚠️ 只认**表格行开头**的 `| v<x.y.z>`：正文条目标题是 `## v1.2.3 —`，与索引行形状不同，
+ *   不会互相误命中（实测正文 2900 行里两者共存且可区分）。
+ */
+function changelogIndexCoversLatest(): { kind: 'ok' | 'missing' | 'no-index-section'; version: string } {
+  const path = join(REPO_ROOT, 'CHANGELOG.md')
+  const latest = currentVersion().changelog ?? ''
+  if (!existsSync(path)) return { kind: 'no-index-section', version: latest }
+  const text = readFileSync(path, 'utf-8')
+  const at = text.indexOf('## 二、跨版本索引')
+  if (at < 0) return { kind: 'no-index-section', version: latest }
+  const section = text.slice(at)
+  if (latest === '') return { kind: 'no-index-section', version: latest }
+  // 转义点号：`v1.137.15` 若直接进正则，`. ` 会匹配任意字符 ⇒ 假命中
+  const needle = new RegExp(`^\\|\\s*v${latest.replace(/\./g, '\\.')}\\s*\\|`, 'm')
+  return { kind: needle.test(section) ? 'ok' : 'missing', version: latest }
 }
 
 /**
@@ -3672,6 +3720,183 @@ function cmdLockfile(): void {
   verifyLockfile()
 }
 
+/**
+ * installedPluginDir — 装机副本的根目录（`<DSH_HOME>/profiles/<profile>/node_modules/@shgroup/dsh-serenity-hooks`）。
+ *
+ * 🔴 **为什么要有这个函数，而不是各处自己拼**（2026-11-21）：本轮之前，`npm-install` 的装机核对
+ * 自己拼了一遍路径、我手工验内容时又用 `curl file://` 取了一遍 ⇒ **两条路径各自演化**是这一类
+ * 缺陷的老家（D5 第二真相源）。本命令只读它、不改它。
+ *
+ * `DSH_HOME` 可覆盖（测试夹具靠它把"装机目录"指到临时树下 —— ⛔ 不许让测试去摸真的 `~/.dsh`）。
+ */
+function installedPluginDir(profile: string): string {
+  const dshHome = process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== ''
+    ? process.env.DSH_HOME
+    : join(HOME_DIR, '.dsh')
+  return join(dshHome, 'profiles', profile, 'node_modules', '@shgroup', 'dsh-serenity-hooks')
+}
+
+/** 递归收集 `dir` 下全部 `.js`（装机产物里新逻辑常被拆进**带哈希的 chunk**，⛔ 只扫入口会漏）。 */
+function collectJsFiles(dir: string, out: string[] = []): string[] {
+  // 🔴 **不要把 `readdirSync(...)` 的结果存进一个显式标注的变量**：`ReturnType<typeof readdirSync>`
+  //    在 node 类型里是**重载**，取到的是 `Dirent<NonSharedBuffer>`，而 `{withFileTypes:true}` 实际给
+  //    `Dirent<string>` ⇒ 存成变量就断言不上（本行曾被 `typecheck-scripts` 精确抓到 3 条 error）。
+  //    直接在 `for…of` 里调用，让 TS 就地推断重载 ⇒ 类型自动正确。
+  try {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name)
+      if (e.isDirectory()) collectJsFiles(p, out)
+      else if (e.isFile() && e.name.endsWith('.js')) out.push(p)
+    }
+  } catch {
+    return out
+  }
+  return out
+}
+
+/**
+ * cmdVerifyInstalled — **装完之后只验装机产物**（2026-11-21，本轨迹手工做过五遍后机械化）。
+ *
+ * ## 它替代的是哪一段手工流程
+ *
+ * 交付闭合的第三读数历来是「内容真验」：`curl -s file://<装机>/lib/<chunk>.js -o <根内临时文件>`
+ * → `grep` → 删副本。手工做过五遍，每遍都要记住三件容易忘的事：
+ * ① 扫**装机副本**、⛔ 不扫本仓产物（本仓 `lib/` 是刚 build 的，永远"有"）；
+ * ② 扫**整个 `lib/`**、⛔ 不只 grep 入口 `index.js`（**这条我踩过五次** —— 新逻辑被 tsdown
+ *    拆进带哈希的 chunk，入口里只有一句 `import`);
+ * ③ 用完删临时副本（否则 `_tmp/` 里堆着几 MB 的包体副本，且它们会进 `git status`）。
+ * ⇒ 机械化后没有临时副本（直接读、不落盘），②由"递归收集"从实现上保证。
+ *
+ * ## 🔴 一条刻意的设计：**空判据不许跑绿**
+ *
+ * 不传任何 `--must` / `--must-not` 时，本命令**报错退出**，而不是"只做了存在性核对 ⇒ 绿"。
+ * 判据：一个"验内容"的命令在**没有任何内容判据**时给绿，等于给了一份**没有判据的验收**
+ * —— 这正是本轨迹反复付代价的"假绿"形态。要它绿，就必须点名你要看到什么。
+ *
+ * ## 诚实边界（每次运行都印）
+ *
+ * **静态扫描验的是"代码在不在装机产物里"，⛔ 不是"它在真机上跑不跑得对"。**
+ * v1.137.14 是实证：四条字面量全中（连注册调用点都在），而功能**没生效** —— 缺陷在
+ * **运行时输入**（模型传相对路径、代码当绝对路径读盘）⇒ 静态扫描看不见。
+ * ⇒ 本命令只替代"装上了没有"那一半，另一半（真调用一次）不可省。
+ *
+ * 用法: dsp-develop verify-installed [<profile>] [--expect <ver>]
+ *        [--must <字面量>]... [--must-not <字面量>]...
+ */
+function cmdVerifyInstalled(argv: string[]): void {
+  const must: string[] = []
+  const mustNot: string[] = []
+  let profile: string | undefined
+  let expect: string | undefined
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] as string
+    if (a === '--must') { const v = argv[++i]; if (v === undefined) fail('--must 需要一个字面量参数', 1); must.push(v); continue }
+    if (a === '--must-not') { const v = argv[++i]; if (v === undefined) fail('--must-not 需要一个字面量参数', 1); mustNot.push(v); continue }
+    if (a === '--expect') { const v = argv[++i]; if (v === undefined) fail('--expect 需要一个版本号', 1); expect = v; continue }
+    if (a.startsWith('--')) fail(`未知参数: ${a}`, 1)
+    profile = a
+  }
+  const prof = profile ?? 'web'
+
+  if (must.length === 0 && mustNot.length === 0) {
+    fail('verify-installed 需要至少一条判据（--must <字面量> 或 --must-not <字面量>）。\n'
+      + '  🔴 刻意如此：**没有内容判据的内容验收只能给出假绿**。\n'
+      + '  例：`dsp-develop verify-installed web --must fencedLineMask --must-not findIndex(\\"## Handover note\\")`', 1)
+  }
+
+  const dir = installedPluginDir(prof)
+  if (!existsSync(dir)) {
+    fail(`装机副本不存在: ${dir}\n`
+      + '  ⇒ 先 `dsp-develop npm-install <profile> <ver>`；⛔ 本命令不替你判断"是不是还没装"。', 2)
+  }
+  // ① 版本对账（读不到 ≠ 不匹配，两件事分开说）
+  const pkgPath = join(dir, 'package.json')
+  let installedVer = ''
+  if (existsSync(pkgPath)) {
+    try { installedVer = String(readJson(pkgPath).version ?? '') } catch { installedVer = '' }
+  }
+  const repoVer = currentVersion().pkg
+  if (installedVer === '') {
+    console.log(`[dsp-develop] ⚠️ 读不到装机副本版本（${pkgPath}）—— **无法核对**装的是哪一版`)
+  } else {
+    console.log(`[dsp-develop] 装机副本版本 = ${installedVer}｜本仓版本 = ${repoVer || '?'}`)
+    if (repoVer !== '' && installedVer !== repoVer) {
+      console.log(`[dsp-develop]   ⚠️ 两者不等 —— 可能只是"本仓 bump 了还没发/还没装"，也可能是装错了版本`)
+    }
+    if (expect !== undefined && installedVer !== expect) {
+      fail(`版本不符：期望装机 ${expect}，实测 ${installedVer}`, 2)
+    }
+  }
+  // ② 扫整个 lib/（只扫装机副本 —— 本仓 lib/ 是刚 build 的，永远"有"，拿它验等于自问自答）
+  const libDir = join(dir, 'lib')
+  const files = collectJsFiles(libDir)
+  if (files.length === 0) {
+    fail(`装机副本里没有可扫的 .js（${libDir}）—— 装机产物不完整（⛔ 不当成"没有命中"）`, 2)
+  }
+  const texts = new Map<string, string>()
+  let bytes = 0
+  for (const f of files) {
+    const t = readFileSync(f, 'utf-8')
+    texts.set(f, t)
+    bytes += Buffer.byteLength(t, 'utf-8')
+  }
+  const hashedChunks = files.filter((f) => /-[A-Za-z0-9_]{8}\.js$/.test(basename(f))).length
+  console.log(`[dsp-develop] 扫描域: ${files.length} 个 .js（其中带哈希 chunk ${hashedChunks} 个），`
+    + `共 ${(bytes / 1024 / 1024).toFixed(1)} MB —— 递归整个 lib/，⛔ 不是只扫 index.js`)
+
+  // ③ 逐条判据
+  //
+  // 🔴 **命中必须给出"落在哪一行、那一行长什么样"，⛔ 不能只给次数**（2026-11-21 首次真跑就撞上）：
+  //    我给 `--must-not lines.findIndex` 时它命中 1 次，而那一处**是 JSDoc 里在描述旧实现**
+  //    （tsdown 打包**保留注释**）⇒ 判据在**指责正确的文字**。
+  //    这正是本仓 A65 那条测试早已立过的形态（「必须先剥注释再断言」），只是那回发生在测试里，
+  //    这回发生在**装机产物**上。⇒ 本命令不改判据语义（仍是字面量扫描），但把**行号与上下文**
+  //    印出来，让"命中在注释里"这件事**一眼可判**，而不是逼人去翻 6.8 MB 的打包产物。
+  //    ⛔ 不自动剥注释：那会让「代码里真的复现了」也一起被剥掉（假绿），与 A65 那次假红正好相反。
+  const hit = (lit: string): Array<{ file: string; line: number; text: string }> => {
+    const out: Array<{ file: string; line: number; text: string }> = []
+    for (const [f, t] of texts) {
+      const lines = t.split('\n')
+      for (let i = 0; i < lines.length; i++) {
+        if ((lines[i] as string).includes(lit)) {
+          out.push({ file: basename(f), line: i + 1, text: (lines[i] as string).trim().slice(0, 160) })
+        }
+      }
+    }
+    return out
+  }
+  const where = (hits: Array<{ file: string; line: number; text: string }>): string =>
+    hits.slice(0, 3).map((h) => `\n      ${h.file}:${h.line}  ${h.text}`).join('')
+    + (hits.length > 3 ? `\n      …另有 ${hits.length - 3} 处` : '')
+  const problems: string[] = []
+  for (const lit of must) {
+    const hits = hit(lit)
+    if (hits.length === 0) {
+      problems.push(`--must 未命中：${lit}`)
+    } else {
+      console.log(`[dsp-develop] ✓ must「${lit}」命中 ${hits.length} 处${where(hits)}`)
+    }
+  }
+  for (const lit of mustNot) {
+    const hits = hit(lit)
+    if (hits.length > 0) {
+      problems.push(`--must-not 命中（应为零）：${lit}`
+        + `\n      ⚠️ 先看命中落在哪：若在注释里（打包**保留 JSDoc**），那是"描述旧实现"而非"旧实现复活"`)
+      console.log(`[dsp-develop] ✗ must-not「${lit}」命中 ${hits.length} 处${where(hits)}`)
+    } else {
+      console.log(`[dsp-develop] ✓ must-not「${lit}」零命中`)
+    }
+  }
+  // ④ 诚实边界：每次都说，⛔ 不只在失败时说（成功路径最容易被读成"验过了"）
+  console.log('[dsp-develop] ⚠️ 本命令只验「新代码在装机产物里」，⛔ 不验「它在真机上跑得对」')
+  console.log('            （v1.137.14 实证：四条字面量全中而功能没生效 —— 缺陷在运行时输入，静态扫描看不见）')
+  console.log('            ⇒ 交付仍需一次带真实调用形态的真调用。')
+  if (problems.length > 0) {
+    fail(`内容真验未通过（${problems.length} 条）：\n` + problems.map((p) => '  · ' + p).join('\n'), 2)
+  }
+  console.log(`[dsp-develop] ✓ 内容真验通过（${must.length} 条 must ＋ ${mustNot.length} 条 must-not 全部成立）`)
+}
+
 // ── main 守卫 ──
 
 if (import.meta.url === `file://${process.argv[1]}`) {
@@ -3733,6 +3958,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         break
       }
       case 'pack-check': verifyTarball(); break
+      case 'verify-installed': cmdVerifyInstalled(rest); break
       // 🔴 内部子命令：**只由 `spawnRunner` 调用**，⛔ 不要人手跑（它会阻塞到 job 到点）。
       //    名字带 `__` 前缀 = 内部面，不列进 --help / --list。
       case '__job-run': {
@@ -3783,7 +4009,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       case 'dump-config': cmdDumpConfig(rest[0]); break
       case '--list':
       case 'list':
-        console.log('typecheck | typecheck-scripts | typecheck-cli（🔴 已退役） | typecheck-host <ver> | test [--filter] | coverage | build | status | commit <msg> | push | version | bump <ver> | deploy [--list-copy-set] | npm-install [<profile>] [<version>] [<registry>] | restart-web | job [<id>|--prune] | host-probe [--registry <url>] | host-upgrade <ver|tag> [--registry <url>] [--dry-run] | session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--limit <n>] | session-repair [--root <dir>] [--session <id,...>] [--apply] [--backup-dir <dir>] [--min-age-min <n>] [--force] [--probe] [--json] | diag（🔴 已退役） | squash-history [<msg>] | github-push [--force] | pack-check | readme-sync | publish | inspect-dsh <pattern> | host-fetch <ver> [pkg[@ver]] [--list]')
+        console.log('typecheck | typecheck-scripts | typecheck-cli（🔴 已退役） | typecheck-host <ver> | test [--filter] | coverage | build | status | commit <msg> | push | version | bump <ver> | deploy [--list-copy-set] | npm-install [<profile>] [<version>] [<registry>] | verify-installed [<profile>] [--must <lit>] [--must-not <lit>] | restart-web | job [<id>|--prune] | host-probe [--registry <url>] | host-upgrade <ver|tag> [--registry <url>] [--dry-run] | session-doctor [--root <dir>] [--session <id>] [--json] [--deep] [--limit <n>] | session-repair [--root <dir>] [--session <id,...>] [--apply] [--backup-dir <dir>] [--min-age-min <n>] [--force] [--probe] [--json] | diag（🔴 已退役） | squash-history [<msg>] | github-push [--force] | pack-check | readme-sync | publish | inspect-dsh <pattern> | host-fetch <ver> [pkg[@ver]] [--list]')
         break
       case '--schema': {
         const target = rest[0] ?? 'dsp-develop'
@@ -3827,6 +4053,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   diag                  🔴 **已退役**（对象 = autopilot 唤起条件链，随 v1.35.0 退场）⇒ 只印路牌，恒 exit 2
   squash-history [msg]  抹除历史为单个初始 commit（公开发布前清敏感历史；不可逆）
   pack-check            npm pack --dry-run 核对 tarball 完整性（chunk/双 bundle/类型）
+  verify-installed [profile] [--expect <ver>] [--must <字面量>]... [--must-not <字面量>]...
+                        内容真验（只读）：递归扫**装机副本**整个 lib/（含带哈希 chunk），
+                        ⛔ 不扫本仓产物、⛔ 不只 grep 入口；零判据时**拒绝跑绿**（防假绿）。
+                        ⚠️ 只验"代码在不在装机产物里"，⛔ 不验"真机跑得对不对"（须另做真调用）
   readme-sync           包内 README ← 仓库 README（机械同步，相对链接转绝对 URL）
   dump-config [pattern] dsh --dump-config（合成后的 profile 条目树；pattern 过滤）
   publish               npm publish @shgroup/dsh-serenity-hooks（凭据走 ~/.npmrc）
