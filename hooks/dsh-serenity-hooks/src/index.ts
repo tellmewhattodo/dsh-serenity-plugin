@@ -27,6 +27,7 @@ import { createContainerAdminTool } from './tools/container-admin.js'
 import { registerGuards } from './seams/guards.js'
 import { registerBootstrap } from './seams/bootstrap.js'
 import { registerKeeper } from './seams/cognitive-trajectory-lifecycle.js'
+import { registerSessionMdFullRead } from './seams/session-md-full-read.js'
 import { registerContext } from './seams/context.js'
 import { registerEntrySkillSectionGlobal } from './seams/system-prompt.js'
 import { registerCompactRetention } from './seams/compact.js'
@@ -492,6 +493,11 @@ export function apply(ctx: Context, config: Config): void {
   registerReconstructTurnHook(ctx)
   // v1.26.3 输出守卫：最终输出敏感词检测 + steer 打回重生成（凭据/机制/MSM 名不泄露给用户）
   registerOutputGuardHook(ctx)
+  // 🆕 v1.137.13（owner 2026-11-20 令）：**读 SESSION.md 一次给全文**。
+  //    「由于 SESSION.md 的本质，无论多大都需要一次全读，故节约的是调用次数」
+  //    ⇒ 机械层无视 `limit`/`offset`，恒给全文；**模型的调用习惯不必改**。
+  //    🔴 只改模型读的那一面（content），⛔ 不动结构化 value（那会用打断用量统计）。
+  registerSessionMdFullRead(ctx)
   // v1.21 F3：use 激活宁静号会话时同步重命名当前 dsh 会话（在 createCognitiveTrajectoryTool 内实现，
   // naming.enabled 简单配置门控；sessionTitle 可选服务守卫）
   if (config.env) {
