@@ -151,9 +151,22 @@ export function extractAllHandoverNotes(text: string): string[] {
     }
     const head = i
     // 节止于下一个 `## ` 或更高级标题（`# `/`### ` 之下仍属本节 ⇒ 只有 `## ` 与 `# ` 才算边界）
+    //
+    // 🔴🔴 **2026-11-21 v1.137.15 真缺陷（butler 报障，逐行可复算）：判定必须跳过代码围栏内的行。**
+    //   现场：它那份冻结件 `## Handover note` 在 L6，而下一个"行首 `# `"出现在 **L1494** ——
+    //   那一行是 ``` 围栏**内部**的注释（`# 本轨迹的 CRO 只在 CCC 宿主机上跑…`）。
+    //   旧实现只看行首字符 ⇒ 把围栏内注释当节边界 ⇒ 节被算成 L6–L1493（1,488 行），
+    //   而 L1494 之后的 `续八`～`续十七`（22:37–01:27 一整段）**整块被静默丢弃**。
+    //   ⚠️ 这不是"容量截断"，是**解析错误** —— 前者不会切在围栏上，后者必然切在围栏上。
+    //
+    // 🔴 **触发面不是"写长便签"，是"便签之后出现代码块里的 `#` 注释"** ——
+    //    而写 shell/TS 示例这件事几乎每条轨迹都在做（butler 扫出容器里至少 4 份潜在地雷，
+    //    只有它那份真的发作了，因为只有它那条围栏出现在 `## Handover note` **之后**）。
+    const inFence = fencedLineMask(lines, head)
     let end = lines.length
     for (let j = head + 1; j < lines.length; j++) {
       const t = lines[j]!.trim()
+      if (inFence[j] === true) continue // 🔴 围栏内的行一律不算边界（本次真因就在这里）
       if (t.startsWith('## ') || t.startsWith('# ')) {
         end = j
         break
@@ -161,10 +174,89 @@ export function extractAllHandoverNotes(text: string): string[] {
     }
     const section = lines.slice(head, end)
     while (section.length > 0 && section[section.length - 1]!.trim() === '') section.pop()
-    out.push(section.join('\n'))
+    out.push(capNoteSection(section).join('\n'))
     i = end
   }
   return out
+}
+
+/**
+ * 代码围栏标记识别：``` 或 ```` （含前后空白、含 info string 如 ```ts）。
+ *
+ * @returns 围栏"种类"（反引号个数），非围栏行 ⇒ `null`。
+ * ⚠️ 用**长度**当种类：``` 与 ```` 是两种不同围栏，混用时不互相闭合（CommonMark 语义）。
+ */
+function fenceMarkerOf(trimmedLine: string): string | null {
+  const m = /^(`{3,})/.exec(trimmedLine)
+  return m ? m[1]! : null
+}
+
+/**
+ * 标出「哪些行在代码围栏内」（`mask[行号] === true` 表示该行属于围栏内容）。
+ *
+ * ## 🔴 未闭合围栏的处置（这条是判据，⛔ 不是实现细节）
+ *
+ * 围栏开着却一直没闭合（写到一半被中断、或围栏标记只是长得像），**怎么办**：
+ *
+ * | 选法 | 后果 |
+ * |---|---|
+ * | 认为"后面全在围栏内" | **整个文件剩余部分都会被吞进便签节** ⇒ 新代 = 旧代，轮转被架空 |
+ * | ✅ **只有真正闭合的围栏才算围栏** | 未闭合处标题照常当边界 ⇒ **宁可少搬，不可错搬大段** |
+ *
+ * ⇒ 取后者。判据与本仓反复出现的那条同向：**残缺的长文档比短的完整文档危险得多**；
+ *   而这里更严重 —— 吞掉的是别人的正文，且没有任何读数会说出来。
+ *
+ * ⚠️ 实现要点：**两遍**。第一遍只认**已闭合**的围栏（配对成功才标记）；
+ *   到文件尾仍未闭合的开围栏，**整段不标记** ⇒ 其中的标题照常当边界。
+ */
+function fencedLineMask(lines: readonly string[], scanFrom: number): boolean[] {
+  const mask: boolean[] = new Array(lines.length).fill(false)
+  let fence: string | null = null
+  let fenceStart = -1
+  for (let j = scanFrom + 1; j < lines.length; j++) {
+    const mark = fenceMarkerOf(lines[j]!.trim())
+    if (mark === null) continue
+    if (fence === null) {
+      fence = mark
+      fenceStart = j
+    } else if (mark === fence) {
+      // ✅ 配对成功 ⇒ 这一整段算围栏内容
+      for (let k = fenceStart; k <= j; k++) mask[k] = true
+      fence = null
+      fenceStart = -1
+    }
+  }
+  // 🔴 未闭合的开围栏：**什么都不标记**（那些行按"围栏外"处理 ⇒ 标题照常当边界）
+  return mask
+}
+
+/**
+ * 便签节的**体量上限**（行数，`AC` 兜底，⛔ 不指望每条轨迹都把便签写短）。
+ *
+ * 🔴 **为什么需要**：真机上出现过 `1,488` 行的便签节 ⇒ 新代 = 5 行出生头 ＋ 1,488 行 = **1,494 行**，
+ *   而冻结件是 `1,805` 行 ⇒ **轮转等于没轮转**（"新代"几乎和旧代一样大）。
+ *   上限是**兜底**，不是常态：正常便签只有几十行。
+ */
+export const MAX_HANDOVER_NOTE_LINES = 300
+
+/**
+ * 超上限时截断，并**留下可见记号** —— ⛔ 绝不静默截断。
+ *
+ * 判据：**残缺的长文档比短的完整文档危险得多，它不报错**（v1.137.13 立的同一条）。
+ * ⇒ 记号必须写清：被截了多少行、全文在哪一代冻结件里。
+ */
+function capNoteSection(section: string[]): string[] {
+  if (section.length <= MAX_HANDOVER_NOTE_LINES) return section
+  const kept = section.slice(0, MAX_HANDOVER_NOTE_LINES)
+  const omitted = section.length - MAX_HANDOVER_NOTE_LINES
+  return [
+    ...kept,
+    '',
+    `> ⚠️ **交接节已截断（truncated）**：本代便签原有 ${section.length} 行，`
+    + `超过 ACC 上限 ${MAX_HANDOVER_NOTE_LINES} 行 ⇒ 只搬前 ${MAX_HANDOVER_NOTE_LINES} 行，`
+    + `省略 ${omitted} 行。**完整内容在上一代冻结件里**（\`LOG/LOG-*.md\`），`
+    + `要找回请读那里。⛔ 不要把超长内容写进便签 —— 它每轮都会被整节搬运。`,
+  ]
 }
 
 /** 读一个轨迹目录的日志状态（只读，不改任何东西）。 */
