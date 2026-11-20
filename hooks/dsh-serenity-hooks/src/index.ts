@@ -45,8 +45,7 @@ import { readDshVersion } from './surface/status.js'
 import { registerSettingsSection, readSimpleSettings, SERENITY_SETTINGS_NS } from './surface/settings.js'
 import { registerGateway } from './gateway/server.js'
 import { registerRebuildTurnHook } from './trajectory/rebuild.js'
-import { registerReconstructTurnHook, makeReconstructWhen, supportsActivation } from './trajectory/reconstruct.js'
-import { createReconstructTool } from './tools/reconstruct.js'
+import { registerReconstructTurnHook } from './trajectory/reconstruct.js'
 import { registerOutputGuardHook } from './guard/seam.js'
 import { migrateLegacyLocalstore, globalConfigPath } from './kernel/config.js'
 import { registerWakeScheduler } from './wake/scheduler.js'
@@ -458,16 +457,31 @@ export function apply(ctx: Context, config: Config): void {
   // 🔴 面板拨开关**无需**额外热同步订阅：宿主 `fiber.update()` 的语义 = 校验新 config 后 **restart 本插件**
   //    （cordis `Fiber.update` 文档）⇒ apply 重跑、这一行自然重新判一次。
   if (config.tools) registerDiagramTool(ctx)
-  // 🆕 v1.121.0（owner 2026-11-06 令）：`reconstruct` —— 会话累计用量过大时**换代**。
-  // 🔴 **唯一一个用 `register(def, { when })` 的工具**：平时不进模型声明、也不进派发
-  //    （宿主契约逐字 "False excludes it from both declarations and dispatch"），达阈值才出现。
-  //    ⛔ 不要"顺手"改成 `restrict({deny})` —— restrict 只能 deny，做不到"达阈值再放出来"。
-  // ⚠️ 低档宿主（< 0.2.2-rc.1）没有 `register` 的第二参数 ⇒ 多传的实参被静默忽略
-  //    ⇒ 那个档位上它**常驻可见**（降级，不是缺陷；`supportsActivation()` 会把这个读数落进诊断）。
+  // 🔴🔴 **`reconstruct` 工具面已于 2026-11-20 整条删除**（owner 令「同意，工具面删掉即可」）。
   //
-  // 🔴 **门在 `config.tools` 上**（与上面所有 tool 注册同门）：`tools:false` 是全关，
-  //    漏了这一处会让"关掉工具面"仍然多出一个工具（且它带着 `when`，看起来像"只有它有特权"）。
-  if (config.tools) registerReconstructTool(ctx)
+  // ## 为什么删（判据链，⛔ 不是"少一个工具更干净"）
+  //   ① **它没有提供 `rebuild` 入口提供不了的东西**：`cognitive_trajectory` 的 `case 'rebuild'`
+  //      在累计量 ≥ 阈值时**已经机械改道**成换代，而本工具的 `execute` 也只是调同一个
+  //      `queueReconstruct` —— 两条路终点是同一行代码、连阈值都是同一个常量
+  //      ⇒ **可见条件与改道条件恰好同域**，工具面是纯冗余。
+  //   ② **它与本轨迹自己的裁定冲突**：交接提醒那条（owner 2026-11-17 裁 1.A）**只指名 `rebuild`**，
+  //      理由逐字是「**模型不需要第二个动作名**」。留着一个我们不指望模型用的动作名，
+  //      正是 D151「退役功能的残留引用是零信号熵」。
+  //   ③ 它还只在超预算时冒出来、没有任何提示解释它是干什么的 ⇒ 模型看到它只会多一次犹豫。
+  //
+  // ## 删掉的是什么、留下的是什么（⚠️ 别把"删工具"读成"删能力"）
+  //   · **删**：`src/tools/reconstruct.ts` 整个文件 ＋ 本处的注册 ＋
+  //     `trajectory/reconstruct.ts` 的 `makeReconstructWhen` / `supportsActivation`（只被它使用）
+  //     ＋ 那个「注册带准入条件」的机制（本插件**唯一**使用者，至此零使用者）。
+  //   · **留**：`queueReconstruct` / `performReconstruct` / turn-stopping 执行点 —— **换代能力一字未动**，
+  //     它现在**只有一个入口**：模型调 `rebuild`，超阈值自动改道。
+  //
+  // ## 🔴 一处必须补的（⛔ 否则是净损失）：观测面
+  //   `makeReconstructWhen` 原是**唯一**写诊断快照的地方（那 `when` 每步都跑 ⇒ 读数密集）。
+  //   删掉它 ⇒ 只剩"超阈值才落"的那一次。⇒ 已把**观测搬到改道那一支**
+  //   （`tools/cognitive-trajectory.ts` 的 `case 'rebuild'`），并在那里补齐 `activation` 之外的字段。
+  //   ⚠️ 如实登记的代价：**取样密度下降**（从"每步节流 60s"变成"每次改道一次"）。
+  //      但那条读数的用途本来就是"证实机制读到了数"，而**改道那一刻正是唯一有用的时刻**。
   // v1.21 F1：双端口网关（第二监听器 + 登录 + 反代；v1.22 起 plugin 全局——
   // enabled 读 DSH settings 开关，host/port/accounts 读全局文件，不依赖具体 CCC；
   // 旧 CCC localstore 配置在首个 agent/session-start 时一次性迁移）
@@ -602,50 +616,6 @@ export function apply(ctx: Context, config: Config): void {
  * 🔴 **关的时候要注销**（不是"留着但不响应"）：与"关时不注册"同一口径 —— 工具不出现在模型清单里。
  * @param ctx - 插件上下文
  */
-/**
- * 注册 `reconstruct` 工具（v1.121.0，owner 2026-11-06 令）。
- *
- * ## 与其它条件工具的区别（这一格是本仓唯一）
- *
- * `im-bridge` / `diagram` 的条件都靠 `seams/guards.ts` 的 `restrict({ deny })` 施加。
- * 而宿主 `restrict` **只能 deny，不能 allow** ⇒ 那套机制只能"平时藏起来"，
- * 做不到"达阈值再放出来"。`reconstruct` 要的正是后者 ⇒ 走 `register(def, { when })`：
- * 宿主每步 `resolve()` 时问一次，`false` 时**既不进模型声明，也不进派发**。
- *
- * ⚠️ **档位降级（如实登记）**：第二参数只在宿主 `≥0.2.2-rc.1` 存在。
- * 低档下多传的实参被 JS 静默忽略 ⇒ 那个档位上 `reconstruct` **常驻可见**。
- * 这是"宿主没这个能力"的降级，不是缺陷；`supportsActivation()` 把它落进
- * `AGENT_SESSIONS/.reconstruct-diag.json`，让读数面能区分"没出现"与"出现了但藏不住"。
- *
- * @param ctx - 插件上下文（`when` 要读 `sessionProjections`）
- */
-function registerReconstructTool(ctx: Context): void {
-  try {
-    const when = makeReconstructWhen(ctx)
-    const tools = ctx.tools as unknown as {
-      register: (def: unknown, options?: { when?: (c: { agent?: unknown }) => boolean }) => () => void
-    }
-    if (supportsActivation()) {
-      // ⚠️ `when` 的参数类型按宿主契约收窄（`ToolActivationContext.agent: Agent`），
-      //    而上面那个 `register` 断言用的是 `unknown` —— 两者不兼容是**断言写法**造成的，
-      //    不是真类型冲突。⇒ 这里在断言面上再放宽一次（⛔ 不改 `makeReconstructWhen` 的签名：
-      //    它自己要与宿主契约逐字对齐，不该为了迁就一处断言而退化成 unknown）。
-      tools.register(createReconstructTool(ctx), {
-        when: when as unknown as (c: { agent?: unknown }) => boolean,
-      })
-    } else {
-      // 低档宿主：不传第二参数（传了也被忽略，但显式分开写能让源码读者看出这条降级）
-      tools.register(createReconstructTool(ctx))
-      console.log(
-        '[serenity-hooks] reconstruct：当前宿主不支持工具准入条件 ⇒ 该工具常驻可见（降级，非缺陷）',
-      )
-    }
-  } catch (err) {
-    // 注册失败不得成为启动单点；但要响亮（"阈值到了工具没出现"看起来会像阈值坏了）
-    console.error(`[serenity-hooks] ✗ reconstruct 工具注册失败: ${String((err as Error)?.message ?? err)}`)
-  }
-}
-
 function registerDiagramTool(ctx: Context): void {
   /** 当前注册的 disposer（`null` = 未注册）。宿主 `ctx.tools.register` **返回注销器**。 */
   let dispose: (() => void) | null = null

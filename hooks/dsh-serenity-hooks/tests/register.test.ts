@@ -171,8 +171,10 @@ describe('dsh-serenity-hooks: 插件契约（native cordis 规范）', () => {
     expect(names).not.toContain('acc-diag')
     expect(names).toContain('ontology')
     expect(names).toContain('serenity-skill-creator')
-    // 🆕 v1.121.0：reconstruct 恒被 register（可见性由 `when` 判，**不靠不注册**）
-    expect(names).toContain('reconstruct')
+    // 🔴 v1.137.12（2026-11-20）：`reconstruct` **工具面已删除**（owner 令「工具面删掉即可」）。
+    //    判据已由 `REGISTERED_TOOLS` 派生（上面那条逐名对账已经覆盖"它不在里面"），
+    //    这里额外钉一条**反向**断言：防将来有人"顺手把工具加回来"却忘了改清单/文档。
+    expect(names).not.toContain('reconstruct')
   })
 
   it('🆕 D104：diagram 工具按开关注册 —— 关（缺省）时**不注册**，开时**恰好多这一个**', () => {

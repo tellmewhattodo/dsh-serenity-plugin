@@ -74,7 +74,7 @@ list — it cannot see it and cannot call it. The switch belongs to the human si
 
 ## 3 What you get
 
-### 3.1 Fourteen tools, three of them conditional
+### 3.1 Thirteen tools, two of them conditional
 
 > This inventory lives **here only** (the user's view: what you can do). Contract semantics — what
 > each action must do — are in §4 of the standard and are not duplicated here.
@@ -96,12 +96,18 @@ list — it cannot see it and cannot call it. The switch belongs to the human si
 | `browser_slot` | **browser slot manager** (up to 20 independent Chromes): `acquire` / `list` / `release` plus 19 page actions (`ax` / `click` / `fill` / `wait` / `upload` / `dialog` …). Slots carry ownership and state; if you forget to release one, **the watchman nudges the session holding it** |
 | `im-bridge` ● | send messages to contacts (WeChat / Feishu): text, files, contacts, channel status |
 | `diagram` ● | tag source → diagram, rasterized **in-process** and pasted into the conversation (no browser, no files) |
-| `reconstruct` ● | **carrier replacement**: swap a session whose cumulative usage is too large for a new one and archive the old (coexists with `rebuild`: one treats log size, the other context) |
 
 ● = **conditional**. When the condition is unmet the tool is **not registered at all** (the agent
 cannot even see it, and it costs no context): `im-bridge` needs an enabled IM channel; `diagram` is
-experimental and **off by default** (toggle in the settings panel's "Tools" group); `reconstruct`
-becomes visible only once this session's cumulative token count crosses a threshold.
+experimental and **off by default** (toggle in the settings panel's "Tools" group).
+
+> 🔴 **`reconstruct` was removed on 2026-11-20** (v1.137.12): its capability is **entirely** carried by
+> `cognitive_trajectory`'s `rebuild` — once cumulative usage crosses the threshold, `rebuild` is
+> **mechanically rerouted** into a carrier replacement (new session + archive the old one). Both paths
+> already ended in the same code; keeping a second action name only bought the model one extra moment of
+> hesitation. **The replacement capability is untouched — there is simply no second entrance.**
+> If you used to call it directly: call `rebuild` instead (identical parameters: `summary` required,
+> `note` optional); past the threshold the behaviour is equivalent.
 
 > **Runtime diagnosis**: `dashboard diag` (always visible, no declaration needed) — live sessions /
 > wake scheduler clock / CRO-enabled trajectories / wake registry (future vs overdue).

@@ -803,7 +803,21 @@ export function trajectoryConstraintMsmGate(root: string, sessionId: string | un
     if (!name || !profile.msms.includes(name)) return { reject: 'MSM not allowed' }
     return {}
   }
-  if (action === 'list') return { whitelist: profileMsmWhitelist(profile) }
+  if (action === 'list') {
+    // 🔴🔴 **2026-11-20：`msms` 缺省时**不返回白名单**（此前返回一个空 Set ⇒ 调用方印出
+    //    「MSMs allowed in this role:」后面什么都没有 —— 一句**恒假的话**）。
+    //
+    // 现场：owner 截图 `msm()` 无参回执 = `MSMs allowed in this role: ` 加空行。
+    // 成因：`profileMsmWhitelist()` 恒返回 Set（`new Set(profile?.msms ?? [])`），
+    //   而**空 Set 在 JS 里是 truthy** ⇒ 工具侧的 `gate.whitelist ? … : buildMsmIndex()` 走了前一支。
+    //
+    // ⇒ 判据与 `exec`／`register` 两支**同一条**：**字段在不在**（D181）。
+    //    没写 = 不收窄 ⇒ 不返白名单 ⇒ 调用方去走全量目录。
+    // ⚠️ 显式 `[]` **仍要返白名单**（空集）：那是"我一个都不给"的**声明**，
+    //    与"没声明"是两件事 —— 但它必须让调用方**说清楚**，⛔ 不能印一句空标题。
+    if (profile.msms === undefined) return {}
+    return { whitelist: profileMsmWhitelist(profile) }
+  }
   return {} // check / guide / ccc-config：只读放行
 }
 

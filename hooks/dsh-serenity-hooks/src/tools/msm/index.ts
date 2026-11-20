@@ -156,21 +156,51 @@ export const msmTool = defineTool({
 
     // 无 name → 精简目录
     if (!name || name.trim() === '') {
-      return gate.whitelist
-        ? 'MSMs allowed in this role:\n' + [...gate.whitelist].join('\n')
-        : buildMsmIndex(root)
+      // 🔴🔴 **2026-11-20 修（owner 截图报障：回执只有一句 `MSMs allowed in this role:` 加空行）**
+      //
+      // 两个错叠在一起：
+      //  ① **判据错**：`gate.whitelist` 曾对「没写 `msms`」也返回一个**空 Set**，而空 Set 是 truthy
+      //     ⇒ 走进了白名单分支。已在 `trajectoryConstraintMsmGate` 里改回「字段在不在」（D181），
+      //     没写 `msms` 时**不再返回白名单** ⇒ 落到全量目录。
+      //  ② **文案错**：`role` 这个概念**早已退役**（身份 = 轨迹编码，D-族「角色名不存在了」）。
+      //     回执里说 "this role" 会让模型去找一个不存在的东西 —— 正是 D151「退役功能的残留引用」。
+      //     ⇒ 一律改说 trajectory，且**必须点名是哪条**（否则收到的人不知道该改哪份文件）。
+      //
+      // ⚠️ **显式 `msms: []` 走另一支**：那不是"没声明"，是"我一个都不给" ⇒ 必须说出来，
+      //     ⛔ 不能印一个空标题让人以为这是完整目录。
+      if (gate.whitelist) {
+        const allowed = [...gate.whitelist]
+        if (allowed.length === 0) {
+          return (
+            'This trajectory declares an EMPTY `msms` whitelist — no MSM is callable here.\n'
+            + '  ⇒ That is a deliberate declaration (an explicit `"msms": []`), not a missing field.\n'
+            + '  ⇒ To lift it, remove the `msms` key from this trajectory\'s trajectory file '
+            + '(omitting it means "unrestricted").'
+          )
+        }
+        return (
+          `MSMs allowed for this trajectory (declared \`msms\` whitelist, ${allowed.length} entr${allowed.length === 1 ? 'y' : 'ies'}):\n`
+          + allowed.join('\n')
+          + '\n  ⇒ This is a NARROWED view, not the full registry. Run `msm()` without a whitelist declared to see everything.'
+        )
+      }
+      return buildMsmIndex(root)
     }
     const clean = name.trim()
     // 轨迹约束白名单过滤：name 不在白名单 → 拒绝（角色限定）
     if (gate.whitelist && !gate.whitelist.has(clean)) {
-      return `MSM "${clean}" is not in this role's whitelist. Allowed: ${[...gate.whitelist].join(', ')}`
+      return (
+        `MSM "${clean}" is not in this trajectory's declared \`msms\` whitelist.\n`
+        + `  Allowed here: ${[...gate.whitelist].join(', ') || '(none — the whitelist is explicitly empty)'}`
+      )
     }
 
     // 精确查找：未命中 → 返回候选（list/exec 合一的发现路径）
     if (!findEntry(root, clean)) {
       const suggest = suggestMsm(root, clean)
-      // 非 轨迹约束 正常返回候选；轨迹约束白名单时候选也过滤
-      return gate.whitelist ? `(whitelisted role — candidates filtered)\n${suggest}` : suggest
+      // 白名单在 `trajectoryConstraintMsmGate(/'exec'/)` 那一支**不返回**（只有 `list` 返），
+      // 所以此处 `gate.whitelist` 恒 undefined ⇒ 保留分支只为不改变既有行为契约。
+      return gate.whitelist ? `(whitelisted trajectory — candidates filtered)\n${suggest}` : suggest
     }
 
     // inspect → 协议 schema（复用 prepareExec 的 --schema 协议路径）

@@ -156,19 +156,11 @@ export function cumulativeTokens(totals: TokenTotals): number {
 }
 
 /**
- * 当前宿主是否支持 `register()` 的第二参数（工具准入条件）。
+ * 该会话此刻是否已达阈值（keeper 提醒侧用它**记录**分流路径，不参与注入正文）。
  *
- * 判据 = 宿主版本 ≥ `0.2.2-rc.1`（`ToolRegistrationOptions` 首次出现的档）。
- * 读不到版本 ⇒ `false`（保守：不传第二参数 ⇒ 退化成"常驻可见"，而不是赌它支持）。
+ * 🔴 **2026-11-20**：原注释写「`when` 与 keeper 提醒共用」—— `when` 已随工具面删除，
+ *    现在**只剩 keeper 这一处**调用（`seams/cognitive-trajectory-lifecycle.ts`）。
  */
-export function supportsActivation(): boolean {
-  const v = readDshVersion()
-  if (v === null) return false
-  const cmp = compareSemver(v, '0.2.2-rc.1')
-  return cmp !== null && cmp >= 0
-}
-
-/** 该会话此刻是否已达阈值（`when` 与 keeper 提醒**共用**这一条判据） */
 export function shouldOfferReconstruct(ctx: unknown, session: unknown): boolean {
   const totals = readTokenTotals(ctx, session)
   if (totals === null) return false
@@ -225,9 +217,10 @@ let diagState: ReconstructDiagState = {
 /**
  * 落一份诊断快照。
  *
- * 🔴 **本函数在 `when` 回调里也会被调到** ⇒ 必须**永不抛**（宿主契约逐字：
- *   *"rejection fails step preparation"* ⇒ `when` 里任何一个异常都会让**这一步的准备失败**）。
- *   故整段 try/catch 兜底、失败静默。
+ * 🔴 **必须永不抛**：本函数曾被 `when` 回调调用（宿主契约逐字 *"rejection fails step preparation"*
+ *   ⇒ `when` 里任何一个异常都会让**这一步的准备失败**）。**2026-11-20 起 `when` 已删**，
+ *   但"永不抛"这条**保留** —— 它现在被 `case 'rebuild'` 的 `finally` 调，那里抛错会炸掉一次
+ *   **本来要成功的 rebuild**。故整段 try/catch 兜底、失败静默。
  */
 function writeReconstructDiag(root: string, entry: {
   sessionId: string
@@ -251,13 +244,34 @@ function writeReconstructDiag(root: string, entry: {
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, JSON.stringify(s, null, 2) + '\n', 'utf-8')
   } catch {
-    /* 诊断写盘失败忽略（绝不影响主流程，更绝不能让 `when` 抛） */
+    /* 诊断写盘失败忽略（绝不影响主流程 —— 见本函数头注的"永不抛"） */
   }
 }
 
 /** 测试/调试：读诊断状态 */
 export function reconstructDiagSnapshot(): ReconstructDiagState {
   return { ...diagState }
+}
+
+/**
+ * **改道观测**（2026-11-20 从已删的 `makeReconstructWhen` 搬来）——见 `tools/cognitive-trajectory.ts` 的调用处。
+ *
+ * 判据：`case 'rebuild'` 那里**已经**读完了四桶并判过阈值，多写一条诊断是零成本；
+ * 而那条读数要回答的「机制到底读到了多少」，**只在真要改道时才需要**。
+ *
+ * @param cumulative `null` = 读不到投影（⛔ 不写 0 —— 那会让"读不到"与"真的是 0"同形）
+ */
+export function writeReconstructDiagForRoute(
+  root: string,
+  input: { sessionId: string; cumulative: number | null; threshold: number; rerouted: boolean },
+): void {
+  writeReconstructDiag(root, {
+    sessionId: input.sessionId,
+    event: input.rerouted ? 'rerouted' : 'route-skipped',
+    detail:
+      `cumulative=${input.cumulative === null ? 'unreadable' : input.cumulative} `
+      + `threshold=${input.threshold} rerouted=${input.rerouted}`,
+  })
 }
 
 /** 测试/调试：清空诊断状态（跨用例隔离） */
@@ -268,55 +282,17 @@ export function __resetReconstructDiagForTest(): void {
   }
 }
 
-/** 观测落盘的节流窗（`when` 每步都跑 ⇒ 写盘必须有界） */
-const OBSERVE_THROTTLE_MS = 60_000
-
-/**
- * 造 `when` 回调：**答"这一步要不要把这个工具放出来"**，并顺带落一次节流的观测。
- *
- * 为什么观测不能省：owner 要的第一件事是"达阈值才出现"，而**"它到底读到了多少"只有真机答得上**
- * （宿主的投影在本会话能否读出 1391 M 级 —— 这是方案阶段明确未验的那一格）。
- * 观测落盘让**第一次真机运行**同时完成"验投影"与"验功能"，不必再另写一次性探针
- * （探针验的是"我这样调能读懂"，诊断文件验的是**真实现每步真的算出什么** —— 后者才是上生产的那个数）。
- *
- * 🔴 三条硬约束（都来自宿主契约，逐字）：
- *   ① **绝不抛**（rejection fails step preparation）；
- *   ② **不改变任何注册、不启动任何工具工作**（契约：*"Conditions must not mutate registrations
- *      or start tool work"*）；
- *   ③ **便宜** —— 每步都会跑 ⇒ 落盘按会话**节流 60s**。
- */
-export function makeReconstructWhen(ctx: unknown): (context: { agent?: Agent }) => boolean {
-  const lastObserve = new Map<string, number>()
-  return (context) => {
-    try {
-      const session = (context?.agent as { session?: unknown } | undefined)?.session
-      if (!session) return false
-      const totals = readTokenTotals(ctx, session)
-      if (totals === null) return false
-      const total = cumulativeTokens(totals)
-      const id = String((session as { id?: string }).id ?? '')
-      const root = cccRootForCwd(agentCwdFor({ session } as { session?: { header?: { cwd?: string } } }))
-      if (root !== null) {
-        const now = Date.now()
-        if (now - (lastObserve.get(id) ?? 0) >= OBSERVE_THROTTLE_MS) {
-          lastObserve.set(id, now)
-          writeReconstructDiag(root, {
-            sessionId: id,
-            event: 'observe',
-            observe: true,
-            detail:
-              `cumulative=${total} threshold=${RECONSTRUCT_TOKEN_THRESHOLD} visible=${total >= RECONSTRUCT_TOKEN_THRESHOLD} `
-              + `buckets=${JSON.stringify(totals)} activation=${supportsActivation()}`,
-          })
-        }
-      }
-      return total >= RECONSTRUCT_TOKEN_THRESHOLD
-    } catch {
-      // 契约要求不抛：判不出来就当"不放出"（fail-closed，与其余可见性判据同向）
-      return false
-    }
-  }
-}
+// 🔴🔴 **`makeReconstructWhen()` / `supportsActivation()` / `OBSERVE_THROTTLE_MS` 已于 2026-11-20 删除**
+//    （owner 令「同意，工具面删掉即可」）。它们是那个条件可见工具的**全部使用者**：
+//    · `makeReconstructWhen` —— 宿主每步问一次"要不要放出这个工具"，并顺带落节流观测；
+//    · `supportsActivation`  —— 判宿主有没有 `register(def,{when})` 的第二参数（低档降级用）。
+//    工具面删除后两者**零调用点**，留着就是第二真相源（D151：有函数、有测试、没有接线）。
+//
+// ## ⚠️ 删掉的是**观测面**，这一格必须补（⛔ 否则是净损失）
+//    `makeReconstructWhen` 原是唯一写诊断快照的地方。删它 ⇒ 读数密度从"每步节流 60s"降到"每次改道一次"。
+//    ⇒ 已把观测**搬到改道那一支**（`tools/cognitive-trajectory.ts` 的 `case 'rebuild'`）：
+//      那里本来就要读四桶、本来就要判阈值 ⇒ 多写一行诊断**零额外成本**，且**那一刻正是唯一有用的时刻**
+//      （"机制到底读到了多少"这个问题，只在真的要改道时才需要答案）。
 
 // ── 排队（与 rebuild 同一套 turn-stopping 语义）──────────────────────────────
 

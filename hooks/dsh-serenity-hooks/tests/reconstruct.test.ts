@@ -9,12 +9,15 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import {
   RECONSTRUCT_TOKEN_THRESHOLD,
   readTokenTotals,
   cumulativeTokens,
   shouldOfferReconstruct,
-  makeReconstructWhen,
+  writeReconstructDiagForRoute,
   queueReconstruct,
   registerReconstructTurnHook,
   pendingReconstructSnapshot,
@@ -179,33 +182,53 @@ describe('交接提醒（1.A：只指名 rebuild，机械层负责改道）', ()
   })
 })
 
-describe('reconstruct: makeReconstructWhen（宿主契约要求"绝不抛"）', () => {
-  it('未达阈值 → false', () => {
-    const when = makeReconstructWhen(ctxWithTotals({ uncachedInputTokens: 1 }))
-    expect(when({ agent: { session: { id: 's', header: { cwd: '/nonexistent' } } } as never })).toBe(false)
+/**
+ * 🔴 **v1.137.12（2026-11-20）：`makeReconstructWhen` 已随工具面删除。**
+ *
+ * 这一组替代原先「`when` 回调绝不抛」的五条用例。判据不变但**承重对象换了**：
+ * 观测面搬到了 `writeReconstructDiagForRoute`（`case 'rebuild'` 的 `finally` 里调），
+ * 而那条「永不抛」的理由更强了 —— 它现在抛错会炸掉一次**本来要成功的 rebuild**。
+ *
+ * 三条判据，各自钉一个会静默说谎的形态：
+ *  ① `cumulative === null` ⇒ 写 `unreadable`，**⛔ 不写 0** —— 写了 0 就与"真的是 0"同形；
+ *  ② `rerouted` 两态各写各的事件名（⛔ 不共用一个 "route"）；
+ *  ③ 落盘失败（root 不可写）⇒ 静默，**绝不影响调用方**。
+ */
+describe('reconstruct: 改道观测（原 makeReconstructWhen 的接任者）', () => {
+  const mkroot = () => mkdtempSync(join(tmpdir(), 'recon-diag-'))
+
+  it('改道 ⇒ event=rerouted，detail 带 cumulative 与 threshold', () => {
+    const root = mkroot()
+    writeReconstructDiagForRoute(root, { sessionId: 's', cumulative: 1_500_000_000, threshold: 1_000_000_000, rerouted: true })
+    const snap = reconstructDiagSnapshot()
+    expect(snap.lastEvent).toBe('rerouted')
+    expect(snap.detail).toContain('cumulative=1500000000')
+    expect(snap.detail).toContain('threshold=1000000000')
+    rmSync(root, { recursive: true, force: true })
   })
 
-  it('达阈值 → true', () => {
-    const when = makeReconstructWhen(ctxWithTotals(SAMPLE))
-    expect(when({ agent: { session: { id: 's', header: { cwd: '/nonexistent' } } } as never })).toBe(true)
+  it('未改道 ⇒ event=route-skipped（⛔ 不与 rerouted 共用一个事件名）', () => {
+    const root = mkroot()
+    writeReconstructDiagForRoute(root, { sessionId: 's', cumulative: 423_000_000, threshold: 1_000_000_000, rerouted: false })
+    expect(reconstructDiagSnapshot().lastEvent).toBe('route-skipped')
+    rmSync(root, { recursive: true, force: true })
   })
 
-  it('没有 agent / 没有 session → false，不抛', () => {
-    const when = makeReconstructWhen(ctxWithTotals(SAMPLE))
-    expect(when({})).toBe(false)
-    expect(when({ agent: {} as never })).toBe(false)
+  it('🔴 读不到投影 ⇒ 写 `unreadable`，**⛔ 不写 0**（0 会与"真的是 0"同形）', () => {
+    const root = mkroot()
+    writeReconstructDiagForRoute(root, { sessionId: 's', cumulative: null, threshold: 1_000_000_000, rerouted: false })
+    expect(reconstructDiagSnapshot().detail).toContain('cumulative=unreadable')
+    expect(reconstructDiagSnapshot().detail).not.toContain('cumulative=0')
+    rmSync(root, { recursive: true, force: true })
   })
 
-  it('🔴 投影读取抛错时**绝不抛出**（宿主：rejection fails step preparation）', () => {
-    const ctx = { get: () => ({ snapshot: () => { throw new Error('boom') } }) } as never
-    const when = makeReconstructWhen(ctx)
-    expect(() => when({ agent: { session: { id: 's' } } as never })).not.toThrow()
-    expect(when({ agent: { session: { id: 's' } } as never })).toBe(false)
-  })
-
-  it('session 缺 header.cwd 也绝不抛（cccRootForCwd 拿到 undefined 的路径）', () => {
-    const when = makeReconstructWhen(ctxWithTotals(SAMPLE))
-    expect(() => when({ agent: { session: { id: 's' } } as never })).not.toThrow()
+  it('🔴 落盘失败 ⇒ **绝不抛**（它跑在 `case \'rebuild\'` 的 finally 里，抛错会炸掉一次本要成功的 rebuild）', () => {
+    // 用一个**不存在的父目录 + 空串**造出必然失败的路径（⛔ 不 chmod：root 用户下判不出来）
+    expect(() => writeReconstructDiagForRoute('/nonexistent-root-\u0000x', {
+      sessionId: 's', cumulative: 1, threshold: 1, rerouted: true,
+    })).not.toThrow()
+    // 正控：上面那条真的走到了写盘失败分支（进程内状态照常更新，说明函数完整跑过）
+    expect(reconstructDiagSnapshot().lastEvent).toBe('rerouted')
   })
 })
 

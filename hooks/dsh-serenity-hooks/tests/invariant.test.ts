@@ -33,9 +33,10 @@ describe('invariant: 清单与注册工具一致性', () => {
     //      条件段（末 CONDITIONAL 项）必须恰好是那三个。加工具时**不需要改本用例**。
     const cond = (REGISTERED_TOOLS as readonly string[]).slice(-CONDITIONAL_TOOL_COUNT)
     const pinned = (REGISTERED_TOOLS as readonly string[]).slice(0, REGISTERED_TOOLS.length - CONDITIONAL_TOOL_COUNT)
-    expect(CONDITIONAL_TOOL_COUNT).toBe(3)
+    expect(CONDITIONAL_TOOL_COUNT).toBe(2)
     // 条件段 ⊆ 已知的条件工具集合；且常驻段与条件段不相交（顺序错了会在这里红）
-    const CONDITIONAL = ['im-bridge', 'diagram', 'reconstruct']
+    // 🔴 v1.137.12：`reconstruct` 工具面已删除 ⇒ 条件段只剩两个（im-bridge ／ diagram）
+    const CONDITIONAL = ['im-bridge', 'diagram']
     for (const n of cond) expect(CONDITIONAL).toContain(n)
     for (const n of pinned) expect(CONDITIONAL).not.toContain(n)
     expect(REGISTERED_TOOLS).toContain('container_fs')
@@ -50,8 +51,10 @@ describe('invariant: 清单与注册工具一致性', () => {
     // v1.128.0：browser_slot 必须在**常驻段**（它的价值恰在"使用者没想到的时候"，
     // 条件出现等于不存在）
     expect(pinned).toContain('browser_slot')
-    // v1.121.0：reconstruct 必须在**条件段**（末 CONDITIONAL_TOOL_COUNT 项）
-    expect(cond).toContain('reconstruct')
+    // 🔴 v1.137.12：`reconstruct` 工具面已删除 ⇒ 反向钉：它**不得**再出现在清单或条件段里。
+    //    这条防的是"删了工具忘了改清单"与"清单改回来了工具却不在"两个方向。
+    expect(REGISTERED_TOOLS as readonly string[]).not.toContain('reconstruct')
+    expect(cond).not.toContain('reconstruct')
   })
 
   it('真实清单与 REGISTERED_TOOLS 一致（防双侧陈旧再次静默通过）', () => {

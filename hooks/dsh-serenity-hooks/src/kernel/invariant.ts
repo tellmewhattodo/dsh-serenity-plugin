@@ -145,8 +145,23 @@ export function assertManifestProse(
  * 而"给假报让路"最简单的做法就是放宽类型 —— ⛔ 那会连带丢掉真正的越界保护。
  * 走函数调用 ⇒ 入参类型是 `number`，窄化不发生，判据与顺序都不变。
  */
+/*
+ * 🔴 **2026-11-20（v1.137.12）真缺陷：`2` 必须读作「两」，不是「二」。**
+ *
+ * 这个 bug **活了很久而零信号**，成因值得记：`cnNumberOf(2)` 的两个调用点是
+ *   ① 工具总数（`n` 一直是十几 ⇒ 走不到 ② 以外的分支）
+ *   ② **条件工具数** `CONDITIONAL_TOOL_COUNT` —— 长期是 3。
+ * ⇒ 数字变成 **2** 之前，`cn[2] = '二'` 这一格**从来没有被任何真实输入走过**。
+ * 而「两个」「三条」是中文量词的自然读法，「二个工具」是病句 ⇒ README 作者写的是「两」，
+ * 判据算出来的是「二」，于是**判据本身在指责正确的文字**。
+ *
+ * 触发它的动作是「删掉 `reconstruct` ⇒ 条件数 3→2」。⇒ 判据沉淀（同族 D252/D277）：
+ * **常量取值的下降会把沉睡的分支唤醒** —— 改小一个数字时，要问「新值走过哪些以前没走过的路」。
+ */
 function cnNumberOf(n: number): string {
-  const cn = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
+  // ⚠️ `cn[2]` 刻意是「两」而不是「二」：这两处调用（总数／条件数）都带量词「个」，
+  //    而带量词时 `2` 的中文读法恒为「两」。⛔ 想改回「二」请先读上面那段。
+  const cn = ['零', '一', '两', '三', '四', '五', '六', '七', '八', '九', '十']
   if (n <= 10) return cn[n] ?? String(n)
   if (n < 20) return `十${cn[n - 10] ?? ''}`
   return `二十${n === 20 ? '' : (cn[n - 20] ?? '')}`
@@ -178,7 +193,7 @@ function cnNumberOf(n: number): string {
  * 同规格：**条件可见与否不影响这里列它**（本常量 = "插件**具备**的工具面"）。
  */
 export const REGISTERED_TOOLS = [
-  // ⚠️ **顺序有意义**：**常驻在前、条件在后**（条件者 = `im-bridge` / `diagram` / `reconstruct`）。
+  // ⚠️ **顺序有意义**：**常驻在前、条件在后**（条件者 = `im-bridge` / `diagram`）。
   //   它被 `assertManifestProse`（本文件）用来把"后几个按条件出现"这类句子**钉成可判**——
   //   所以**别按字母序重排**，加工具时**加在对应段的末尾**（常驻加在 `serenity-skill-creator` 之后、
   //   条件加在末位），否则那条钉子会对**正确的文字**报假错。
@@ -188,12 +203,21 @@ export const REGISTERED_TOOLS = [
   //    为什么常驻：它的价值在"忘了关浏览器时有人兜底"，而那个场景**恰恰是使用者没想到的时候**
   //    ⇒ 一个只在特定条件下才出现的工具，在这个场景里等于不存在。
   'browser_slot',
-  // ↓ 条件出现的三个（按注册期的条件钩子判可见性，见各自 `src/tools/*.ts`）
+  // ↓ 条件出现的两个（按注册期的条件钩子判可见性，见各自 `src/tools/*.ts`）
   //   ⚠️ v1.106.0：原第三个 `acc-diag` **已并入 `dashboard diag`** ⇒ 13 项，条件 2 项。
-  //   ⚠️ v1.121.0：新增 `reconstruct`（条件 = **累计 token 达阈值**，走 `register(def,{when})`
-  //      而不是其他工具用的 `restrict({deny})`）⇒ 13 项，条件 3 项。
-  'im-bridge', 'diagram', 'reconstruct',
+  //   🔴 **v1.137.12（2026-11-20，owner 令「工具面删掉即可」）：`reconstruct` 整条删除**
+  //      ⇒ 13 项、条件 **2** 项。判据（三条，⛔ 不是"少一个更干净"）：
+  //      ① **它没有提供 `rebuild` 入口提供不了的东西** —— `cognitive_trajectory` 的 `case 'rebuild'`
+  //         在累计量 ≥ 阈值时**已经机械改道**成换代，而它的 `execute` 也只是调同一个 `queueReconstruct`
+  //         ⇒ 两条路终点同一行代码、连阈值都是同一个常量 ⇒ **可见条件与改道条件恰好同域**，纯冗余。
+  //      ② 与本轨迹自己的裁定冲突：交接提醒（owner 2026-11-17 裁 1.A）**只指名 `rebuild`**，
+  //         理由逐字「**模型不需要第二个动作名**」。
+  //      ③ 它只在超预算时冒出来、没有任何提示解释它是干什么的 ⇒ 模型看到它只会多一次犹豫。
+  //      ⚠️ **删的是工具面，⛔ 不是换代能力**：`queueReconstruct` / turn-stopping 执行点一字未动。
+  //      ⚠️ 连带失效：`makeReconstructWhen` / `supportsActivation`（它们只服务这一个工具）
+  //         ＋ 那个「注册带准入条件」的机制（本插件唯一使用者，至此**零使用者**）。
+  'im-bridge', 'diagram',
 ] as const
 
 /** 条件出现的工具数（`REGISTERED_TOOLS` 的**末段**；`assertManifestProse` 用） */
-export const CONDITIONAL_TOOL_COUNT = 3
+export const CONDITIONAL_TOOL_COUNT = 2

@@ -14,6 +14,86 @@
 
 ---
 
+## v1.137.12 — 2026-11-20（删除冗余的 `reconstruct` 工具面 ＋ 修 `msm()` 空标题回执 ＋ 顺带修活一条沉睡的中文数字判据）
+
+> 来源 = **owner 两个令**（逐字）：
+> ① 「一个bug: reconstruct 这个tool没有下架吗？rebuild不是已经完全代替它的用途了吗，核实代码」
+> ② 「同意，工具面删掉即可」
+> ③ 截图报障：`msm()` 无参回执印 `MSMs allowed in this role:` **加一个空行**（「这个报错有误导性，修正」）。
+
+### 一、删 `reconstruct` 工具面（**删的是入口，⛔ 不是能力**）
+
+**判定它是纯冗余，证据链三条**（⛔ 不是"少一个更干净"这种口味判断）：
+
+| # | 判据 | 事实 |
+|---|---|---|
+| ① | **终点是同一段代码** | `case 'rebuild'` 在累计量 ≥ 阈值时**已经机械改道**成 `queueReconstruct`，而 `reconstruct` 工具的 `execute` 也只是调同一个函数 —— 连阈值都是同一个常量 `RECONSTRUCT_TOKEN_THRESHOLD` |
+| ② | **可见条件与改道条件同域** | 那个工具 `when` 判的正是"累计量 ≥ 阈值"，与 ① 的条件**完全相同** ⇒ 它出现的那一刻，`rebuild` 本来就会改道 |
+| ③ | **与本轨迹自己的裁定冲突** | 交接提醒（owner 2026-11-17 裁 1.A）逐字理由「**模型不需要第二个动作名**」 |
+
+**删了什么**：`src/tools/reconstruct.ts` 整个文件；`index.ts` 的 import ＋ `registerReconstructTool()`
+＋ 调用点；`trajectory/reconstruct.ts` 的 `makeReconstructWhen` / `supportsActivation` / `OBSERVE_THROTTLE_MS`
+（工具面删除后零调用点 ⇒ 留着就是第二真相源，D151 同族）。
+
+**⛔ 一字未动的**：`queueReconstruct` ／ `performReconstruct` ／ turn-stopping 执行点 ／ 阈值常量。
+⇒ **换代能力完整在位**，只是不再有第二个入口。
+
+### 二、🔴 观测面搬家（这是"删工具"的**净损失**，必须补，⛔ 不是可选项）
+
+`makeReconstructWhen` 原是**唯一**写 `AGENT_SESSIONS/.reconstruct-diag.json` 的地方
+（宿主每步问一次"要不要放出工具"，它顺带按会话节流 60s 落一条）。删它 ⇒ 观测整条消失。
+
+⇒ 新增 `writeReconstructDiagForRoute()`，调用点搬到 `tools/cognitive-trajectory.ts` 的
+`case 'rebuild'` 的 **`finally`**（`mod` 声明在 try 外，`finally` 里判 `mod !== null`）。
+选这一处的理由不是"随手放"：那里**本来就要读四桶、本来就要判阈值** ⇒ 多写一行诊断零额外成本，
+而那个读数要回答的「机制到底读到了多少」，**恰只在真要改道时才有用**。
+
+| 判据 | 写法 |
+|---|---|
+| 读不到投影 | 写 `cumulative=unreadable`，**⛔ 不写 0**（0 会与"真的是 0"同形） |
+| 改道 / 未改道 | 两个**不同**事件名 `rerouted` / `route-skipped`（⛔ 不共用一个 `route`） |
+| 落盘失败 | 静默 —— 它现在跑在 `finally` 里，抛错会**炸掉一次本来要成功的 rebuild** |
+
+⚠️ **代价如实登记**：取样密度从"每步（节流 60s）"降到"每次调 `rebuild` 一次"。
+
+### 三、`msm()` 空标题修复（根因两层，⛔ 不是文案问题）
+
+| 层 | 缺陷 | 修法 |
+|---|---|---|
+| ① 逻辑 | `trajectoryConstraintMsmGate` 的 `list` 支对「没写 `msms`」也返回**空 Set**，而**空 Set 是 truthy** ⇒ 工具侧走进白名单分支，印出一个没有条目的标题 | `if (profile.msms === undefined) return {}`（D181「字段在不在」） |
+| ② 文案 | 还在说 `role`（该概念已退役） | 全部改成 trajectory；三种情形分开说 |
+
+三种情形从此各自说得清：**缺省** ⇒ 走全量目录 ／ **显式 `[]`** ⇒ 明说"这是显式空声明" ／
+**有白名单** ⇒ 说清"NARROWED view，不是完整目录"。
+
+### 四、🔴 顺带修活一条**沉睡了很久**的中文数字判据（真缺陷，零信号）
+
+`invariant.ts` 的 `cnNumberOf(2)` 返回 **「二」**，而 README 写的是 **「两个」**（带量词时中文恒读「两」）。
+⇒ 判据在**指责正确的文字**。
+
+**为什么它活了这么久**：`cn[2]` 这一格**从来没有被任何真实输入走过** ——
+两个调用点一个是工具总数（一直是十几），另一个是**条件工具数**，长期 = 3。
+⇒ 触发它的动作正是本版「删掉 `reconstruct` ⇒ 条件数 3→2」，**常量取值下降把沉睡的分支唤醒了**。
+🔴 **判据沉淀**：**改小一个常量时，要问「新值会走过哪些以前没走过的路」** ——
+分支覆盖率只算"走过没有"，不算"走过的是不是那个值"。
+
+### 五、验收
+
+- **+4 用例**（`reconstruct.test.ts`，接任 `makeReconstructWhen` 那五条）：
+  `rerouted` / `route-skipped` 各写各的事件名 ／ `null` ⇒ `unreadable` 且**不写 0** ／
+  落盘失败**绝不抛**（含正控：进程内状态照常更新，证明函数完整跑过）。
+- **反向钉三处**：`register.test.ts` `not.toContain('reconstruct')` ／
+  `invariant.test.ts` 清单与条件段双向 `not.toContain` ／ `CONDITIONAL_TOOL_COUNT` 断言 3→2。
+- 门禁：typecheck ✓ ／ **typecheck-host 0.2.2-rc.1**（node 100 ＋ client 193）✓ ／
+  test **243 files / 3749 tests** ✓ ／ coverage **92.02%** ✓ ／ build ✓ ／ pack-check **193 文件** ✓。
+- 文档面同步：两份 `README.md` §3.1 标题 `十四个工具（其中三个）` → `十三个工具（其中两个）`、
+  删 `reconstruct` 表行、加一段「已于 2026-11-20 删除，改用 `rebuild`（参数一样）」；
+  **`README.en.md` 同批改**（它同样被 `assertManifestProse` 之外的读者看到，且仍写着 Fourteen/three、
+  仍列 `reconstruct` 表行 —— 上一轮的文档同步只做了中文两份）；
+  `package.json` / `dsh.plugin.json` 的 description 与 `contributes.tools` 名单去掉 `reconstruct`。
+
+---
+
 ## v1.137.11 — 2026-11-19（只声明常驻的轨迹被静默剥夺 MSM 注册权：判据从「文件存在」改回「声明了 `msms`」）
 
 > 来源 = **butler 报障**（`container_admin msm register` 三次 ＋ `deregister` 两次实测）。

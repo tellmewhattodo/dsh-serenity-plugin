@@ -750,15 +750,18 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
         //   ⚠️ fail-open 的理由：路由失败若退化成"什么都不做"，一次超限会话会**彻底卡住**；
         //      而退回 rebuild 至少完成"清空"这件它就请求了的事。
         {
+          // ⚠️ 类型用 `number | null`：`cumulativeTokens` 不在本文件的作用域里（它是动态 import 的），
+          //    写成 `ReturnType<typeof …>` 会在**类型层**引用一个运行时才存在的绑定 ⇒ TS2304。
+          let totals: number | null = null
+          // ⚠️ `mod` 必须声明在 try 之外：`finally` 里要写诊断，而 `finally` 看得见外层绑定。
+          let mod: typeof import('../trajectory/reconstruct.js') | null = null
           try {
-            const { readTokenTotals, cumulativeTokens, RECONSTRUCT_TOKEN_THRESHOLD } =
-              await import('../trajectory/reconstruct.js')
+            mod = await import('../trajectory/reconstruct.js')
             const session = (exec as { agent?: { session?: unknown } }).agent?.session
-            const totals = session ? readTokenTotals(ctx, session) : null
-            const cumulative = totals ? cumulativeTokens(totals) : null
-            if (cumulative !== null && cumulative >= RECONSTRUCT_TOKEN_THRESHOLD) {
-              const { queueReconstruct } = await import('../trajectory/reconstruct.js')
-              const rerouted = queueReconstruct(ctx, {
+            const read = session ? mod.readTokenTotals(ctx, session) : null
+            totals = read ? mod.cumulativeTokens(read) : null
+            if (totals !== null && totals >= mod.RECONSTRUCT_TOKEN_THRESHOLD) {
+              const rerouted = mod.queueReconstruct(ctx, {
                 root,
                 note: args.note as string | undefined,
                 summary: args.summary as string,
@@ -769,12 +772,12 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
                 queued: rerouted.queued,
                 rerouted: 'reconstruct',
                 cumulativeTokens: rerouted.cumulative,
-                threshold: RECONSTRUCT_TOKEN_THRESHOLD,
+                threshold: mod.RECONSTRUCT_TOKEN_THRESHOLD,
                 anchor: rerouted.anchor,
                 sessionMdPath: rerouted.sessionMdPath,
                 instruction:
                   `Rebuild was rerouted to reconstruct: this session's cumulative usage is ${rerouted.cumulative} `
-                  + `≥ threshold ${RECONSTRUCT_TOKEN_THRESHOLD}, and clearing in place would NOT bring it down. `
+                  + `≥ threshold ${mod.RECONSTRUCT_TOKEN_THRESHOLD}, and clearing in place would NOT bring it down. `
                   + 'When this turn ends: a NEW dsh session is created, this cognitive trajectory is bound to it, '
                   + 'the continue anchor is injected there, and the current session is archived. '
                   + 'Resume from SESSION.md in the new conversation — do not keep working in this one.',
@@ -782,6 +785,33 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
             }
           } catch {
             /* 路由判据异常 ⇒ fail-open 到 rebuild（见上方理由），绝不因此阻断调用 */
+          } finally {
+            /**
+             * 🔴🔴 **观测面（2026-11-20 从已删的 `makeReconstructWhen` 搬到这里）**。
+             *
+             * 原处是那个条件可见工具的 `when` 回调：宿主**每步**问一次"要不要放出工具"，
+             * 它顺带按会话节流 60s 落一条诊断。工具面删除后那个回调没了 ⇒ 观测会整条消失。
+             *
+             * **搬到这里的理由（不是"随手放一处"）**：
+             *   ① 这里**本来就要读四桶、本来就要判阈值** ⇒ 多写一行诊断是**零额外成本**；
+             *   ② 那个读数要回答的问题是「**机制到底读到了多少**」，
+             *      而**只有当它真的要改道时，这个答案才有用** —— 平时读数再密也没人去看。
+             * ⚠️ **如实登记的代价**：取样密度从"每步（节流 60s）"降到"每次调 rebuild 一次"。
+             *    ⇒ 若将来要看"这条会话当前累计多少"，改用 `readTokenTotals` 现读，⛔ 别指望这个文件是仪表盘。
+             * ⚠️ `isOk()` 判空是**必须**的：`finally` 在 import 失败时同样会跑，而那时 `mod` 仍是 null。
+             */
+            if (mod !== null && typeof mod.writeReconstructDiagForRoute === 'function') {
+              try {
+                mod.writeReconstructDiagForRoute(root, {
+                  sessionId: dshSessionId,
+                  cumulative: totals,
+                  threshold: mod.RECONSTRUCT_TOKEN_THRESHOLD,
+                  rerouted: totals !== null && totals >= mod.RECONSTRUCT_TOKEN_THRESHOLD,
+                })
+              } catch {
+                /* 诊断写盘绝不影响主流程 */
+              }
+            }
           }
         }
 

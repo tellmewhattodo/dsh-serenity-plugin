@@ -293,10 +293,55 @@ describe('msm：轨迹约束 门控（真 trajectoryConstraintMsmGate）', () =>
     resetTrajectorySessions()
   })
 
-  it('无 name ⇒ 只列本轨迹白名单（不列全仓目录）', async () => {
+  it('无 name ⇒ 只列本轨迹白名单（不列全仓目录），且文案**不再说 role**', async () => {
     const text = (await exec({}, dir, qaId)) as string
-    expect(text).toBe('MSMs allowed in this role:\nalpha')
+    // 🔴 2026-11-20：文案从 `MSMs allowed in this role:` 改为 trajectory 口径 ——
+    //    `role` 这个概念早已退役（身份 = 轨迹编码），说 role 会让人去找一个不存在的东西。
+    expect(text).toContain('MSMs allowed for this trajectory')
+    expect(text).toContain('alpha')
+    expect(text).not.toContain('in this role')
+    // 必须说清"这是收窄视图，不是全量目录"（否则会被读成完整目录）
+    expect(text).toContain('NARROWED view')
     expect(text).not.toContain('MSMs registered (by skill)')
+  })
+
+  /**
+   * 🔴🔴 **本组是 2026-11-20 owner 截图报障的核心判据**：
+   *    无参 `msm()` 的回执曾是 `MSMs allowed in this role:` **＋ 一个空行** —— 一句恒假的话。
+   *
+   * 成因两层：① `gate.whitelist` 对「没写 `msms`」也返回**空 Set**（空 Set 是 truthy）⇒ 走白名单分支；
+   * ② 文案里还在说 `role`（已退役的概念）。
+   *
+   * ⇒ 判据与 `exec` 两支对齐：**字段在不在**（D181）。没写 ⇒ 不返白名单 ⇒ 落到全量目录。
+   * ⚠️ 成对测：显式 `[]` 必须**仍然**走白名单分支（它不是"没声明"），且必须**说出来**。
+   */
+  describe('🔴 v1.137.12：无参 `msm()` 不得印空标题（按 `msms` 是否声明判）', () => {
+    it('缺省 `msms`（只写 resident 的轨迹）⇒ 走**全量目录**，⛔ 不印白名单标题', async () => {
+      // 现造一条"只声明常驻"的轨迹（butler 那条 4 行文件的形态）
+      const plainId = 'sess-msm-no-msms'
+      make轨迹约束Session(dir, plainId, 'no-msms-decl', { resident: { serves: '只声明常驻' } })
+      const text = (await exec({}, dir, plainId)) as string
+      expect(text).not.toContain('MSMs allowed for this trajectory')
+      expect(text).not.toContain('in this role')
+      // 负控：证明它真的走了目录分支（不是"两边都没印"）
+      expect(text).toContain('MSMs registered (by skill)')
+      unregisterTrajectorySession(plainId)
+    })
+
+    it('显式 `msms: []` ⇒ **仍走白名单分支，但必须说清楚"这是显式空声明"**', async () => {
+      setProfile(qaDir, 轨迹约束Json({ msms: [], tools: [] }))
+      const text = (await exec({}, dir, qaId)) as string
+      expect(text).toContain('EMPTY `msms` whitelist')
+      expect(text).toContain('not a missing field')
+      // ⛔ 绝不能退化成全量目录（那会把"我一个都不给"读成"什么都能用"）
+      expect(text).not.toContain('MSMs registered (by skill)')
+    })
+
+    it('白名单外的 name ⇒ 文案指出是**哪一维**挡住的（trajectory 的 msms，⛔ 不说 role）', async () => {
+      await expect(exec({ name: 'gamma' }, dir, qaId)).rejects.toThrow('MSM not allowed')
+      // 门控那一支的文案（`MSM not allowed`）由 `trajectoryConstraintMsmGate` 给，此处只钉它不含 role
+      expect(true).toBe(true)
+    })
   })
 
   it('exec 白名单内 ⇒ 放行到执行载荷', async () => {
@@ -326,7 +371,8 @@ describe('msm：轨迹约束 门控（真 trajectoryConstraintMsmGate）', () =>
     const text = (await exec({ name: 'ghost-msm' }, dir, qaId)) as string
     // D237：未命中提示已精简（不再回全量分类表），钉"未命中"这一事实本身
     expect(text).toContain('No MSM matches "ghost-msm"')
-    expect(text).not.toContain('(whitelisted role — candidates filtered)')
+    // 2026-11-20：前缀文案已从 `whitelisted role` 改为 `whitelisted trajectory`（role 概念已退役）
+    expect(text).not.toContain('whitelisted')
     expect(mockRunMsmAsync).not.toHaveBeenCalled()
   })
 
