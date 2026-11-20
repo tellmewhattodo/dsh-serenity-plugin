@@ -96,14 +96,10 @@ describe('extendToWholeFile：就地接续（⛔ 不复刻宿主渲染）', () =
     expect(extendToWholeFile(full, p).text).toBeNull()
   })
 
-  it('🔴 身份核验：宿主前缀与磁盘不符（文件被改过）⇒ 放行，⛔ 不拼出错位文本', () => {
+  it('🔴 身份核验：接缝那一行与磁盘不符（文件被改过／读错文件）⇒ 放行，⛔ 不拼出错位文本', () => {
     const p = mkFile('SESSION.md', ['CHANGED', 'b', 'c'])
-    const partial = hostReadEnvelope(p, ['OLD', 'b'], '(Output capped. Showing lines 1-2. Use offset=3 to continue.)')
-    // 最后一行 'b' 相同，但第 1 行已不同 —— 本实现只比最后一行，故这里仍会接管
-    // （刻意如此：只比最后一行 = 只验接缝；全文件比会引入无谓的假阳）
-    // ⇒ 真正要钉的是**接缝那一行**：
     const seamed = hostReadEnvelope(p, ['CHANGED', 'OLD-B'], '(Output capped. Showing lines 1-2. Use offset=3 to continue.)')
-    expect(extendToWholeFile(seamed, p).reason).toBe('file-changed-since-read')
+    expect(extendToWholeFile(seamed, p).reason).toBe('seam-mismatch')
     expect(extendToWholeFile(seamed, p).text).toBeNull()
   })
 
@@ -112,6 +108,37 @@ describe('extendToWholeFile：就地接续（⛔ 不复刻宿主渲染）', () =
     const partial = hostReadEnvelope(ghost, ['x'], '(Output capped. Showing lines 1-1. Use offset=2 to continue.)')
     expect(() => extendToWholeFile(partial, ghost)).not.toThrow()
     expect(extendToWholeFile(partial, ghost).reason).toBe('file-unreadable')
+  })
+
+  /**
+   * 🔴 **真机踩到的形态（v1.137.13 发布后第一次真读才发现）**：
+   * 调用参数传的是**相对路径**，而读盘按**进程 cwd** 解析 ⇒ ENOENT ⇒ 静默放行
+   * ⇒ 功能看起来"没生效"，实际是路径取错了。
+   * ⇒ 权威路径必须是**信封里的 `<path>`**（宿主给的是绝对路径）。
+   */
+  it('🔴 参数是相对路径、信封里是绝对路径 ⇒ 用信封那条（真机形态）', () => {
+    const p = mkFile('SESSION.md', ['A', 'B', 'C'])
+    const partial = hostReadEnvelope(p, ['A'], '(Output capped. Showing lines 1-1. Use offset=2 to continue.)')
+    // 参数给一个**必然不存在**的相对路径：只有走信封才可能成功
+    const out = extendToWholeFile(partial, 'AGENT_SESSIONS/x/SESSION.md')
+    expect(out.reason).toBeNull()
+    expect(out.text).toContain('2: B')
+    expect(out.text).toContain('3: C')
+  })
+
+  it('两条路径都是相对 ⇒ 放行（相对路径无法可靠解析，⛔ 不猜）', () => {
+    const rel = `<path>AGENT_SESSIONS/x/SESSION.md</path>\n<type>file</type>\n<content>\n1: a\n\n(Output capped. Showing lines 1-1. Use offset=2 to continue.)\n</content>`
+    const out = extendToWholeFile(rel, 'AGENT_SESSIONS/x/SESSION.md')
+    expect(out.reason).toBe('no-absolute-path')
+    expect(out.text).toBeNull()
+  })
+
+  it('信封路径指向别处（接缝对不上）⇒ 放行，⛔ 不拼出错位文本', () => {
+    const real = mkFile('SESSION.md', ['A', 'B', 'C'])
+    const other = mkFile('SESSION.md', ['X', 'Y', 'Z'])
+    // 信封说读的是 real，但给的行是 other 的内容 ⇒ 接缝核验必须拦住
+    const partial = hostReadEnvelope(real, ['X'], '(Output capped. Showing lines 1-1. Use offset=2 to continue.)')
+    expect(extendToWholeFile(partial, other).reason).toBe('seam-mismatch')
   })
 
   it('信封/结尾形态不认识 ⇒ 放行（形态变了就诚实退出，⛔ 不猜）', () => {

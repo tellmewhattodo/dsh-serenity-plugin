@@ -46,7 +46,7 @@
  *   若那个机制被拆掉，本模块会让一次读取无界 ⇒ 登记为耦合项。
  */
 import { readFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, isAbsolute } from 'node:path'
 
 /** 只接管这**一个**文件名（精确匹配，⛔ 不是后缀/包含匹配） */
 const SESSION_MD_BASENAME = 'SESSION.md'
@@ -84,13 +84,23 @@ export function isSessionMdRead(filePath: unknown): boolean {
 /**
  * 把宿主产出的「前 N 行」接续成全文。
  *
- * @param content  宿主给模型看的文本（单个 text 块的内容）
- * @param absolutePath 真实文件路径（用于读全文；读不到就放行）
+ * 🔴 **路径来源（真机踩过，v1.137.13 发布后当场发现）**：调用方传进来的 `file_path`
+ * 往往是**相对路径**（如 `AGENT_SESSIONS/<轨迹>/SESSION.md`），而 `readFileSync` 按
+ * **进程 cwd** 解析 —— 宿主进程的 cwd 不是 CCC 根 ⇒ 读到 ENOENT ⇒ 本模块静默放行，
+ * **功能看起来"没生效"而实际是路径取错了**。
+ * ⇒ 权威路径 = 宿主信封里的 `<path>`（`displayPath`，实测是绝对路径）。
+ * ⚠️ 两者都试：**先信封、后参数**，并都要求绝对（相对路径无法可靠解析，⛔ 不猜）。
+ * 安全性由**接缝核验**兜底：读错了文件 ⇒ 最后一行对不上 ⇒ 放行。
+ *
+ * @param content 宿主给模型看的文本（单个 text 块的内容）
+ * @param hintPath 调用参数里的路径（兜底用；通常是相对路径）
  * @returns `text=null` 表示不接管
  */
-export function extendToWholeFile(content: string, absolutePath: string): FullReadOutcome {
+export function extendToWholeFile(content: string, hintPath?: string): FullReadOutcome {
   const m = ENVELOPE_RE.exec(content)
   if (!m) return { text: null, reason: 'envelope-unrecognized' }
+
+  const candidates = [m[1]!, hintPath ?? ''].filter((p) => p.length > 0 && isAbsolute(p))
 
   const body = m[2]!
   // 末尾空行 + footer：宿主在正文与 footer 之间恒有一个空行
@@ -115,26 +125,39 @@ export function extendToWholeFile(content: string, absolutePath: string): FullRe
     given.push({ number: Number(lm[1]), text: lm[2]! })
   }
   if (given.length === 0) return { text: null, reason: 'body-empty' }
-
-  // 读全文（失败 ⇒ 放行；⛔ 不抛）
-  let all: string[]
-  try {
-    all = readFileSync(absolutePath, 'utf-8').split('\n')
-  } catch {
-    return { text: null, reason: 'file-unreadable' }
-  }
-  // 末元素若是空串（文件以换行结尾），它不是一行内容
-  if (all.length > 0 && all[all.length - 1] === '') all.pop()
-
   const lastGiven = given[given.length - 1]!
-  if (all.length <= lastGiven.number) {
-    // 宿主已经给到末尾之后，或文件在读取窗口内被改小了 ⇒ 放行，⛔ 不猜
-    return { text: null, reason: 'nothing-left-to-extend' }
+
+  // 读全文（失败 ⇒ 放行；⛔ 不抛）。
+  //
+  // 🔴 **回退规则（写测试时才想清楚的一条，比"两个都试"更严）**：
+  //    只在**信封路径读不到**（ENOENT 之类）时才回退到参数路径；
+  //    ⛔ **接缝不符时不回退** —— 那说明"文件在这两次读之间被改过"或"路径本身错了"，
+  //    此时换一个文件去"凑"一个对得上的接缝，会把一次真实的失配**伪装成成功**。
+  //    （第一版就是"两个都试"，测试当场抓到：两份文件在同一行号上恰好同文时会拼错。）
+  const readLines = (p: string): string[] | null => {
+    try {
+      const lines = readFileSync(p, 'utf-8').split('\n')
+      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+      return lines
+    } catch {
+      return null
+    }
   }
-  // 🔴 身份核验：宿主给的最后一行必须与磁盘上同编号那一行逐字相同。
-  //    不一致 ⇒ 文件在两次读之间被改过 ⇒ **放行**（拼接会产生一份"看起来连续、实则错位"的文本）
-  if (all[lastGiven.number - 1] !== lastGiven.text) {
-    return { text: null, reason: 'file-changed-since-read' }
+
+  let all: string[] | null = null
+  let seamMismatch = false
+  for (const p of candidates) {
+    const lines = readLines(p)
+    if (lines === null) continue // 读不到 ⇒ 允许回退
+    if (lines.length <= lastGiven.number) { seamMismatch = true; break }
+    // 🔴 身份核验：宿主给的最后一行必须与磁盘上同编号那一行逐字相同
+    if (lines[lastGiven.number - 1] !== lastGiven.text) { seamMismatch = true; break }
+    all = lines
+    break
+  }
+  if (all === null) {
+    if (seamMismatch) return { text: null, reason: 'seam-mismatch' }
+    return { text: null, reason: candidates.length === 0 ? 'no-absolute-path' : 'file-unreadable' }
   }
 
   const rest = all.slice(lastGiven.number).map((t, i) => `${lastGiven.number + 1 + i}: ${t}`)
@@ -215,7 +238,9 @@ export function registerSessionMdFullRead(ctx: unknown): void {
 
       // 若下游（别的监听器）已替换过 content，就在**它的**结果上接续
       const baseText = singleTextOf(ds.content) ?? text
-      const outcome = extendToWholeFile(baseText, String(argPath))
+      // ⚠️ 参数里的路径**通常是相对路径**（走不通），权威路径在信封里 —— 两者都传，
+      //    由 `extendToWholeFile` 先信封后参数，并用接缝核验兜底（读错文件 ⇒ 对不上 ⇒ 放行）。
+      const outcome = extendToWholeFile(baseText, typeof argPath === 'string' ? argPath : undefined)
       if (outcome.text === null) return downstream
 
       return { ...ds, content: [{ type: 'text', text: outcome.text }] }
