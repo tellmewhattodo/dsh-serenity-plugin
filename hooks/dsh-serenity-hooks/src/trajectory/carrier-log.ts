@@ -209,7 +209,7 @@ function fenceMarkerOf(trimmedLine: string): string | null {
  * ⚠️ 实现要点：**两遍**。第一遍只认**已闭合**的围栏（配对成功才标记）；
  *   到文件尾仍未闭合的开围栏，**整段不标记** ⇒ 其中的标题照常当边界。
  */
-function fencedLineMask(lines: readonly string[], scanFrom: number): boolean[] {
+export function fencedLineMask(lines: readonly string[], scanFrom: number): boolean[] {
   const mask: boolean[] = new Array(lines.length).fill(false)
   let fence: string | null = null
   let fenceStart = -1
