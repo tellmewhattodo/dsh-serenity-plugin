@@ -27,22 +27,43 @@ const execFileAsync = promisify(execFile)
 
 const MSM_TIMEOUT_MS = 600_000
 
-// ── Windows bun 真路径探测：裸 'bun'/'.cmd' 在 CreateProcess 下不可 spawn（EINVAL/ENOENT）──
-// 优先定位真 bun.exe（PE）绝对路径 → 零 shell、argv 保真；命中失败返回 null → 走 npx shell 兜底。
+// ── bun 真路径探测 ──
+// 优先定位真 bun 绝对路径 → 零 shell、argv 保真；命中失败返回 null → 走 npx 兜底。
+//
+// 🔴🔴 **2026-11-22：非 Windows 分支此前**恒返回裸名 `'bun'`**，而宿主进程 PATH 里没有
+//   `~/.bun/bin` ⇒ 每次 MSM 调用都 spawn ENOENT 再落进 npx 兜底。后果两层：
+//   ① **每次调用都多起一个 npm ＋ 一个 node 进程**（进程树实测：`npm exec tsx …`）；
+//   ② npm 每次打两行 `npm warn Unknown user config "always-auth"` 进 **stderr**
+//      ⇒ 每一份 MSM 失败回执前面都挂着这两行 —— 而失败回执是要被模型读的，
+//      那是**纯噪声进上下文**，且它会让人以为"是 npm 插件出了问题"。
+//   ⚠️ 这两行的成因不在我们（是 `~/.npmrc` 里的 `always-auth` 被新版 npm 判为未知键），
+//      但**让它出现**是我们的：只要不走 npx，它就不会出现。
+//   ⇒ 判据（本次修的形态）：**"兜底路径被正常路径常态化"** —— 兜底一旦每次都走到，
+//      它就不再是兜底，而是一条没人再看的慢路径。判「走的是哪条」的读数是**进程树**，
+//      不是回执（回执在两情况下都正常）。
 const BUN_EXE_CANDIDATES: ReadonlyArray<() => string> = [
-  // 官方安装器：~\.bun\bin\bun.exe
-  () => join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', '.bun', 'bin', 'bun.exe'),
+  // 官方安装器：~/.bun/bin/bun（POSIX）或 ~\.bun\bin\bun.exe（Windows）
+  () => join(process.env['SERENITY_BUN'] ?? join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', '.bun', 'bin'), platform === 'win32' ? 'bun.exe' : 'bun'),
   // npm 包装包：%APPDATA% 或 %LOCALAPPDATA% 下 node_modules\bun\bin\bun.exe
   () => join(process.env['APPDATA'] ?? '', 'npm', 'node_modules', 'bun', 'bin', 'bun.exe'),
   () => join(process.env['LOCALAPPDATA'] ?? '', 'npm', 'node_modules', 'bun', 'bin', 'bun.exe'),
+  // 常见 POSIX 落点
+  () => '/usr/local/bin/bun',
+  () => '/usr/bin/bun',
 ]
 let bunExeCache: string | null | undefined
-function bunExecutablePath(): string | null {
+/**
+ * 🔴 **导出供机械判据用**（2026-11-22）：这行缺陷的形态是"非 Windows 分支恒返回裸名"，
+ * 而它**在回执上完全看不出来**（走 npx 兜底时 MSM 照样正常返回）。
+ * ⇒ 判据必须是**直接读这个函数**，⛔ 不是读某次调用的回执，也⛔ 不是在测试里复刻探测逻辑。
+ */
+export function bunExecutablePath(): string | null {
   if (bunExeCache !== undefined) return bunExeCache
-  if (platform !== 'win32') { bunExeCache = 'bun'; return bunExeCache }
+  // 🔴 **两个平台走同一条探测**（此前 win32 探测、其他平台直接给裸名 —— 那正是本缺陷）
   for (const cand of BUN_EXE_CANDIDATES) {
     try {
-      if (existsSync(cand())) { bunExeCache = cand(); return bunExeCache }
+      const p = cand()
+      if (p !== '' && existsSync(p)) { bunExeCache = p; return bunExeCache }
     } catch { /* 单个候选失败继续 */ }
   }
   bunExeCache = null
