@@ -82,6 +82,15 @@ describe('D1/D2 归一化：目录名 = 归一化域名（唯一实现）', () =
   it('大小写归一：`EXAMPLE.com` 与 `example.com` 同目录', () => {
     expect(normalizeDomain('https://EXAMPLE.com/')?.dirName).toBe('example.com')
   })
+
+  it('🔴 裸域名也能解析（台账键回灌路径用它，⛔ 不能只认完整 URL）', () => {
+    // 台账里存的是 `host`（裸的），`domainSkillPath(cccRoot, host)` 必须能处理这种输入
+    expect(normalizeDomain('example.com')).toBeNull()          // 无 scheme ⇒ 它不是 URL
+    expect(domainSkillPath(ROOT, 'example.com')).toBe(join(browserRoot(ROOT), 'example.com', 'SKILL.md'))
+    // ⚠️ `a.com:8080` 会被 URL 解析当 scheme ⇒ 也必须走同一条兜底
+    expect(normalizeDomain('a.com:8080')).toBeNull()
+    expect(domainSkillPath(ROOT, 'a.com:8080')).toBe(join(browserRoot(ROOT), 'a.com_8080', 'SKILL.md'))
+  })
 })
 
 describe('D4/D5 注入：命中才出现，未命中零噪声', () => {

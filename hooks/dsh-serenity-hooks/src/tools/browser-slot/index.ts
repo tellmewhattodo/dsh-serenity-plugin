@@ -327,12 +327,31 @@ async function run(
       return `[browser_slot] targetId=${id}` + domainSkillTail(root, url, sessionId, n)
     }
     case 'goto': {
-      const n = needSlot(args)
+      // 🔴 2026-11-24 实测代价：一次只报一个缺参 ⇒ 调用方要猜两轮才拼对
+      //    （先报缺 --target，再报缺 --slot）。⇒ 这里**一次报全**，且把 `open` 与 `goto` 的
+      //    参数差异直接写进文案 —— 两者形状不同，是最容易照抄错的地方。
+      const rawSlot = String(args.slot ?? '')
+      const n = normalizeSlotId(rawSlot)
       const url = str(args.url)
-      if (!url) return '⛔ 需要 --url=<地址>'
-      const target = await needTarget(root, n, sessionId, args)
-      await slotGoto(root, n, sessionId, target, url)
-      return `[browser_slot] navigate ${target} → ${url}` + domainSkillTail(root, url, sessionId, n)
+      const target = str(args.target)
+      const match = str(args.match)
+      const missing: string[] = []
+      if (n === 0) missing.push('--slot <b1..b20>')
+      if (!target && !match) missing.push('--target <targetId> 或 --match <URL/标题子串>（先跑 targets 看清有什么）')
+      if (!url) missing.push('--url <目的地地址>')
+      if (missing.length > 0) {
+        return (
+          `⛔ goto 缺少 ${missing.length} 个参数，一次列全：\n` +
+          missing.map((m) => `  · ${m}`).join('\n') +
+          `\n  ⚠️ goto 与 open 形状不同：open 只要 --slot ＋ --url；goto 还要指出**在哪个标签页**导航。`
+        )
+      }
+      // TS 无法从 missing.length 收窄三者的类型 ⇒ 此处显式断言（上面已判过它们都非空）
+      const slotN = n as number
+      const destUrl = url as string
+      const tgt = target ?? (await needTarget(root, slotN, sessionId, args))
+      await slotGoto(root, slotN, sessionId, tgt, destUrl)
+      return `[browser_slot] navigate ${tgt} → ${destUrl}` + domainSkillTail(root, destUrl, sessionId, slotN)
     }
     case 'eval': {
       const n = needSlot(args)
