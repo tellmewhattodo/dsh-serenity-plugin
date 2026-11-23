@@ -64,7 +64,7 @@ import { normalizeSlotId } from '../../browser/process.js'
 import { refToBackendId, renderAx } from '../../browser/ax.js'
 import { parseXY, xyFormHint } from '../../browser/coords.js'
 import { renderHit } from '../../browser/hit-test.js'
-import { loadDomainSkill, recordVisit, domainSkillPrompt, readVisits, hasDomainSkill } from '../../browser/domain-skill.js'
+import { loadDomainSkill, recordVisit, domainSkillPrompt, readVisits, hasDomainSkill, snippetTail } from '../../browser/domain-skill.js'
 
 function renderText(value: unknown): ContentBlock[] {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -200,7 +200,10 @@ function domainSkillTail(root: string, url: string, sessionId: string, slot: num
     // 记账**先于**注入：即使读说明书失败，"用过这个站"这个事实也要留下（设计 §改动 2）
     recordVisit(root, url, sessionId, slot)
     const hit = loadDomainSkill(root, url)
-    return hit ? hit.text : ''
+    // 🔴 片段清单与说明书**各自独立**：说明书没写但放了片段 ⇒ 片段清单照样出现。
+    //    ⛔ 不要写成"有说明书才看片段" —— 那是两个不同的存在，互不依赖。
+    const snip = snippetTail(root, url)
+    return (hit ? hit.text : '') + snip
   } catch {
     return ''
   }

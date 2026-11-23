@@ -30,9 +30,15 @@ import { tmpdir } from 'node:os'
 import { normalizeDomain } from '../src/browser/domain.js'
 import {
   DOMAIN_SKILL_MAX_BYTES,
+  SNIPPET_MAX_BYTES,
   domainSkillPath,
+  domainDir,
   hasDomainSkill,
   loadDomainSkill,
+  listSnippets,
+  loadSnippet,
+  snippetDir,
+  snippetTail,
   recordVisit,
   readVisits,
   domainSkillPrompt,
@@ -218,5 +224,83 @@ describe('D3 变异检验：判据对"故意弄坏"必须变红', () => {
     const noStrip = new URL('https://www.a.com/').hostname
     expect(withStrip).not.toBe(noStrip)
     expect(noStrip).toBe('www.a.com')
+  })
+})
+
+describe('Q 片段（snippets/*.js）：只列清单，⛔ 不执行', () => {
+  /** 造一支片段 */
+  function writeSnippet(host: string, name: string, body: string): string {
+    const d = snippetDir(ROOT, host)!
+    mkdirSync(d, { recursive: true })
+    const p = join(d, name)
+    writeFileSync(p, body, 'utf8')
+    return p
+  }
+
+  it('Q1 只认 `.js`：`.md` ／ `.txt` ／无后缀一律不列（裁决把"操作序列文档"整类删掉了）', () => {
+    writeSnippet('s.com', 'ok.js', 'document.title')
+    writeSnippet('s.com', 'notes.md', '# 这是操作序列文档，不该被认')
+    writeSnippet('s.com', 'readme.txt', 'x')
+    writeSnippet('s.com', 'noext', 'x')
+    const { items } = listSnippets(ROOT, 's.com')
+    expect(items.map((i) => i.name)).toEqual(['ok.js'])
+  })
+
+  it('Q2 超 16 KB ⇒ **不采用**，且必须单独出现在 oversize 里（⛔ 静默消失）', () => {
+    writeSnippet('big.com', 'small.js', '1')
+    writeSnippet('big.com', 'huge.js', 'x'.repeat(SNIPPET_MAX_BYTES + 1))
+    const { items, oversize } = listSnippets(ROOT, 'big.com')
+    expect(items.map((i) => i.name)).toEqual(['small.js'])
+    expect(oversize.map((i) => i.name)).toEqual(['huge.js'])
+  })
+
+  it('Q3 注入只给**清单与路径**，⛔ 不把片段内容整段塞进回执', () => {
+    writeSnippet('s.com', 'probe.js', 'SECRET_BODY_MARKER')
+    const t = snippetTail(ROOT, 's.com')
+    expect(t).toContain('probe.js')
+    expect(t).toContain('供 eval 用')
+    // 🔴 关键断言：内容不进回执（否则体量失控，且等于替模型决定"要不要用"）
+    expect(t).not.toContain('SECRET_BODY_MARKER')
+    // 且必须写明"不会自动执行"
+    expect(t).toContain('不会自动执行')
+  })
+
+  it('Q4 无片段 ⇒ 空串（与说明书同一口径：未命中必须零噪声）', () => {
+    expect(snippetTail(ROOT, 'nobody.com')).toBe('')
+  })
+
+  it('Q5 🔴 超限那支要在回执里**点名**，并说清"未采用 ≠ 不存在"', () => {
+    writeSnippet('big.com', 'huge.js', 'x'.repeat(SNIPPET_MAX_BYTES + 1))
+    const t = snippetTail(ROOT, 'big.com')
+    expect(t).toContain('huge.js')
+    expect(t).toContain('未采用')
+    expect(t).toContain('不是不存在')
+  })
+
+  it('Q6 🔴 路径逃逸守卫：`--name` 带 `../` ／ 斜杠 一律拒 —— **且守卫本身可判**', () => {
+    writeSnippet('s.com', 'ok.js', 'x')
+    expect(loadSnippet(ROOT, 's.com', 'ok.js')).toBe('x')
+
+    // 🔴 2026-11-24 两次实测教训，都记在这里：
+    //    ① 第一版用 `../localstore.json` —— 那个路径**根本不存在** ⇒ 把守卫整行删掉，
+    //       测试照样全绿（挡住它的是"文件不在"，不是守卫）。
+    //    ② 第二版把诱饵造在 `ROOT` 上 —— 而 `snippets/../x.js` 只退**一级**到站点目录，
+    //       **够不着 ROOT** ⇒ 守卫删掉仍然全绿。
+    //    ⇒ 判据：**"逃逸测试"的诱饵必须放在"逃逸刚好够得着"的那一层**，
+    //       否则你测的是"文件不存在"，不是"守卫拦住了"。
+    //       这里诱饵放在**站点目录**（`snippets/` 的上一级）—— 正是 `../` 的落点。
+    const decoy = join(domainDir(ROOT, 's.com')!, 'outside.js')
+    writeFileSync(decoy, 'SHOULD_NEVER_BE_READ', 'utf8')
+    expect(loadSnippet(ROOT, 's.com', '../outside.js'), '`../` 逃逸被放行了').toBeNull()
+
+    for (const bad of ['a/b.js', 'a\\b.js', 'ok.md', '']) {
+      expect(loadSnippet(ROOT, 's.com', bad), `${bad} 竟然被放行`).toBeNull()
+    }
+  })
+
+  it('Q7 说明书与片段清单**互不依赖**：没说明书但有片段 ⇒ 清单照样出现', () => {
+    writeSnippet('only-snip.com', 'a.js', 'x')
+    expect(hasDomainSkill(ROOT, 'only-snip.com')).toBe(false)
+    expect(snippetTail(ROOT, 'only-snip.com')).toContain('a.js')
   })
 })

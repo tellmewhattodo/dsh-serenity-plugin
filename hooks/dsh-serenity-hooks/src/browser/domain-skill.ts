@@ -25,7 +25,7 @@
  *   只借它的锁实现（`O_EXCL` ＋ temp→rename），⛔ 不借语义。
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { normalizeDomain } from './domain.js'
 
@@ -59,6 +59,97 @@ export function domainSkillPath(cccRoot: string, urlOrHost: string): string | nu
 export function hasDomainSkill(cccRoot: string, urlOrHost: string): boolean {
   const p = domainSkillPath(cccRoot, urlOrHost)
   return !!p && existsSync(p)
+}
+
+// ───────────────────────── 可复用片段（供 eval） ─────────────────────────
+
+/** 单个片段的体量上限（设计 §改动 3：⛔ 防止有人把整个库塞进来，那等于绕过 skill 体系） */
+export const SNIPPET_MAX_BYTES = 16 * 1024
+
+/** 片段目录名（站点目录下） */
+export const SNIPPET_DIR = 'snippets'
+
+export interface DomainSnippet {
+  /** 文件名（含扩展名） */
+  name: string
+  /** 绝对路径 */
+  path: string
+  /** 字节数 */
+  bytes: number
+}
+
+/** 片段目录（站点目录下） */
+export function snippetDir(cccRoot: string, urlOrHost: string): string | null {
+  const d = domainDir(cccRoot, urlOrHost)
+  return d ? join(d, SNIPPET_DIR) : null
+}
+
+/**
+ * 列出该站可用的片段（**只读目录，不读内容**）。
+ *
+ * ## 只收 `.js`（owner 2026-11-24 裁「就是供 eval 用的 js 片段」）
+ *
+ * 🔴 **其它后缀一律不列** —— 不是说"跳过"，是**结构性不认**：
+ * 设计稿那条裁决把"操作序列文档"整类删掉了 ⇒ 若这里放行 `.md`／`.txt`，
+ * 那类东西会借片段目录复活。
+ *
+ * ## 超限的不列，并**单独报出来**
+ *
+ * 一个 200 KB 的片段不该静默消失 —— 那与"我忘了写"在读数上同形。
+ * ⇒ 返回 `oversize` 列表，由调用方在回执里点名（⛔ 静默丢）。
+ *
+ * ⚠️ 排序：按文件名，稳定（⛔ 按 mtime —— 那会让回执在两次调用间变化而无语义）。
+ */
+export function listSnippets(
+  cccRoot: string,
+  urlOrHost: string,
+): { items: DomainSnippet[]; oversize: DomainSnippet[] } {
+  const dir = snippetDir(cccRoot, urlOrHost)
+  if (!dir || !existsSync(dir)) return { items: [], oversize: [] }
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return { items: [], oversize: [] }
+  }
+  const items: DomainSnippet[] = []
+  const oversize: DomainSnippet[] = []
+  for (const name of names.sort()) {
+    // 只认小写 `.js` 结尾；目录、隐藏文件、其它后缀一律不认
+    if (!name.endsWith('.js')) continue
+    if (name.startsWith('.')) continue
+    const p = join(dir, name)
+    let bytes: number
+    try {
+      const st = statSync(p)
+      if (!st.isFile()) continue
+      bytes = st.size
+    } catch {
+      continue
+    }
+    const rec: DomainSnippet = { name, path: p, bytes }
+    if (bytes > SNIPPET_MAX_BYTES) oversize.push(rec)
+    else items.push(rec)
+  }
+  return { items, oversize }
+}
+
+/** 读一个片段（供参考；**⛔ 本模块不执行它** —— 执行永远走既有的 `eval` 动作） */
+export function loadSnippet(cccRoot: string, urlOrHost: string, name: string): string | null {
+  const dir = snippetDir(cccRoot, urlOrHost)
+  if (!dir) return null
+  // 🔴 路径逃逸守卫：只接受**裸文件名**。`--name` 若含 `/`、`\` 或 `..` 一律拒 ——
+  //    否则 `../../localstore.json` 就能借"读片段"读任意文件。
+  if (!name || name.includes('/') || name.includes('\\') || name.includes('..')) return null
+  if (!name.endsWith('.js')) return null
+  const p = join(dir, name)
+  try {
+    const st = statSync(p)
+    if (!st.isFile() || st.size > SNIPPET_MAX_BYTES) return null
+    return readFileSync(p, 'utf8')
+  } catch {
+    return null
+  }
 }
 
 export interface DomainSkillHit {
@@ -97,6 +188,48 @@ export function loadDomainSkill(cccRoot: string, urlOrHost: string): DomainSkill
   }
   const head = `\n\n──── 本站说明书（BROWSER/${normalizeDomain(urlOrHost)?.dirName ?? urlOrHost}/SKILL.md）────\n`
   return { text: head + body, path: p, truncated }
+}
+
+/**
+ * 片段的注入尾巴（设计 §改动 3）—— **只列清单，⛔ 不注入内容、⛔ 不执行**。
+ *
+ * ## 为什么只给清单而不给内容
+ *
+ * owner 裁决原话：「就是供 eval 用的 js 片段」。片段的价值是**可复用的认知**
+ * （下次不用重新摸索选择器），而它的用法是：模型读了说明书 → 看到这里有几支片段 →
+ * **自己决定**要不要 `eval` 其中一支。
+ *
+ * 🔴 若把内容也注进去，回执体量会失控（一支片段可达 16 KB），
+ * 而且**等于替它做了"要不要用"的决定** —— 那不该由注入层替它做。
+ *
+ * ## 为什么超限的要单独点名
+ *
+ * 一支 200 KB 的片段若静默消失，与「我忘了写」在读数上同形。
+ * ⇒ 明确告诉它"有这么个文件，但它太大没被采用"，并给路径。
+ *
+ * @returns 追加文本；无片段 ⇒ **空串**（未命中零噪声，与说明书同一口径）
+ */
+export function snippetTail(cccRoot: string, urlOrHost: string): string {
+  try {
+    const { items, oversize } = listSnippets(cccRoot, urlOrHost)
+    if (items.length === 0 && oversize.length === 0) return ''
+    const lines: string[] = [`\n──── 本站可用片段（snippets/，供 eval 用）────`]
+    for (const it of items) {
+      lines.push(`  · ${it.name}　${(it.bytes / 1024).toFixed(1)} KB　→ ${it.path}`)
+    }
+    for (const it of oversize) {
+      lines.push(
+        `  ⚠️ ${it.name}　${(it.bytes / 1024).toFixed(0)} KB —— 超过 ${SNIPPET_MAX_BYTES / 1024} KB 上限，**未采用**（⛔ 不是不存在）`,
+      )
+    }
+    lines.push(
+      `  用法：读一份说明书里对它的说明，再自己决定要不要 \`browser_slot eval --js "<片段内容>"\`。\n` +
+        `  ⛔ 片段**不会自动执行** —— 它只是文本。`,
+    )
+    return lines.join('\n') + '\n'
+  } catch {
+    return ''
+  }
 }
 
 // ───────────────────────────── 访问台账 ─────────────────────────────
