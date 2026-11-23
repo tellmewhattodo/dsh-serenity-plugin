@@ -599,17 +599,17 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
           }
           return [
             message,
-            `✓ 已自动激活（此前**无绑定**）：${active.dir} —— 后续工作写回该轨迹的 SESSION.md。`,
-            `  （判据：create 前无任何绑定 ⇒ 激活；有绑定则只建不夺，见下。）`,
+            `✓ Auto-activated (it had **no binding** before): ${active.dir} — subsequent work writes back to that trajectory's SESSION.md.`,
+            `  (Rule: no binding before create ⇒ activate; with a binding we only create, never take over — see below.)`,
           ].join('\n')
         }
 
         // ── 路径②：已有绑定 ⇒ 只建不夺 ＋ 显式告知"怎么激活它"──
         return [
           message,
-          `⚠ 本轨迹【未】被激活 —— 当前已绑定 ${priorBound}，保绑定优先（不夺走你正在用的轨迹）。`,
-          `  要激活它（并在它名下开一条会话）：用 cognitive_trajectory send-now 向 ${result.dirName} 投一条消息 ——`,
-          `  目标若没有活跃 dsh 会话，会自动创建一条并把「使用提示词 ＋ 你的消息」一并注入。`,
+          `⚠ This trajectory was NOT activated — currently bound to ${priorBound}; the existing binding wins (we do not take over the one you are using).`,
+          `  To activate it (and open a session under its name): use cognitive_trajectory send-now to send a message to ${result.dirName} —`,
+          `  if the target has no live dsh session, one is created and bound, with the usage prompt and your message injected together.`,
         ].join('\n')
       }
       case 'use': {
@@ -877,10 +877,10 @@ export function createCognitiveTrajectoryTool(ctx: Context): ReturnType<typeof d
           uid: cur,
           retired: true,
           note: cur === null
-            ? `未设定遗留 UID ⇒ 用编码指认（${parseTrajectoryCode(entry.dirName) ?? '无编码'}）。` +
-              `UID 写入已退役；要一条可指定的标识，请用 create --id 起新轨迹。`
-            : `遗留 UID = ${cur}（文件 ${UID_FILENAME}，只读兼容）——仍可用它指认本条轨迹。` +
-              `⚠️ 写入已退役：新轨迹用 create --id 指定编码。`,
+            ? `No legacy UID set ⇒ identify it by code (${parseTrajectoryCode(entry.dirName) ?? 'no code'}).` +
+              `UID writing is retired; for a handle you can name, start a new trajectory with create --id.`
+            : `Legacy UID = ${cur} (file ${UID_FILENAME}, read-only compat) — still usable to name this trajectory.` +
+              `⚠️ Writing it is retired: give new trajectories a code via create --id.`,
         }
       }
       case 'send-later': {

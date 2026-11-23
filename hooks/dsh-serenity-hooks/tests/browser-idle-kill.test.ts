@@ -113,18 +113,18 @@ describe('shouldForceReap：五道闸逐条', () => {
 describe('forceReapText：告知必须能让人行动', () => {
   it('三件事都得在：发生了什么／损失了什么／下次怎么办', () => {
     const t = forceReapText(3, 34, 1)
-    expect(t).toContain('强制回收')
-    expect(t).toContain('34 分钟')
+    expect(t).toContain('force-reclaimed')
+    expect(t).toContain('34m')
     // ② 没损失什么 —— 这条最容易被漏，而它决定对方要不要重登
-    expect(t).toContain('profile 目录保留')
-    expect(t).toContain('不需要重登')
+    expect(t).toContain('profile dir is kept')
+    expect(t).toContain('without re-login')
     // ③ 下次怎么避免
     expect(t).toContain('browser_slot hold')
     // ③ 怎么继续
     expect(t).toContain('acquire')
   })
 
-  it('🔴 不出现"槽位异常了"这类无法行动的话', () => {
+  it('🔴 不出现"槽位异常了"这类无法行动的话（异常 ≠ 可行动的指令）', () => {
     expect(forceReapText(3, 34, 1)).not.toContain('异常')
   })
 })

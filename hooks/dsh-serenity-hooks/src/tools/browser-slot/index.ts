@@ -103,9 +103,9 @@ function trajectoryNameFromCwd(root: string, cwd: string): string {
  */
 function row(v: SlotView): string {
   const g = STATE_GLYPH[v.state] ?? '?'
-  const who = v.state === 'free' ? '' : ` ${v.trajectory || v.sessionId || '(无归属)'}`
-  const res = v.sampled ? `cpu${v.cpuPct}% 内存${v.rssMb}M` : 'cpu— 内存—（本平台不采样）'
-  const extra = v.state === 'free' ? '' : ` 持${v.heldMin}m 闲${v.idleMin}m ${res}`
+  const who = v.state === 'free' ? '' : ` ${v.trajectory || v.sessionId || '(unowned)'}`
+  const res = v.sampled ? `cpu${v.cpuPct}% rss${v.rssMb}M` : 'cpu— rss—(not sampled on this platform)'
+  const extra = v.state === 'free' ? '' : ` held${v.heldMin}m idle${v.idleMin}m ${res}`
   const why = v.reasons.length > 0 ? `\n      ↳ ${v.reasons.join('；')}` : ''
   return `  ${g} ${v.label.padEnd(3)} :${v.port} ${v.resolution.padEnd(9)} ${v.state.padEnd(8)}${who}${extra}${why}`
 }
@@ -121,8 +121,8 @@ function needSlot(args: Record<string, unknown>): number {
   const n = normalizeSlotId(String(args.slot ?? ''))
   if (n === 0) {
     throw new Error(
-      `⛔ 需要 --slot <b1..b20>（当前收到 ${JSON.stringify(args.slot)}）。\n` +
-        `  ⇒ 页面操作必须指明槽位：先 \`browser_slot list\` 看你租的是哪个。`,
+      `⛔ needs --slot <b1..b20> (got ${JSON.stringify(args.slot)}).\n` +
+        `  ⇒ Page actions must name the slot: run \`browser_slot list\` to see which one you hold.`,
     )
   }
   return n
@@ -144,8 +144,8 @@ async function needTarget(
   const match = str(args.match)
   if (!target && !match) {
     throw new Error(
-      `⛔ 需要 --target=<targetId> 或 --match=<URL/标题子串>（先跑 targets 看清有什么）。\n` +
-        `  ⇒ --match 是子串匹配，命中唯一才动手；命中多个会拒绝并列全候选。`,
+      `⛔ needs --target=<targetId> or --match=<URL/title substring> (run targets first).\n` +
+        `  ⇒ --match is a substring match: it acts only on a unique hit; multiple hits are rejected with all candidates listed.`,
     )
   }
   return resolveTarget(root, n, sessionId, { target, match })
@@ -222,7 +222,7 @@ async function run(
     case 'acquire': {
       const want = typeof args.slot === 'string' ? normalizeSlotId(args.slot) : 0
       const res = await acquireSlot({ root, sessionId, trajectory, want })
-      if (!res.ok) return `⛔ 未租到槽位。\n${res.detail}`
+      if (!res.ok) return `⛔ acquire failed.\n${res.detail}`
       // 要求同步等到可用（opt-in）：CDP 就绪才算真的能用
       if (args.wait === true) {
         const ready = await waitSlotReady(root, res.slot)
@@ -232,7 +232,7 @@ async function run(
     }
     case 'release': {
       const n = normalizeSlotId(String(args.slot ?? ''))
-      if (n === 0) return '⛔ 需要槽位号：release 需要 --slot <b1..b20>'
+      if (n === 0) return '⛔ release needs --slot <b1..b20>'
       const r = releaseSlot(root, sessionId, n)
       // 🔴 只在**真的释放成功**时才提"写说明书"（owner 裁的触发点就是这里）。
       //    "本就无人占用"那条路径 released=false ⇒ ⛔ 一个字都不加。
@@ -240,17 +240,17 @@ async function run(
     }
     case 'reap': {
       const n = normalizeSlotId(String(args.slot ?? ''))
-      if (n === 0) return '⛔ 需要槽位号：reap 需要 --slot <b1..b20>'
+      if (n === 0) return '⛔ reap needs --slot <b1..b20>'
       const reason = typeof args.reason === 'string' && args.reason ? args.reason : 'manual reaping'
       return reapSlot(root, n, reason).detail
     }
     case 'hold': {
       // 🔴 保活（owner 2026-11-24 裁）：长下载／慢查询期间别被闲置强关误杀。
       const n = normalizeSlotId(String(args.slot ?? ''))
-      if (n === 0) return '⛔ 需要槽位号：hold 需要 --slot <b1..b20>'
+      if (n === 0) return '⛔ hold needs --slot <b1..b20>'
       const mins = num(args.holdFor)
       if (mins === undefined) {
-        return '⛔ 需要 --holdFor=<分钟>（保活多久）。例：--holdFor 60\n  ⛔ 不接受"永久保活" —— 那会把闲置强关架空。'
+        return '⛔ hold needs --holdFor=<minutes> (e.g. --holdFor 60). No permanent hold — that would defeat idle reclaim.'
       }
       const reason = typeof args.reason === 'string' ? args.reason : ''
       const r = holdSlot(root, sessionId, n, mins, reason)
@@ -259,7 +259,7 @@ async function run(
     case 'status': {
       const n = normalizeSlotId(String(args.slot ?? ''))
       const v = n > 0 ? slotStatus(root, n) : null
-      if (!v) return `⛔ 槽位号非法（1..${MAX_SLOTS}）。`
+      if (!v) return `⛔ invalid slot (1..${MAX_SLOTS})`
       return row(v).trimStart()
     }
     case 'list':
@@ -269,22 +269,22 @@ async function run(
       const bad = views.filter((v) => v.state === 'stale' || v.state === 'orphaned')
       const lines: string[] = []
       lines.push(
-        `浏览器槽位 ${views.length} 个（占用 ${occupied.length}，空闲 ${views.length - occupied.length}，异常 ${bad.length}）` +
-          (ledgerAgeMin > 0 ? `  台账 ${ledgerAgeMin} 分钟前更新` : ''),
+        `slots ${views.length} (busy ${occupied.length}, free ${views.length - occupied.length}, bad ${bad.length})` +
+          (ledgerAgeMin > 0 ? `  ledger ${ledgerAgeMin}m old` : ''),
       )
-      lines.push('  · 空闲   ✓ 占用   ! 异常(需处理)   ✗ 进程已死')
+      lines.push('  · free   ✓ leased   ! stale(act)   ✗ orphaned')
       if (occupied.length === 0) {
-        lines.push('  （全部空闲）')
+        lines.push('  (all free)')
       } else {
         for (const v of occupied) lines.push(row(v))
       }
       if (bad.length > 0) {
         lines.push('')
-        lines.push('🔴 异常槽位会由看守向**占用它的会话**注入提醒；若占用者已经不在，用 reap 回收：')
+        lines.push('🔴 The watchman notifies the OWNING session; if the owner is gone, reap it:')
         for (const v of bad) lines.push(`  browser_slot reap --slot ${v.label}`)
       }
       lines.push('')
-      lines.push('用法：acquire（自动挑空槽，可 --slot 指定）· release（用完必须交还）· status --slot b1')
+      lines.push('usage: acquire (auto-picks, or --slot) · release (always when done) · status --slot b1')
       // 🔴 P3 读数面（v1.138.1）：域名台账此前**只有写没有读** —— 那等于"记了但没人能看"，
       //    而"写了没人读"的机制无法被验，也无法被质疑。这里给它一个最小可见面。
       //    ⚠️ 只列**前 5 个**（按次数降序）：list 是高频调用的动作，⛔ 不能变成一份长报告。
@@ -295,12 +295,12 @@ async function run(
         const missing = visits.filter(([h]) => !hasDomainSkill(root, h)).length
         lines.push('')
         lines.push(
-          `域名台账 ${visits.length} 个站${missing > 0 ? `（${missing} 个还没有说明书）` : '（都有说明书）'}：`,
+          `domains ${visits.length}${missing > 0 ? ` (${missing} without notes)` : ' (all documented)'}:`,
         )
         for (const [h, v] of visits.slice(0, 5)) {
-          lines.push(`  ${hasDomainSkill(root, h) ? '✓' : '·'} ${h.padEnd(28)} ${v.opens} 次`)
+          lines.push(`  ${hasDomainSkill(root, h) ? '✓' : '·'} ${h.padEnd(28)} ${v.opens}x`)
         }
-        if (visits.length > 5) lines.push(`  ……另有 ${visits.length - 5} 个（BROWSER/_index.json）`)
+        if (visits.length > 5) lines.push(`  …${visits.length - 5} more (BROWSER/_index.json)`)
       }
       return lines.join('\n')
     }
@@ -311,9 +311,9 @@ async function run(
     case 'targets': {
       const n = needSlot(args)
       const list = await slotTargets(root, n, sessionId)
-      if (list.length === 0) return `槽位 ${slotLabel(n)}（端口 ${slotPort(n)}）上没有 target。`
+      if (list.length === 0) return `no targets on ${slotLabel(n)} (port ${slotPort(n)})`
       return (
-        `[browser_slot] ${list.length} 个 target（槽位 ${slotLabel(n)}，端口 ${slotPort(n)}）\n` +
+        `[browser_slot] ${list.length} target(s) on ${slotLabel(n)} (port ${slotPort(n)})\n` +
         list
           .map(
             (t: { type: string; id: string; title: string; url: string }) =>
@@ -325,7 +325,7 @@ async function run(
     case 'open': {
       const n = needSlot(args)
       const url = str(args.url)
-      if (!url) return '⛔ 需要 --url=<地址>'
+      if (!url) return '⛔ needs --url=<address>'
       const id = await slotOpen(root, n, sessionId, url)
       return `[browser_slot] targetId=${id}` + domainSkillTail(root, url, sessionId, n)
     }
@@ -340,13 +340,13 @@ async function run(
       const match = str(args.match)
       const missing: string[] = []
       if (n === 0) missing.push('--slot <b1..b20>')
-      if (!target && !match) missing.push('--target <targetId> 或 --match <URL/标题子串>（先跑 targets 看清有什么）')
-      if (!url) missing.push('--url <目的地地址>')
+      if (!target && !match) missing.push('--target <targetId> or --match <URL/title substring> (run targets first)')
+      if (!url) missing.push('--url <destination>')
       if (missing.length > 0) {
         return (
-          `⛔ goto 缺少 ${missing.length} 个参数，一次列全：\n` +
+          `⛔ goto missing ${missing.length} arg(s), all listed at once:\n` +
           missing.map((m) => `  · ${m}`).join('\n') +
-          `\n  ⚠️ goto 与 open 形状不同：open 只要 --slot ＋ --url；goto 还要指出**在哪个标签页**导航。`
+          `\n  ⚠️ goto differs from open: open needs only --slot + --url; goto also needs WHICH tab to navigate.`
         )
       }
       // TS 无法从 missing.length 收窄三者的类型 ⇒ 此处显式断言（上面已判过它们都非空）
@@ -360,7 +360,7 @@ async function run(
       const n = needSlot(args)
       const js = str(args.js)
       const target = await needTarget(root, n, sessionId, args)
-      if (!js) return '⛔ 需要 --js=<表达式>（例如 document.title）'
+      if (!js) return '⛔ needs --js=<expression> (e.g. document.title)'
       const v = await slotEval(root, n, sessionId, target, js, num(args.timeout))
       return typeof v === 'string' ? v : JSON.stringify(v, null, 2)
     }
@@ -385,7 +385,7 @@ async function run(
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const state = await slotReload(root, n, sessionId, target, str(args.script))
-      return `[browser_slot] reload 完成（readyState=${state || '?'}）`
+      return `[browser_slot] reload done (readyState=${state || '?'})`
     }
     case 'click': {
       const n = needSlot(args)
@@ -393,27 +393,27 @@ async function run(
       const text = str(args.text)
       const xy = parseXY(args.xy as never)
       if (!text && !xy) {
-        return `⛔ 需要 --text=<按钮可见文字> 或坐标（坐标三种写法都收）：\n${xyFormHint('xy')}\n  例如：--text=登录`;
+        return `⛔ needs --text=<visible label> or coordinates (all three forms accepted):\n${xyFormHint('xy')}\n  e.g. --text=Sign in`;
       }
       // 🔴 `--ref` 参与命中判定（2026-11-13 B 项）：给了 ref 就**必须**落在那个 ref 上，
       //    ⛔ 不给 ref 时只报告"落到了谁"（调用方没说要打谁，就没有"打错了"这回事）
       const refRaw = str(args.ref)
       const refId = refRaw === undefined ? undefined : (refToBackendId(refRaw) ?? undefined)
       if (refRaw !== undefined && refId === undefined) {
-        return `⛔ --ref 格式不对：${JSON.stringify(refRaw)}（要 \`ax\` 给出的 eNNN）`
+        return `⛔ malformed --ref: ${JSON.stringify(refRaw)} (want eNNN from \`ax\`)`
       }
       const { picked, dialogs, hit } = await slotClick(root, n, sessionId, target, { text, xy, ref: refId })
       // ⚠️ 回执只说"点了什么 / 落到谁身上"，⛔ 不说"点成功了" —— 界面该变成什么样由调用方判断
       const what = xy
         ? `@${xy.x},${xy.y}`
         : `<${picked.tag}> "${picked.text.slice(0, 60)}" @${picked.x},${picked.y}`
-      const base = `[browser_slot] clicked ${what}｜命中：${renderHit(hit)}`;
+      const base = `[browser_slot] clicked ${what}｜hit: ${renderHit(hit)}`;
       // 🔴 自动处理掉的弹窗必须报出来（⛔ 静默替你点了「取消」是另一种欺骗）
       if (dialogs.length === 0) return base
       const seen = dialogs
-        .map((d) => `  ⚠️ 自动处理弹窗 ${d.type || '(未知类型)'}：${JSON.stringify(d.message.slice(0, 100))} ⇒ ${d.accepted ? '已确定' : '已取消'}`)
+        .map((d) => `  ⚠️ auto-handled dialog ${d.type || '(unknown)'}: ${JSON.stringify(d.message.slice(0, 100))} ⇒ ${d.accepted ? 'accepted' : 'dismissed'}`)
         .join('\n')
-      return `${base}\n${seen}\n  （默认取消；要「确定」请单独用 dialog --accept —— OK 常意味着删除/支付/发布）`
+      return `${base}\n${seen}\n  (default = dismiss; use dialog --accept to confirm — OK often means delete/pay/publish)`
     }
     // ── ②b 高阶页面动作（v1.130.0）──────────────────────────────
     case 'ax': {
@@ -422,44 +422,44 @@ async function run(
       const { lines, total } = await slotAx(root, n, sessionId, target, num(args.limit) ?? 200)
       if (lines.length === 0) {
         return (
-          `[browser_slot] ax —— 无障碍树里没有可交互元素（target=${target}）。\n` +
-            `  ⇒ 可能页面还没渲染完（先 wait 一下），或这个页面真的只有静态文本（用 text 读）。`
+          `[browser_slot] ax — no interactive elements in the a11y tree (target=${target}).\n` +
+            `  ⇒ maybe not rendered yet (wait first), or the page is genuinely static text (use text).`
         )
       }
-      return `[browser_slot] ax —— ${lines.length} 个可交互元素（共 ${total} 个，ref 跨快照稳定）\n${renderAx(lines, total)}`;
+      return `[browser_slot] ax — ${lines.length} interactive element(s) (of ${total}; ref stays stable across snapshots)\n${renderAx(lines, total)}`;
     }
     case 'press': {
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const k = str(args.key)
-      if (!k) return '⛔ 需要 --key=<按键>（例如 Enter ／ Escape ／ Control+A ／ Meta+Shift+Enter）';
+      if (!k) return '⛔ needs --key=<key> (e.g. Enter / Escape / Control+A / Meta+Shift+Enter)';
       const { stroke, sent } = await slotPress(root, n, sessionId, target, k, num(args.times) ?? 1);
       return (
-        `[browser_slot] press ${stroke.key}（code=${stroke.code}，modifiers=${stroke.modifiers}）× ${sent}\n` +
-          `  ⚠️ 回执只说「发了几个按键」，⛔ 不说「界面响应了」 —— 效果请用 ax ／ eval 再读一次。`
+        `[browser_slot] press ${stroke.key} (code=${stroke.code}, modifiers=${stroke.modifiers}) × ${sent}\n` +
+          `  ⚠️ This only reports keys SENT, ⛔ not that the UI responded — re-read with ax / eval.`
       );
     }
     case 'type': {
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const text = typeof args.text === 'string' ? args.text : undefined;
-      if (text === undefined || text === '') return '⛔ 需要 --text=<要打的原文>（作用于当前焦点；要设值用 fill）';
+      if (text === undefined || text === '') return '⛔ needs --text=<exact text> (acts on current focus; use fill to set a value)';
       await slotType(root, n, sessionId, target, text);
-      return `[browser_slot] type ${JSON.stringify(text.slice(0, 40))}（已插入 ${[...text].length} 个字符；⛔ 未触发 change —— blur 才触发）`;
+      return `[browser_slot] type ${JSON.stringify(text.slice(0, 40))} (inserted ${[...text].length} chars; ⛔ no change event — blur triggers it)`;
     }
     case 'fill': {
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const id = needBackendId(args);
       const value = typeof args.value === 'string' ? args.value : undefined;
-      if (value === undefined) return '⛔ 需要 --value=<要设成的值>（空串可以：--value=）';
+      if (value === undefined) return '⛔ needs --value=<value> (empty string allowed: --value=)';
       const r = await slotFill(root, n, sessionId, target, id, value);
-      if (!r.ok) return `⛔ fill 失败（<${r.tag || '?'}>）：${r.why ?? '未知原因'}`;
+      if (!r.ok) return `⛔ fill failed (<${r.tag || '?'}>): ${r.why ?? 'unknown reason'}`;
       // 🔴 只报读回来的值：设值没有可靠成功信号
       const same = r.readBack === value;
       return (
-        `[browser_slot] fill <${r.tag}> 读回=${JSON.stringify(r.readBack.slice(0, 80))}` +
-          (same ? '  ✓ 与给的值一致' : '  ⚠️ 与给的值**不一致** —— 该控件可能做了格式化/拒绝')
+        `[browser_slot] fill <${r.tag}> read-back=${JSON.stringify(r.readBack.slice(0, 80))}` +
+          (same ? '  ✓ matches the value given' : '  ⚠️ does NOT match — the control may reformat or reject it')
       );
     }
     case 'scroll': {
@@ -469,53 +469,53 @@ async function run(
       const xy = parseXY(args.xy as never);
       const toRaw = str(args.to);
       const to = toRaw === 'top' || toRaw === 'bottom' ? toRaw : undefined;
-      if (!refStr && !xy && !to) return '⛔ 需要 --ref=<eNNN> ／ --xy=<x,y> ／ --to=<top|bottom> 之一';
+      if (!refStr && !xy && !to) return '⛔ needs one of --ref=<eNNN> / --xy=<x,y> / --to=<top|bottom>';
       const ref = refStr ? needBackendId(args) : undefined;
       const { scrolledY, via, why } = await slotScroll(root, n, sessionId, target, { ref, xy, to, deltaY: num(args.delta) });
       const viaLine =
         via === 'wheel'
-          ? '（真实 wheel 事件）'
-          : `（⚠️ 回落 JS 滚动 —— ${why ?? ''}；本次**没有产生 wheel 事件**，靠 wheel 触发的懒加载不会启动）`;
-      return `[browser_slot] scroll → scrollY 变化 ${scrolledY > 0 ? '+' : ''}${scrolledY}px ${viaLine}`;
+          ? '(real wheel event)'
+          : `(⚠️ fell back to JS scroll — ${why ?? ''}; NO wheel event was emitted, so wheel-triggered lazy loading will not start)`;
+      return `[browser_slot] scroll → scrollY ${scrolledY > 0 ? '+' : ''}${scrolledY}px ${viaLine}`;
     }
     case 'wait': {
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const forRaw = str(args.for);
-      if (!forRaw) return '⛔ 需要 --for=<selector:…|text:…|url:…|gone:…|js:…>（前缀必填）';
+      if (!forRaw) return '⛔ needs --for=<selector:…|text:…|url:…|gone:…|js:…> (prefix required)';
       const { spec, waitedMs } = await slotWait(root, n, sessionId, target, forRaw, num(args.timeout) ?? 15_000);
-      return `[browser_slot] wait ${spec.kind} 成立（等了 ${waitedMs}ms）`;
+      return `[browser_slot] wait ${spec.kind} satisfied (waited ${waitedMs}ms)`;
     }
     case 'drag': {
       const n = needSlot(args);
       const target = await needTarget(root, n, sessionId, args);
       const from = parseXY(args.from as never);
       const to = parseXY(args.to as never);
-      if (!from || !to) return `⛔ 需要 --from 与 --to（坐标三种写法都收）：\n${xyFormHint('from')}${xyFormHint('to')}\n  先 ax 拿 ref，再用 scroll/eval 量坐标`;
+      if (!from || !to) return `⛔ needs --from and --to (all three coordinate forms accepted):\n${xyFormHint('from')}${xyFormHint('to')}\n  get a ref via ax, then measure coords with scroll/eval`;
       const steps = num(args.steps) ?? 12;
       await slotDrag(root, n, sessionId, target, from, to, steps);
-      return `[browser_slot] drag ${from.x},${from.y} → ${to.x},${to.y}（分 ${steps} 步；⛔ 回执不说拖成功）`;
+      return `[browser_slot] drag ${from.x},${from.y} → ${to.x},${to.y} (${steps} steps; ⛔ this does not report success)`;
     }
     case 'upload': {
       const n = needSlot(args);
       const target = await needTarget(root, n, sessionId, args);
       const id = needBackendId(args);
       const list = Array.isArray(args.file) ? (args.file as unknown[]) : typeof args.file === 'string' ? [args.file] : [];
-      if (list.length === 0) return '⛔ 需要 --file=<CCC 内路径>（可重复；⛔ 不接受 CCC 根外路径）';
+      if (list.length === 0) return '⛔ needs --file=<path inside CCC> (repeatable; paths outside the CCC root are refused)';
       const abs = list.filter((x): x is string => typeof x === 'string' && x !== '').map((f) => resolveUploadPath(root, f));
-      if (abs.length === 0) return '⛔ --file 里没有可用路径';
+      if (abs.length === 0) return '⛔ no usable path in --file';
       const r = await slotUpload(root, n, sessionId, target, id, abs);
-      return `[browser_slot] upload ${r.files.length} 个文件 → ref ${str(args.ref) ?? ''}\n  ${r.files.map((f) => f.replace(root + '/', '')).join('\n  ')}`;
+      return `[browser_slot] upload ${r.files.length} file(s) → ref ${str(args.ref) ?? ''}\n  ${r.files.map((f) => f.replace(root + '/', '')).join('\n  ')}`;
     }
     case 'downloads': {
       const n = needSlot(args);
       const target = await needTarget(root, n, sessionId, args);
       const { dir, files } = await slotDownloads(root, n, sessionId, target);
-      const body = files.length === 0 ? '（目录是空的）' : files.map((f) => `  ${f.name}  ${Math.round(f.bytes / 1024)} KB`).join('\n');
+      const body = files.length === 0 ? '(directory is empty)' : files.map((f) => `  ${f.name}  ${Math.round(f.bytes / 1024)} KB`).join('\n');
       return (
-        `[browser_slot] 下载捕获目录：${dir}\n${body}\n` +
-          `  ⇒ 触发下载用 click（点带 download 的链接会被拒）或 eval；之后**再调一次 downloads** 看新文件。\n` +
-          `  ⚠️ 目录不自动清理 —— 清掉的是证据。`
+        `[browser_slot] download capture dir: ${dir}\n${body}\n` +
+          `  ⇒ trigger a download with click (links with download attr are refused) or eval; then call downloads again to see new files.\n` +
+          `  ⚠️ The dir is never auto-cleaned — cleaning it destroys evidence.`
       );
     }
     case 'dialog': {
@@ -523,10 +523,10 @@ async function run(
       const target = await needTarget(root, n, sessionId, args);
       const accept = args.accept === true;
       const r = await slotDialog(root, n, sessionId, target, accept, str(args.prompt));
-      if (!r.hadDialog) return '[browser_slot] dialog —— 此刻没有弹窗（正常状态，不报错）';
+      if (!r.hadDialog) return '[browser_slot] dialog — no dialog open right now (normal, not an error)';
       return (
-        `[browser_slot] dialog ${r.type || '(未知类型)'}：${JSON.stringify(r.message.slice(0, 120))}\n` +
-          `  ${r.accepted ? '✓ 已接受（确定）' : '✓ 已拒绝（取消）'}`
+        `[browser_slot] dialog ${r.type || '(unknown)'}: ${JSON.stringify(r.message.slice(0, 120))}\n` +
+          `  ${r.accepted ? '✓ accepted (OK)' : '✓ dismissed (Cancel)'}`
       );
     }
     case 'close': {
@@ -542,24 +542,24 @@ async function run(
       const exts = slotExtList(root)
       if (exts.length === 0) {
         return (
-          `本 CCC 还没有任何扩展。\n` +
-          `  写一个：在 <CCC 根>/${EXT_DIR_REL}/ 下放一个 .ts 文件，文件名即扩展名。\n` +
-          `  契约：stdin 收 {slot,port,cccRoot,args}；stdout **最后一个非空行**给 {"ok":true,"result":…}。\n` +
-          `  ⚠️ ACC 只 spawn、⛔ 从不 import —— 你的语法错不会放倒宿主。`
+          `No browser extensions in this CCC yet.\n` +
+          `  To add one: drop a .ts file under <CCC root>/${EXT_DIR_REL}/ — the filename is the extension name.\n` +
+          `  Contract: stdin gets {slot,port,cccRoot,args}; stdout's LAST non-empty line must be {"ok":true,"result":…}.\n` +
+          `  ⚠️ ACC only spawns, ⛔ never imports — your syntax error cannot take down the host.`
         )
       }
       return (
-        `本 CCC 的浏览器扩展 ${exts.length} 个（<CCC 根>/${EXT_DIR_REL}/）：\n` +
+        `browser extensions in this CCC: ${exts.length} (<CCC root>/${EXT_DIR_REL}/):\n` +
         exts.map((e: { name: string }) => `  · ${e.name}`).join('\n') +
-        `\n\n调用：browser_slot ext --slot b1 --name <名> [--earg key=value …（可重复）]`
+        `\n\ncall: browser_slot ext --slot b1 --name <name> [--earg key=value … (repeatable)]`
       )
     }
     case 'ext': {
       const n = needSlot(args)
       const name = str(args.name)
-      if (!name) return '⛔ 需要 --name=<扩展名>（先跑 ext-list）'
+      if (!name) return '⛔ needs --name=<extension> (run ext-list first)'
       const res = await slotExt(root, n, sessionId, name, extArgs(args))
-      if (!res.ok) return `⛔ 扩展「${name}」失败（${res.code ?? 'unknown'}）：\n${res.error ?? ''}`
+      if (!res.ok) return `⛔ extension "${name}" failed (${res.code ?? 'unknown'}):\n${res.error ?? ''}`
       return typeof res.result === 'string' ? res.result : JSON.stringify(res.result ?? null, null, 2)
     }
   }

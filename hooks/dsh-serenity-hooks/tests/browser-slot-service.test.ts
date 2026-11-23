@@ -113,7 +113,7 @@ describe('acquire：同会话复用，⛔ 不租第二个', () => {
     seed(2, { sessionId: 'other-session' })
     const res = await acquireSlot({ root, sessionId: SESS, trajectory: TRAJ, want: 2 })
     expect(res.ok).toBe(false)
-    expect(res.detail).toContain('已被占用')
+    expect(res.detail).toContain('is taken')
     // 台账未变：占着的人还是别人
     expect(readLedger().leases['2']?.sessionId).toBe('other-session')
   })
@@ -122,7 +122,7 @@ describe('acquire：同会话复用，⛔ 不租第二个', () => {
     for (let i = 1; i <= 20; i++) seed(i, { sessionId: `s${i}` })
     const res = await acquireSlot({ root, sessionId: SESS, trajectory: TRAJ })
     expect(res.ok).toBe(false)
-    expect(res.detail).toContain('20 个槽位已全部占用')
+    expect(res.detail).toContain('All 20 slots are taken')
     expect(res.detail).toContain('release')
   })
 })
@@ -225,7 +225,7 @@ describe('release：只许释放自己的', () => {
     seed(3, { sessionId: 'other-session' })
     const r = releaseSlot(root, SESS, 3)
     expect(r.ok).toBe(false)
-    expect(r.detail).toContain('不属于你')
+    expect(r.detail).toContain('is not yours')
     expect(readLedger().leases['3']?.sessionId).toBe('other-session')
   })
 
@@ -239,7 +239,7 @@ describe('release：只许释放自己的', () => {
   it('⑥ 释放一个本就空的槽位 ⇒ 视为成功且说明原因（⛔ 报错 —— 那不是错误）', () => {
     const r = releaseSlot(root, SESS, 7)
     expect(r.ok).toBe(true)
-    expect(r.detail).toContain('本就无人占用')
+    expect(r.detail).toContain('was already free')
   })
 })
 
@@ -333,14 +333,14 @@ describe('🔴 反向注入闭环（owner 要的那条）', () => {
     const out = await nudgeStaleSlots(root, async () => ({ ok: true, detail: 'ok' }), fast)
     expect(out.nudged.length).toBe(1)
     expect(out.nudged[0]!.delivered).toBe(false)
-    expect(out.nudged[0]!.detail).toContain('无法注入')
+    expect(out.nudged[0]!.detail).toContain('cannot inject')
   })
 })
 
 describe('页面层归属守卫（déjà vu：以前"给个端口就能操作"）', () => {
   it('㉑ 别人的槽位 ⇒ 硬拒（变异：去掉 assertSlotOwned ⇒ 这条必须红）', () => {
     seed(4, { sessionId: 'other-session' })
-    expect(() => assertSlotOwned(root, 4, SESS)).toThrow('不是你租的')
+    expect(() => assertSlotOwned(root, 4, SESS)).toThrow('is not yours')
     // 正控：自己的槽位不抛
     expect(() => assertSlotOwned(root, 4, 'other-session')).not.toThrow()
   })
@@ -351,7 +351,7 @@ describe('页面层归属守卫（déjà vu：以前"给个端口就能操作"�
   })
 
   it('㉓ 无人占用的槽位 ⇒ 报"先 acquire"，且⛔ 自动替你租', () => {
-    expect(() => assertSlotOwned(root, 8, SESS)).toThrow('无人占用')
+    expect(() => assertSlotOwned(root, 8, SESS)).toThrow('is not leased')
     // 判据 = 副作用：台账里没有多出 b8
     expect(readLedger().leases['8']).toBeUndefined()
   })

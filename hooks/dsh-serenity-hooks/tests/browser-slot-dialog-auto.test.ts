@@ -52,7 +52,7 @@ describe('原生弹窗自动处理（D1~D4）', () => {
   })
 
   it('D4 工具回执必须报出自动处理掉的弹窗（静默点「取消」是另一种欺骗）', () => {
-    expect(tool).toContain('自动处理弹窗')
+    expect(tool).toContain('auto-handled dialog')
     expect(tool).toContain('dialogs.length === 0')
   })
 

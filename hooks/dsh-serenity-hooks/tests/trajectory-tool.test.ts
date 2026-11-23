@@ -326,8 +326,8 @@ describe('cognitive_trajectory：create', () => {
   it('🆕 路径①：**无绑定** ⇒ 直接激活（写 activate 绑定 + 正文告知已自动激活）', async () => {
     writeSession(A_DIR)
     const out = (await run({ action: 'create', desc: 'fresh', summary: '概' })) as string
-    expect(out).toContain('已自动激活')
-    expect(out).toContain('此前**无绑定**')
+    expect(out).toContain('Auto-activated')
+    expect(out).toContain('no binding')
     const rec = bindings().sessions['dsh-1']
     expect(rec?.action).toBe('activate')
     expect(rec?.note).toContain('auto-activated on create (no prior binding)')
@@ -342,7 +342,9 @@ describe('cognitive_trajectory：create', () => {
     expect(before).toBe(A_DIR)
 
     const out = (await run({ action: 'create', desc: 'later-work', summary: '概' })) as string
-    expect(out).toContain('未')
+    // 🔴 原断言是 `toContain('未')` —— 一个汉字当判据，换语言即失效，且本身就太弱
+    //    （任何含"未"的字都算过）。改成钉**那句话的语义**：明确说了"没有被激活"。
+    expect(out).toContain('was NOT activated')
     expect(out).toContain('send-now')
     expect(out).toContain(before as string) // 正文点名当前绑定是谁
     // 🔴 核心断言：**绑定没被夺走**（这正是 U6 要保的行为，不能被本次改动破坏）

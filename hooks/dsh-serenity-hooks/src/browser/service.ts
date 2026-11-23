@@ -297,8 +297,8 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
       state: 'leased',
       reused: true,
       detail:
-        `你在槽位 ${slotLabel(existing.slot)}（端口 ${slotPort(existing.slot)}）上已有占用，已复用。\n` +
-        `  ⛔ 不要再租第二个 —— 一次会话占两个槽位是本次事故的形状（租了忘记退）。\n` +
+        `You already hold slot ${slotLabel(existing.slot)} (port ${slotPort(existing.slot)}); reusing it.\n` +
+        `  ⛔ Do not lease a second one — two slots per session is exactly the shape of the incident (leased and forgotten).\n` +
         launched.detail,
     }
   }
@@ -334,9 +334,9 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
       state: 'free',
       reused: false,
       detail:
-        `20 个槽位已全部占用，⛔ 拒绝再租。\n` +
-        `  ⇒ 先看谁占着：\`browser_slot list\`；不用了的用 \`release <槽>\` 交还。\n` +
-        `  ⚠️ 槽位满通常不是"需求多"，而是**有人忘了 release** —— 看 idleMin 最大的那一行。`,
+        `All 20 slots are taken, ⛔ refusing to lease another.\n` +
+        `  ⇒ See who holds them: \`browser_slot list\`; hand one back with \`release <slot>\`.\n` +
+        `  ⚠️ A full house is usually not "high demand" but **someone forgot to release** — look at the largest idleMin row.`,
     }
   }
   if (picked < 0) {
@@ -345,7 +345,7 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
       slot: -picked,
       state: 'leased',
       reused: false,
-      detail: `槽位 ${slotLabel(-picked)} 已被占用（⛔ 不抢占）。用 \`browser_slot list\` 看占用者，或省略槽位号让系统挑。`,
+      detail: `Slot ${slotLabel(-picked)} is taken (⛔ not preempting). Use \`browser_slot list\` to see the owner, or omit --slot to let the system pick.`,
     }
   }
 
@@ -377,10 +377,9 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
     state: 'leased',
     reused: false,
     detail:
-      `已租下槽位 ${slotLabel(n)}（端口 ${slotPort(n)}，${r.width}x${r.height}）。\n` +
       `${launched.detail}\n` +
-      `🔴 **用完必须交还**：\`browser_slot release ${slotLabel(n)}\`\n` +
-      `  忘了交还的话，看守会在它闲置超过阈值时来提醒你 —— 那时你可能已经换了话题。`,
+      `🔴 **You must hand it back**: \`browser_slot release ${slotLabel(n)}\`\n` +
+      `  If you forget, the watchman will nudge you once it sits idle — by then you may have moved on.`,
   }
 }
 
@@ -416,10 +415,10 @@ function ensureRunning(root: string, n: number, pidHint: number): { ok: boolean;
   const paths = slotPaths(n)
   const live = findPidsByProfile(paths.profile)
   if (live.length > 0) {
-    return { ok: true, pid: live[0]!, detail: `槽位 ${slotLabel(n)} 进程已在（pid ${live[0]}）` }
+    return { ok: true, pid: live[0]!, detail: `Slot ${slotLabel(n)} already running (pid ${live[0]})` }
   }
   if (pidHint > 0 && existsSync(`/proc/${pidHint}`)) {
-    return { ok: true, pid: pidHint, detail: `槽位 ${slotLabel(n)} 进程已在（pid ${pidHint}）` }
+    return { ok: true, pid: pidHint, detail: `Slot ${slotLabel(n)} already running (pid ${pidHint})` }
   }
   const wait = backoffWaitMs(root, n, Date.now())
   if (wait > 0) {
@@ -427,9 +426,9 @@ function ensureRunning(root: string, n: number, pidHint: number): { ok: boolean;
       ok: false,
       pid: 0,
       detail:
-        `槽位 ${slotLabel(n)} 处于**启动退避**中（还需 ${Math.ceil(wait / 1000)} 秒）。\n` +
-        `  🔴 起因：该槽位连续启动失败。⇒ 反复重试会白付一次完整复检（数秒），且**读数上分不出来**。\n` +
-        `  ⇒ 先查根因：\`browser_slot doctor\` 看 pidDrift 与日志路径；或换一个槽位。`,
+        `Slot ${slotLabel(n)} is in **launch backoff** (${Math.ceil(wait / 1000)}s left).\n` +
+        `  🔴 Cause: this slot failed to start repeatedly. ⇒ Retrying pays a full re-check again (seconds) and **is indistinguishable in the readings**.\n` +
+        `  ⇒ Find the root cause first: \`browser_slot doctor\` for pidDrift and log paths; or use another slot.`,
     }
   }
   const launched = launchSlot(n)
@@ -438,7 +437,7 @@ function ensureRunning(root: string, n: number, pidHint: number): { ok: boolean;
     return {
       ok: false,
       pid: 0,
-      detail: `${launched.detail}\n  ⇒ 已记一次启动失败，下次允许尝试在 ${Math.ceil(w / 1000)} 秒后。`,
+      detail: `${launched.detail}\n  ⇒ One launch failure recorded; next attempt allowed in ${Math.ceil(w / 1000)}s.`,
     }
   }
   clearLaunchFailure(root, n)
@@ -496,15 +495,15 @@ export function releaseSlot(
   if (!lease) {
     // 🔴 `released: false` 是**结构性**判据，⛔ 不是文案匹配：什么都没发生，
     //    所以释放后的"说说你的经验"提示**不该出现**（那条路径上提示它 = 凭空催人写文档）。
-    return { ok: true, detail: `槽位 ${slotLabel(target)} 本就无人占用（无需释放）。`, released: false }
+    return { ok: true, detail: `Slot ${slotLabel(target)} was already free (nothing to release).`, released: false }
   }
   // 🔴 归属校验：只能释放自己的。⛔ 允许释放别人的会让"互相踩"变成合法动作。
   if (sessionId && lease.sessionId && lease.sessionId !== sessionId) {
     return {
       ok: false,
       detail:
-        `槽位 ${slotLabel(target)} 不属于你（占用者：${lease.trajectory || lease.sessionId || '未知'}）。\n` +
-        `  ⛔ 不代别人释放 —— 它可能正在用。若确信它已废弃，用 \`browser_slot reap <槽>\`（看守动作，会记录原因）。`,
+        `Slot ${slotLabel(target)} is not yours (owner: ${lease.trajectory || lease.sessionId || 'unknown'}).\n` +
+        `  ⛔ Not releasing on someone else's behalf — they may be using it. If you are sure it is abandoned, use \`browser_slot reap <slot>\` (watchman action, records a reason).`,
       released: false,
     }
   }
@@ -520,7 +519,7 @@ export function releaseSlot(
   sampleCache.delete(target)
   return {
     ok: true,
-    detail: `已释放槽位 ${slotLabel(target)}。${destroyed.detail}`,
+    detail: `Released slot ${slotLabel(target)}. ${destroyed.detail}`,
     released: true,
   }
 }
@@ -567,7 +566,7 @@ export function reapSlot(root: string, target: number, reason: string): { ok: bo
   sampleCache.delete(target)
   return {
     ok: true,
-    detail: `已回收槽位 ${slotLabel(target)}（原因：${reason}）。${destroyed.detail}`,
+    detail: `Reclaimed slot ${slotLabel(target)} (reason: ${reason}). ${destroyed.detail}`,
   }
 }
 
@@ -636,7 +635,7 @@ export async function forceReapIdleSlots(
     if (!verdict) continue
     // 🔴 复用 reapSlot：它已经做全了「杀进程 ＋ 删租约 ＋ 清 identity ＋ 清采样缓存」。
     //    ⛔ 不在这里再写一遍 —— 两套清理逻辑必然分叉（本仓栽过多次）。
-    const res = reapSlot(root, lease.slot, `闲置 ${verdict.idleMin} 分钟（已提醒 ${verdict.nudges} 次）`)
+    const res = reapSlot(root, lease.slot, `idle ${verdict.idleMin}m (nudged ${verdict.nudges}x)`)
     // 台账留痕（⚠️ 租约已被删，所以写的是 recentKills，不是 leases）
     recordRecentKill(lease.slot, lease.trajectory, verdict.idleMin, verdict.nudges, res.ok)
     const target = lease.trajectory || lease.sessionId
@@ -652,7 +651,7 @@ export async function forceReapIdleSlots(
         deliverDetail = String((err as Error)?.message ?? err)
       }
     } else {
-      deliverDetail = '该槽位没有归属轨迹（sessionId/trajectory 皆空）⇒ 无法告知，已在台账留痕'
+      deliverDetail = 'This slot has no owning trajectory (sessionId and trajectory both empty) ⇒ cannot notify; the kill is still recorded in the ledger'
     }
     out.push({
       slot: lease.slot,
@@ -690,21 +689,21 @@ export function holdSlot(
   reason: string,
 ): { ok: boolean; detail: string } {
   if (!Number.isFinite(minutes) || minutes <= 0) {
-    return { ok: false, detail: `hold 需要正的分钟数（收到 ${minutes}）` }
+    return { ok: false, detail: `hold needs a positive number of minutes (got ${minutes})` }
   }
   if (minutes > HOLD_MAX_MINUTES) {
     return {
       ok: false,
       detail:
-        `hold 单次最多 ${HOLD_MAX_MINUTES} 分钟（收到 ${minutes}）。\n` +
-        `  ⛔ 不让它变成"永久豁免" —— 那等于把闲置强关架空。需要更久就到期前再续一次。`,
+        `hold is capped at ${HOLD_MAX_MINUTES} minutes per call (got ${minutes}).\n` +
+        `  ⛔ Never a permanent exemption — that would defeat idle reclaim. Renew before it expires if you need longer.`,
     }
   }
   const ledger = readLedger()
   const lease = ledger.leases[String(target)]
-  if (!lease) return { ok: false, detail: `槽位 ${slotLabel(target)} 无人占用（没有可保活的租约）。` }
+  if (!lease) return { ok: false, detail: `Slot ${slotLabel(target)} is not leased (nothing to hold).` }
   if (sessionId && lease.sessionId && lease.sessionId !== sessionId) {
-    return { ok: false, detail: `槽位 ${slotLabel(target)} 不属于你，⛔ 不能替别人保活。` }
+    return { ok: false, detail: `Slot ${slotLabel(target)} is not yours; ⛔ cannot hold on someone else's behalf.` }
   }
   const until = Date.now() + minutes * 60_000
   withLedger((lg) => {
@@ -715,10 +714,10 @@ export function holdSlot(
   return {
     ok: true,
     detail:
-      `已保活槽位 ${slotLabel(target)} 至 ${new Date(until).toLocaleTimeString('zh-CN')}（${minutes} 分钟）。\n` +
-      `  · 保活期内**不判闲置**，但仍判进程死活／CPU／内存。\n` +
-      `  · 原因：${reason || '(未填)'}\n` +
-      `  · 到期后若仍无动作，照常进入提醒→强关流程。`,
+      `Held slot ${slotLabel(target)} until ${new Date(until).toLocaleTimeString('en-GB')} (${minutes} min).\n` +
+      `  · Idle is NOT judged while held, but process liveness / CPU / rss still are.\n` +
+      `  · Reason: ${reason || '(none given)'}\n` +
+      `  · If still idle when it expires, the normal nudge→force-reclaim flow resumes.`,
   }
 }
 
@@ -764,7 +763,7 @@ export async function nudgeStaleSlots(
         state,
         trajectory: '',
         delivered: false,
-        detail: '该槽位没有归属轨迹（sessionId/trajectory 皆空）⇒ 无法注入，请人工处置',
+        detail: 'This slot has no owning trajectory (sessionId and trajectory both empty) ⇒ cannot inject; needs manual handling',
       })
       continue
     }
@@ -860,15 +859,15 @@ export function assertSlotOwned(root: string, slot: number, sessionId: string): 
   const lease = readLedger().leases[String(slot)]
   if (!lease) {
     throw new Error(
-      `槽位 ${slotLabel(slot)} 当前无人占用 ⇒ 先 \`browser_slot acquire\` 租一个再用。\n` +
-        `  ⛔ 不自动替你租：租了不还就是 2026-11-09 那次 36 小时功耗事故的形状。`,
+      `Slot ${slotLabel(slot)} is not leased right now ⇒ \`browser_slot acquire\` one first.\n` +
+        `  ⛔ Not auto-leasing for you: lease-and-forget is exactly the shape of the 2026-11-09 36-hour power incident.`,
     )
   }
   if (sessionId === '' || lease.sessionId !== sessionId) {
     throw new Error(
-      `槽位 ${slotLabel(slot)} 不是你租的（占用者 ${lease.sessionId || '(无)'}）⇒ 拒绝操作。\n` +
-        `  ⇒ 自己的槽位用 \`browser_slot list\` 查；要新开一个用 \`browser_slot acquire\`。\n` +
-        `  ⚠️ 硬拒绝是刻意的：放行会让"谁在动谁的浏览器"变成没有读数可查的事。`,
+      `Slot ${slotLabel(slot)} is not yours (owner ${lease.sessionId || '(none)'}) ⇒ refusing the operation.\n` +
+        `  ⇒ Find your own with \`browser_slot list\`; to open a new one use \`browser_slot acquire\`.\n` +
+        `  ⚠️ A hard refusal is deliberate: allowing it would make "who drives whose browser" unanswerable.`,
     )
   }
 }
@@ -898,8 +897,8 @@ export async function resolveTarget(
 ): Promise<string> {
   if (!opts.target && !opts.match) {
     throw new Error(
-      `⛔ 需要 --target=<targetId> 或 --match=<URL 或标题子串>。\n` +
-        `  ⇒ 先 \`browser_slot targets --slot b1\` 看有什么，或直接给 --match=example.com`,
+      `⛔ needs --target=<targetId> or --match=<URL or title substring>.\n` +
+        `  ⇒ Run \`browser_slot targets --slot b1\` to see what is there, or just pass --match=example.com`,
     )
   }
   // 身份直通：⛔ 不去列 targets（少一次 CDP 往返，也避免"列的时候恰好变了"）
@@ -911,14 +910,14 @@ export async function resolveTarget(
   const pages = list.filter((t) => t.type === 'page')
   if (res.reason === 'not-found') {
     throw new Error(
-      `⛔ 没有页面匹配「${opts.match}」（匹配 url 或 title，大小写不敏感）。\n` +
-        `  ⇒ 当前 ${pages.length} 个页面：\n${renderHits(pages)}`,
+      `⛔ No page matches "${opts.match}" (matches url or title, case-insensitive).\n` +
+        `  ⇒ ${pages.length} page(s) currently:\n${renderHits(pages)}`,
     )
   }
   // ambiguous
   throw new Error(
-    `⛔ 「${opts.match}」匹配到 ${res.hits.length} 个页面 —— 拒绝替你选一个（选错会产出一张"看起来对、内容却属于别人"的图）。\n` +
-      `  ⇒ 换个更长的子串，或用 --target=<id> 点名：\n${renderHits(res.hits)}`,
+    `⛔ "${opts.match}" matched ${res.hits.length} pages — refusing to pick one for you (a wrong pick yields an image that looks right but belongs to someone else).\n` +
+      `  ⇒ Use a longer substring, or name one with --target=<id>:\n${renderHits(res.hits)}`,
   )
 }
 
@@ -946,7 +945,7 @@ export async function slotClick(
 }> {
   assertSlotOwned(root, slot, sessionId)
   if (!opts.text && !opts.xy) {
-    throw new Error('⛔ 需要 --text=<按钮可见文字> 或坐标（先 targets 拿 targetId）')
+    throw new Error('⛔ needs --text=<visible label> or coordinates (run targets first for a targetId)')
   }
 
   // 坐标直通：不必采集整页（省一次大对象往返）——
@@ -958,15 +957,15 @@ export async function slotClick(
     if (hit.kind === 'offscreen' || hit.kind === 'blank') {
       // 不点：点一个不存在的落点是纯副作用（事件发出去了，责任还在我们账上）
       throw new Error(
-        `⛔ 不点：${renderHit(hit)}\n` +
-          `  ⇒ 坐标 ${opts.xy.x},${opts.xy.y}。先用 \`ax\` 拿 ref（更稳）或 \`scroll\` 把目标滚进视口。`,
+        `⛔ Not clicking: ${renderHit(hit)}\n` +
+          `  ⇒ coords ${opts.xy.x},${opts.xy.y}. Get a ref via \`ax\` first (more reliable), or \`scroll\` the target into the viewport.`,
       )
     }
     if (hit.kind === 'blocked') {
       throw new Error(
-        `⛔ 不点：${renderHit(hit)}\n` +
-          `  ⇒ 被挡住时点下去会**执行另一个元素**的处理逻辑（而回执若是"clicked"就无从发现）。\n` +
-          `  ⇒ 出路：先用 \`ax\` 看那一层是什么（弹层／固定头／遮罩），关掉它；或改用 \`--ref\` 点名目标。`,
+        `⛔ Not clicking: ${renderHit(hit)}\n` +
+          `  ⇒ When something covers it, the click runs ANOTHER element's handler (and a receipt saying "clicked" would never reveal it).\n` +
+          `  ⇒ Fix: use \`ax\` to see what that layer is (overlay / sticky header / mask) and close it; or name the target with \`--ref\`.`,
       )
     }
     const r = await clickAt(slot, targetId, opts.xy.x, opts.xy.y)
@@ -986,19 +985,19 @@ export async function slotClick(
     const visible = list.filter((e) => e.w > 0 && e.h > 0)
     if (res.reason === 'ambiguous') {
       throw new Error(
-        `⛔ 「${opts.text}」匹配到 ${res.hits.length} 个可点元素 —— 拒绝替你选（点错是已经发生的事，不会自己撤销）。\n` +
-          `  ⇒ 换个更长的文字，或用 --xy=<x,y> 点名：\n${renderClickables(res.hits)}`,
+        `⛔ "${opts.text}" matched ${res.hits.length} clickable elements — refusing to pick (a wrong click has already happened and will not undo itself).\n` +
+          `  ⇒ Use a longer label, or name it with --xy=<x,y>:\n${renderClickables(res.hits)}`,
       )
     }
     if (res.reason === 'not-clickable') {
       throw new Error(
-        `⛔ 「${opts.text}」找到了，但${res.why}。\n` +
-          `  ⇒ 这不是"尽力点一下"的场合：点了没反应与没点，在读数上一样。\n${renderClickables(res.hits)}`,
+        `⛔ "${opts.text}" was found, but ${res.why}.\n` +
+          `  ⇒ This is not a "try clicking anyway" situation: a dead click and no click read the same.\n${renderClickables(res.hits)}`,
       )
     }
     throw new Error(
-      `⛔ 页面上没有可点元素匹配「${opts.text}」（匹配渲染后的可见文本，含 value/aria-label/title）。\n` +
-        `  ⇒ 当前 ${visible.length} 个可见可点元素：\n${renderClickables(visible)}`,
+      `⛔ No clickable element on the page matches "${opts.text}" (matches rendered visible text, incl. value/aria-label/title).\n` +
+        `  ⇒ ${visible.length} visible clickable element(s) right now:\n${renderClickables(visible)}`,
     )
   }
 
@@ -1010,8 +1009,8 @@ export async function slotClick(
   const hit = judgeHit(probe)
   if (hit.kind === 'offscreen' || hit.kind === 'blank') {
     throw new Error(
-      `⛔ 不点「${opts.text}」：${renderHit(hit)}\n` +
-        `  ⇒ 「找得到」与「点得到」是两件事：元素在 DOM 里可见、可点，不代表这一下会落在它上面。`,
+      `⛔ Not clicking "${opts.text}": ${renderHit(hit)}\n` +
+        `  ⇒ "Found" and "can be clicked" are two different things: visible and clickable in the DOM does not mean this click lands on it.`,
     )
   }
 
@@ -1155,15 +1154,15 @@ export function needBackendId(args: Record<string, unknown>): number {
   const ref = typeof args.ref === 'string' ? args.ref : ''
   if (!ref) {
     throw new Error(
-      `⛔ 需要 --ref=<eNNN>（先跑 \`browser_slot ax\` 拿 ref）。\n` +
-        `  ⇒ ref 来自无障碍树快照；⛔ 不是 DOM 选择器，也不是 CSS 路径。`,
+      `⛔ needs --ref=<eNNN> (run \`browser_slot ax\` to get a ref first).\n` +
+        `  ⇒ A ref comes from an accessibility-tree snapshot; ⛔ it is not a DOM selector or CSS path.`,
     );
   }
   const id = refToBackendId(ref)
   if (id === null) {
     throw new Error(
-      `⛔ --ref 格式不对：${JSON.stringify(ref)}（应形如 e12345，来自 \`ax\` 的输出）。\n` +
-        `  ⛔ 不接受 CSS 选择器/文本 —— 那需要猜，而猜错会操作到另一个元素且没有任何信号。`,
+      `⛔ malformed --ref: ${JSON.stringify(ref)} (expected e12345, as printed by \`ax\`).\n` +
+        `  ⛔ CSS selectors / text are not accepted — those need guessing, and a wrong guess drives another element with no signal.`,
     );
   }
   return id
@@ -1199,10 +1198,10 @@ export async function slotPress(
   const stroke = parseKeyStroke(keyDesc)
   if (!stroke) {
     throw new Error(
-      `⛔ 解析不出按键：${JSON.stringify(keyDesc)}。\n` +
-        `  ⇒ 可用形态：Enter ／ Escape ／ Tab ／ ArrowUp/Down/Left/Right ／ Home ／ End ／ PageUp ／ PageDown ／ Space ／ Backspace ／ Delete；` +
-        `修饰用 + 连接（Control+A ／ Meta+Shift+Enter）；单字符只认 a-z 0-9。\n` +
-        `  ⇒ 要「把一段文字打进输入框」用 type（走 Input.insertText，不猜键位）：--text=<原文>`,
+      `⛔ Cannot parse key: ${JSON.stringify(keyDesc)}.\n` +
+        `  ⇒ Accepted forms: Enter / Escape / Tab / ArrowUp|Down|Left|Right / Home / End / PageUp / PageDown / Space / Backspace / Delete; ` +
+        `join modifiers with + (Control+A / Meta+Shift+Enter); single chars limited to a-z 0-9.\n` +
+        `  ⇒ To type free text into a field use type (goes through Input.insertText, no key guessing): --text=<text>`,
     );
   }
   const sent = await pressKey(slot, targetId, stroke, times)
@@ -1291,9 +1290,9 @@ export async function slotWait(
   const spec = parseWaitSpec(raw)
   if (!spec) {
     throw new Error(
-      `⛔ 解析不出等待条件：${JSON.stringify(raw)}。\n` +
-        `  ⇒ 可用形态（前缀必填，裸值有歧义会等到永不到来的条件）：\n` +
-        `     selector:<CSS>   text:<子串>   url:<子串>   gone:<CSS>   js:<表达式>`,
+      `⛔ Cannot parse wait condition: ${JSON.stringify(raw)}.\n` +
+        `  ⇒ Accepted forms (prefix required; a bare value is ambiguous and may wait for something that never comes):\n` +
+        `     selector:<CSS>   text:<substring>   url:<substring>   gone:<CSS>   js:<expression>`,
     );
   }
   const r = await waitForInPage(slot, targetId, spec.expression, timeoutMs)
@@ -1332,13 +1331,13 @@ export function resolveUploadPath(cccRoot: string, relOrAbs: string): string {
     st = statSync(abs)
   } catch {
     throw new Error(
-      `⛔ 文件不存在：${relOrAbs}（解析为 ${abs}）。\n` +
-        `  ⚠️ 这条拒绝是必要的：DOM.setFileInputFiles 对不存在的路径**静默成功**，` +
-        `表单里会是空的，而页面上看起来与「上传中」一样。`,
+      `⛔ File does not exist: ${relOrAbs} (resolved to ${abs}).\n` +
+        `  ⚠️ This refusal is necessary: DOM.setFileInputFiles SILENTLY SUCCEEDS on a missing path, ` +
+        `the form field stays empty, and the page looks exactly like "uploading".`,
     );
   }
   if (!st.isFile()) {
-    throw new Error(`⛔ 不是普通文件（目录/设备/符号链接）：${relOrAbs}`)
+    throw new Error(`⛔ Not a regular file (directory/device/symlink): ${relOrAbs}`)
   }
   return abs;
 }
@@ -1428,11 +1427,11 @@ export async function slotExt(
       ok: false,
       code: 'ext-not-found',
       error:
-        `没有名为「${name}」的扩展。\n` +
+        `No extension named "${name}".\n` +
         (known.length > 0
-          ? `  ⇒ 本 CCC 现有的扩展：${known.join(', ')}`
-          : `  ⇒ 本 CCC 还没有任何扩展（<CCC 根>/${EXT_DIR_REL}/ 下没有 .ts 文件）。\n` +
-            `     写一个：stdin 收 {slot,port,cccRoot,args}，stdout 最后一行给 {"ok":true,"result":…}`),
+          ? `  ⇒ Extensions in this CCC: ${known.join(', ')}`
+          : `  ⇒ This CCC has no extensions yet (no .ts files under <CCC root>/${EXT_DIR_REL}/).\n` +
+            `     To add one: stdin gets {slot,port,cccRoot,args}; the last stdout line returns {"ok":true,"result":…}`),
     }
   }
   const payload = buildExtPayload({

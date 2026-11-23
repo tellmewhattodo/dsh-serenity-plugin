@@ -96,7 +96,7 @@ describe('槽位状态判定（四种状态互相穷尽）', () => {
     const l = lease({ lastActionAt: NOW - 16 * 60_000 })
     const r = deriveSlotState(l, { alive: true, cpuPct: 5, rssMb: 300, at: NOW }, NOW, P)
     expect(r.state).toBe('stale')
-    expect(r.reasons.some((x) => x.includes('无动作'))).toBe(true)
+    expect(r.reasons.some((x) => x.includes('idle'))).toBe(true)
     // 负控：少 1 分钟就还不该触发
     const ok = deriveSlotState(lease({ lastActionAt: NOW - 14 * 60_000 }), { alive: true, cpuPct: 5, rssMb: 300, at: NOW }, NOW, P)
     expect(ok.state).toBe('leased')
@@ -116,14 +116,14 @@ describe('槽位状态判定（四种状态互相穷尽）', () => {
   it('⑨ 内存超阈值 ⇒ stale', () => {
     const r = deriveSlotState(lease(), { alive: true, cpuPct: 1, rssMb: P.rssMb + 100, at: NOW }, NOW, P)
     expect(r.state).toBe('stale')
-    expect(r.reasons.some((x) => x.includes('内存'))).toBe(true)
+    expect(r.reasons.some((x) => x.includes('rss'))).toBe(true)
   })
 
   it('⑩ 占用超时 ⇒ stale（兜底：一直有小动作也不能永远占着）', () => {
     const l = lease({ leasedAt: NOW - 3 * 60 * 60_000, lastActionAt: NOW - 1000 })
     const r = deriveSlotState(l, { alive: true, cpuPct: 5, rssMb: 300, at: NOW }, NOW, P)
     expect(r.state).toBe('stale')
-    expect(r.reasons.some((x) => x.includes('上限'))).toBe(true)
+    expect(r.reasons.some((x) => x.includes('cap'))).toBe(true)
   })
 
   it('⑪ proc 为 null（还没采样）时不因进程原因误判', () => {

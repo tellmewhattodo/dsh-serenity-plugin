@@ -215,12 +215,12 @@ export function deriveSlotState(
   //    ⚠️ 但 CPU／内存／占用上限**照判** —— 那三条与"我还在用"无关，
   //    一个申请了保活却把内存吃满的槽位仍然异常。
   const holding = lease.holdUntil > now
-  if (!holding && idle > policy.idleMs) reasons.push(`已 ${Math.round(idle / 60_000)} 分钟无动作`)
+  if (!holding && idle > policy.idleMs) reasons.push(`idle ${Math.round(idle / 60_000)}m`)
   if (now - lease.leasedAt > policy.leaseMaxMs) {
-    reasons.push(`占用已超 ${Math.round(policy.leaseMaxMs / 60_000)} 分钟上限`)
+    reasons.push(`held over ${Math.round(policy.leaseMaxMs / 60_000)}m cap`)
   }
-  if (proc && proc.cpuPct >= policy.cpuPct) reasons.push(`CPU ${proc.cpuPct.toFixed(0)}% 超阈值`)
-  if (proc && proc.rssMb >= policy.rssMb) reasons.push(`内存 ${proc.rssMb.toFixed(0)}MB 超阈值`)
+  if (proc && proc.cpuPct >= policy.cpuPct) reasons.push(`CPU ${proc.cpuPct.toFixed(0)}% over threshold`)
+  if (proc && proc.rssMb >= policy.rssMb) reasons.push(`rss ${proc.rssMb.toFixed(0)}MB over threshold`)
 
   return reasons.length > 0 ? { state: 'stale', reasons } : { state: 'leased', reasons: [] }
 }
@@ -254,29 +254,29 @@ export function nudgeText(
   reasons: string[],
   policy: SlotPolicy,
 ): string {
-  const head = `[浏览器槽位看守] 槽位 ${slotLabel(slot)}（端口 ${slotPort(slot)}）需要你处理。`
-  const rel = `  已租用，请**用完立刻 release**：\`browser_slot release ${slotLabel(slot)}\``
+  const head = `[slot-watchman] slot ${slotLabel(slot)} (port ${slotPort(slot)}) needs your action.`
+  const rel = `  You hold it — **release as soon as you are done**: \`browser_slot release ${slotLabel(slot)}\``
   if (state === 'orphaned') {
     return (
       `${head}\n` +
-      `  现象：该槽位的 Chrome 进程已经不在了。\n` +
-      `  ⚠️ 你现在如果还在用它，接下来的操作会失败 —— 但**不会自动恢复**。\n` +
-      `  ⇒ 要做的事：\`browser_slot release ${slotLabel(slot)}\` 交还，再 \`acquire\` 重新租一个。\n` +
+      `  What: the Chrome process for this slot is gone.\n` +
+      `  ⚠️ If you still need it, further calls will fail — it will NOT recover by itself.\n` +
+      `  ⇒ Do this: \`browser_slot release ${slotLabel(slot)}\` to hand it back, then \`acquire\` a fresh slot.\n` +
       `${rel}`
     )
   }
-  const why = reasons.length > 0 ? reasons.join('；') : '状态异常'
+  const why = reasons.length > 0 ? reasons.join('; ') : 'abnormal state'
   const thresholds =
-    `  判据（你越了哪条线）：闲置 ${Math.round(policy.idleMs / 60_000)} 分钟 / ` +
-    `CPU ${policy.cpuPct}% / 内存 ${policy.rssMb}MB / 占用上限 ${Math.round(policy.leaseMaxMs / 60_000)} 分钟。`
-  const escalate = `若你已不再需要它，release 即可 —— 这是最省事的一步。`
+    `  Thresholds (which line you crossed): idle ${Math.round(policy.idleMs / 60_000)}m / ` +
+    `CPU ${policy.cpuPct}% / rss ${policy.rssMb}MB / held cap ${Math.round(policy.leaseMaxMs / 60_000)}m.`
+  const escalate = `if you no longer need it, just release — that is the cheapest step.`
   return (
     `${head}\n` +
-    `  现象：${why}\n` +
+    `  What: ${why}\n` +
     `${thresholds}\n` +
-    `  为什么找你：这个槽位是**你**租的，只有你知道它还有没有用。\n` +
-    `  ⇒ 还在用：把闲置阈值以下的动作做一次，或先 release 再重新租（会刷新计时）。\n` +
-    `  ⇒ 不用了：${escalate}\n` +
+    `  Why you: **you** leased this slot; only you know whether it is still needed.\n` +
+    `  ⇒ Still using it: perform any action below the idle threshold, or release and re-acquire (resets the timer).\n` +
+    `  ⇒ Done with it: ${escalate}\n` +
     `${rel}`
   )
 }
@@ -332,13 +332,13 @@ export function forceReapText(
   policy: SlotPolicy = DEFAULT_POLICY,
 ): string {
   return (
-    `[浏览器槽位看守] 槽位 ${slotLabel(slot)} 已被**强制回收**（闲置 ${idleMin} 分钟，之前已提醒 ${nudges} 次）。\n` +
-    `  · 你的浏览器已关闭。**profile 目录保留** ⇒ 登录态还在，重新 acquire 不需要重登。\n` +
-    `  · 若这次是被误杀（例如在做长下载、等一个慢查询），下次请先保活：\n` +
-    `      \`browser_slot hold --slot ${slotLabel(slot)} --reason "<在做什么>" --holdFor <分钟>\`\n` +
-    `  · 要接着用：重新 \`acquire\` 即可。\n` +
-    `  为什么是我：闲置阈值 ${Math.round(policy.idleKillMs / 60_000)} 分钟 —— `
-    + `一个真在干活的浏览器不会静默这么久。`
+    `[slot-watchman] slot ${slotLabel(slot)} was **force-reclaimed** (idle ${idleMin}m, nudged ${nudges}x before).\n` +
+    `  · Your browser is closed. **The profile dir is kept** ⇒ login sessions survive; re-acquire without re-login.\n` +
+    `  · If this was a false kill (long download, slow query), hold it next time:\n` +
+    `      \`browser_slot hold --slot ${slotLabel(slot)} --reason "<what you are doing>" --holdFor <minutes>\`\n` +
+    `  · To continue: just \`acquire\` again.\n` +
+    `  Why me: the idle threshold is ${Math.round(policy.idleKillMs / 60_000)}m — `
+    + `a browser actually doing work does not go silent that long.`
   )
 }
 

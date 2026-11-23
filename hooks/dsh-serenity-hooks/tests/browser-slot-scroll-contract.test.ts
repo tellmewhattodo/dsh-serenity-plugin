@@ -43,7 +43,7 @@ describe('scroll 的 wheel 降级必须可见（S1~S4）', () => {
 
   it('S3 工具回执必须把 via 说出来（⛔ 不许静默替代）', () => {
     expect(tool).toContain('via === ' + "'wheel'")
-    expect(tool).toContain('回落 JS 滚动')
+    expect(tool).toContain('fell back to JS scroll')
     // 反向：回执里不能只报 scrolledY 而不提走了哪条路
     expect(tool).not.toMatch(/scroll → scrollY 变化 \$\{scrolledY[^`]*`$/m)
   })
