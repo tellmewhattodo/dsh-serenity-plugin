@@ -66,9 +66,29 @@ export interface Ledger {
    *    槽位号 → { 连续失败次数, 下次允许尝试的时刻 }
    */
   backoff: Record<string, { failures: number; nextAt: number }>
+  /**
+   * 🔴 **最近被强关的槽位**（最多 20 条，新在前）。
+   *
+   * 为什么必须有：强关会**删掉租约** ⇒ 事后"这槽刚才为什么被关"在台账上**无从回答**。
+   * 而强关会**中断别人正在做的事** ⇒ 那种事必须可追溯，否则下一个人只看到"槽位突然空了"。
+   */
+  recentKills: RecentKill[]
 }
 
-const EMPTY: Ledger = { version: 2, leases: {}, updatedAt: 0, backoff: {} }
+/** 一次强关的留痕 */
+export interface RecentKill {
+  slot: number
+  trajectory: string
+  /** 强关时的闲置分钟数 */
+  idleMin: number
+  /** 强关前已提醒过几次（证明"先提醒后强关"确实发生过） */
+  nudges: number
+  /** 杀进程是否成功（owner 裁「不会 kill 不掉」⇒ 正常应为 true；若不是，这就是那条异常的证据） */
+  ok: boolean
+  at: number
+}
+
+const EMPTY: Ledger = { version: 3, leases: {}, updatedAt: 0, backoff: {}, recentKills: [] }
 
 /** 读台账。文件缺失/损坏 ⇒ 返回空台账（⛔ 不抛错：一次坏文件不该炸掉所有槽位操作） */
 export function readLedger(): Ledger {
@@ -95,6 +115,8 @@ export function readLedger(): Ledger {
         nudges: Number(l.nudges) || 0,
         lastNudgeAt: Number(l.lastNudgeAt) || 0,
         pid: Number(l.pid) || 0,
+        // 🔴 旧记录（无此字段）读成 0 = 未申请保活。⛔ 不猜一个未来的时刻。
+        holdUntil: Number(l.holdUntil) || 0,
       }
     }
     const backoff: Ledger['backoff'] = {}
@@ -105,9 +127,31 @@ export function readLedger(): Ledger {
       if (!Number.isInteger(n) || n < 1 || n > 20) continue
       backoff[String(n)] = { failures: Number(b?.failures) || 0, nextAt: Number(b?.nextAt) || 0 }
     }
-    return { version: Number(raw.version) || 2, leases, updatedAt: Number(raw.updatedAt) || 0, backoff }
+    // 强关留痕：坏条目逐条剔除（同 leases 的处理口径），⛔ 不让一条坏记录带走整份台账
+    const recentKills: RecentKill[] = []
+    if (Array.isArray(raw.recentKills)) {
+      for (const item of raw.recentKills as Partial<RecentKill>[]) {
+        const n = Number(item?.slot)
+        if (!Number.isInteger(n) || n < 1 || n > 20) continue
+        recentKills.push({
+          slot: n,
+          trajectory: typeof item?.trajectory === 'string' ? item.trajectory : '',
+          idleMin: Number(item?.idleMin) || 0,
+          nudges: Number(item?.nudges) || 0,
+          ok: item?.ok === true,
+          at: Number(item?.at) || 0,
+        })
+      }
+    }
+    return {
+      version: Number(raw.version) || 3,
+      leases,
+      updatedAt: Number(raw.updatedAt) || 0,
+      backoff,
+      recentKills: recentKills.slice(0, 20),
+    }
   } catch {
-    return { ...EMPTY, leases: {} }
+    return { ...EMPTY, leases: {}, recentKills: [] }
   }
 }
 

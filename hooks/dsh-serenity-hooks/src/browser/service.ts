@@ -15,13 +15,16 @@ import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   DEFAULT_POLICY,
+  HOLD_MAX_MINUTES,
   MAX_SLOTS,
   SLOT_RESOLUTION,
   deriveSlotState,
   findLeaseBySession,
+  forceReapText,
   nudgeText,
   pickFreeSlot,
   policyFromEnv,
+  shouldForceReap,
   shouldNudge,
   slotLabel,
   slotPort,
@@ -106,6 +109,7 @@ export const SLOT_ACTIONS = [
   'list',
   'status',
   'reap',
+  'hold',
   'doctor',
   // ② 页面层（CDP）—— 全部要求 --slot
   'targets',
@@ -318,6 +322,7 @@ export async function acquireSlot(input: AcquireInput): Promise<AcquireResult> {
       nudges: 0,
       lastNudgeAt: 0,
       pid: 0,
+      holdUntil: 0,
     }
     return { ledger: lg, result: free }
   })
@@ -576,7 +581,158 @@ export interface NudgeOutcome {
   detail: string
 }
 
+/** 强关结果（与 NudgeOutcome 分开：一件事是"提醒了"，另一件是"关掉了"，⛔ 不可混） */
+export interface ForceReapOutcome {
+  slot: number
+  trajectory: string
+  idleMin: number
+  killed: boolean
+  killDetail: string
+  delivered: boolean
+  deliverDetail: string
+}
+
 export type Injector = (root: string, target: string, message: string) => Promise<{ ok: boolean; detail: string }>
+
+/**
+ * 🔴 **强关扫描（owner 2026-11-24 令：「浏览器一直不关的现象严重」）**。
+ *
+ * 与 {@link nudgeStaleSlots} **分两个函数**，⛔ 不合并：
+ * 前者是"告诉它还活着"，后者是"真的关掉它" —— 两件事的失败面与后果完全不同，
+ * 合进一个函数会让"提醒了没关"与"该关没关"在回执上同形。
+ *
+ * ## 顺序（由调用方保证，⛔ 不可换）
+ *
+ * 调用方先跑 `nudgeStaleSlots`（提醒），**再**跑本函数（强关）。
+ * 而本函数内部还有第二道闸：`lease.nudges >= 1`（见 shouldForceReap ③）
+ * ⇒ 即使调用顺序被写错，**也不会出现"没提醒过就杀掉"**。
+ *
+ * ## 一辆车能做两件事，但账要分开记
+ *
+ * 强关后：① 杀进程 ＋ 删租约 ＋ 清 identity（复用 `reapSlot`，它是既有生产路径）；
+ * ② 向占用者注入**告知**（不是提醒 —— 提醒是"请你做"，告知是"我已经做了"）。
+ */
+export async function forceReapIdleSlots(
+  root: string,
+  inject: Injector,
+  policy = policyFromEnv(),
+): Promise<{ reaped: ForceReapOutcome[]; scanned: number }> {
+  const ledger = readLedger()
+  const now = Date.now()
+  const out: ForceReapOutcome[] = []
+  let scanned = 0
+  for (const lease of listLeases(ledger)) {
+    scanned += 1
+    const proc = readProcFor(root, lease.slot, now, lease.pid)
+    const verdict = shouldForceReap(lease, proc, now, policy)
+    if (!verdict) continue
+    // 🔴 复用 reapSlot：它已经做全了「杀进程 ＋ 删租约 ＋ 清 identity ＋ 清采样缓存」。
+    //    ⛔ 不在这里再写一遍 —— 两套清理逻辑必然分叉（本仓栽过多次）。
+    const res = reapSlot(root, lease.slot, `闲置 ${verdict.idleMin} 分钟（已提醒 ${verdict.nudges} 次）`)
+    // 台账留痕（⚠️ 租约已被删，所以写的是 recentKills，不是 leases）
+    recordRecentKill(lease.slot, lease.trajectory, verdict.idleMin, verdict.nudges, res.ok)
+    const target = lease.trajectory || lease.sessionId
+    let delivered = false
+    let deliverDetail = ''
+    if (target) {
+      const text = forceReapText(lease.slot, verdict.idleMin, verdict.nudges, policy)
+      try {
+        const r = await inject(root, target, text)
+        delivered = r.ok
+        deliverDetail = r.detail
+      } catch (err) {
+        deliverDetail = String((err as Error)?.message ?? err)
+      }
+    } else {
+      deliverDetail = '该槽位没有归属轨迹（sessionId/trajectory 皆空）⇒ 无法告知，已在台账留痕'
+    }
+    out.push({
+      slot: lease.slot,
+      trajectory: lease.trajectory,
+      idleMin: verdict.idleMin,
+      killed: res.ok,
+      killDetail: res.detail,
+      delivered,
+      deliverDetail,
+    })
+  }
+  return { reaped: out, scanned }
+}
+
+/**
+ * 🔴 **保活**（owner 2026-11-24 裁：同意）—— 长下载／慢查询的唯一逃生阀。
+ *
+ * ## 它为什么必须存在
+ *
+ * 强关的判据是「30 分钟静默 ⇒ 你肯定不在用它」。而**长下载恰好合法地静默**。
+ * 没有这条通道，强关就是粗糙的 —— 会把正在下载 2GB 镜像的人一脚踢掉。
+ *
+ * ## 🔴 它**不推进 `lastActionAt`**
+ *
+ * 那是关键设计：`lastActionAt` 的语义是「我刚做了一个动作」（**事实**），
+ * 而 `holdUntil` 是「我预知接下来不动，别判我闲置」（**声明**）。
+ * 若用推进 `lastActionAt` 来实现保活，那么「真的在干活」与「申请了豁免」在读数上**同形** ——
+ * `status` 的读者（和看守自己）就会据此做错动作。⇒ 两个字段，⛔ 不合流。
+ */
+export function holdSlot(
+  root: string,
+  sessionId: string,
+  target: number,
+  minutes: number,
+  reason: string,
+): { ok: boolean; detail: string } {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return { ok: false, detail: `hold 需要正的分钟数（收到 ${minutes}）` }
+  }
+  if (minutes > HOLD_MAX_MINUTES) {
+    return {
+      ok: false,
+      detail:
+        `hold 单次最多 ${HOLD_MAX_MINUTES} 分钟（收到 ${minutes}）。\n` +
+        `  ⛔ 不让它变成"永久豁免" —— 那等于把闲置强关架空。需要更久就到期前再续一次。`,
+    }
+  }
+  const ledger = readLedger()
+  const lease = ledger.leases[String(target)]
+  if (!lease) return { ok: false, detail: `槽位 ${slotLabel(target)} 无人占用（没有可保活的租约）。` }
+  if (sessionId && lease.sessionId && lease.sessionId !== sessionId) {
+    return { ok: false, detail: `槽位 ${slotLabel(target)} 不属于你，⛔ 不能替别人保活。` }
+  }
+  const until = Date.now() + minutes * 60_000
+  withLedger((lg) => {
+    const cur = lg.leases[String(target)]
+    if (cur) cur.holdUntil = until
+    return { ledger: lg, result: null }
+  })
+  return {
+    ok: true,
+    detail:
+      `已保活槽位 ${slotLabel(target)} 至 ${new Date(until).toLocaleTimeString('zh-CN')}（${minutes} 分钟）。\n` +
+      `  · 保活期内**不判闲置**，但仍判进程死活／CPU／内存。\n` +
+      `  · 原因：${reason || '(未填)'}\n` +
+      `  · 到期后若仍无动作，照常进入提醒→强关流程。`,
+  }
+}
+
+/**
+ * 强关留痕（台账里的 `recentKills`，最多保留 20 条）。
+ *
+ * 🔴 **为什么必须有它**：强关删掉了租约 ⇒ 事后问"刚才那槽为什么被关"在台账上**无从回答**。
+ * 而强关会**中断别人正在做的事**，那种事必须有可追溯的记录，否则下一个人只会看到"槽位突然空了"。
+ */
+function recordRecentKill(slot: number, trajectory: string, idleMin: number, nudges: number, ok: boolean): void {
+  try {
+    withLedger((lg) => {
+      const list = Array.isArray(lg.recentKills) ? lg.recentKills : []
+      list.unshift({ slot, trajectory, idleMin, nudges, ok, at: Date.now() })
+      lg.recentKills = list.slice(0, 20)
+      return { ledger: lg, result: null }
+    })
+  } catch (err) {
+    // ⚠️ 留痕失败**不许**让强关失败：关掉进程才是主要目的（进程已经关了）。
+    console.warn(`[serenity-hooks] ⚠️ 强关留痕写入失败（槽位 ${slotLabel(slot)}）：${String((err as Error)?.message ?? err)}`)
+  }
+}
 
 export async function nudgeStaleSlots(
   root: string,

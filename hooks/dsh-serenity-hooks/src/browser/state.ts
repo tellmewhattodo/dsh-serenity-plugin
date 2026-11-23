@@ -84,6 +84,17 @@ export interface SlotLease {
   lastNudgeAt: number
   /** 该槽位对应的 chrome 主进程 pid；0 = 尚未启动 */
   pid: number
+  /**
+   * 保活截止时刻（ms）；0 = 未申请保活（owner 2026-11-24 裁：同意 `hold`）。
+   *
+   * 🔴 **它与 `lastActionAt` 是两件事，⛔ 不许合流**：
+   *    `lastActionAt` = 「我刚做了一个动作」（事实）；
+   *    `holdUntil`   = 「我预知接下来一段时间不会有动作，别判我闲置」（声明）。
+   *    若用推进 `lastActionAt` 来实现保活，那么"真的在干活"与"申请了豁免"在读数上**同形** ——
+   *    读它的人（包括看守自己、以及 `status` 的读者）会据此做错动作。
+   *    本仓这条判据立过多次：一个读数在两种相反情况下取同一个值，报它等于报假。
+   */
+  holdUntil: number
 }
 
 /** 槽位对外状态（四个，互相穷尽） */
@@ -111,6 +122,22 @@ export interface SlotPolicy {
   nudgeCooldownMs: number
   /** 提醒几次后升级为"建议直接回收"（默认 2） */
   nudgeEscalateAt: number
+  /**
+   * 🔴 **强制回收阈值**（owner 2026-11-24 令：「浏览器一直不关的现象严重」）。
+   *
+   * 闲置超过它 ⇒ **真的关掉**（destroySlot ＋ 删租约），并向占用者注入一条告知。
+   * `0` = **关闭强关**（留一个彻底不杀的开关）。
+   *
+   * ## 为什么这条可以破「提醒不代它释放」那条老判据
+   *
+   * 老判据防的是「代为释放可能中断一个正在取的证」。而强关的前提是
+   * **30 分钟一次操作都没有** —— `lastActionAt` 只由**成功的操作**推进（见 touchSlot），
+   * 所以一个正在取证的浏览器**不可能**静默 30 分钟。
+   * ⇒ 判据从「我不知道它还要不要」变成「**30 分钟的静默本身就是证据**」。
+   *
+   * ⚠️ 真实例外是长下载／慢查询 ⇒ 由 `hold`（见 SlotLease.holdUntil）提供逃生阀。
+   */
+  idleKillMs: number
 }
 
 export const DEFAULT_POLICY: SlotPolicy = {
@@ -120,7 +147,14 @@ export const DEFAULT_POLICY: SlotPolicy = {
   rssMb: 2500,
   nudgeCooldownMs: 20 * 60_000,
   nudgeEscalateAt: 2,
+  idleKillMs: 30 * 60_000,
 }
+
+/**
+ * `hold` 单次可申请的上限（分钟）。
+ * 理由：⛔ 不让 `hold` 变成"永久豁免" —— 那等于把强关架空，而强关正是 owner 要的东西。
+ */
+export const HOLD_MAX_MINUTES = 240
 
 /** 从环境变量读策略（缺省回落 DEFAULT_POLICY；非法值静默回落，⛔ 不抛错） */
 export function policyFromEnv(env: Record<string, string | undefined> = process.env): SlotPolicy {
@@ -138,6 +172,11 @@ export function policyFromEnv(env: Record<string, string | undefined> = process.
     rssMb: num('SERENITY_SLOT_RSS_MB', DEFAULT_POLICY.rssMb),
     nudgeCooldownMs: Math.max(num('SERENITY_SLOT_NUDGE_COOLDOWN_MS', DEFAULT_POLICY.nudgeCooldownMs), min),
     nudgeEscalateAt: num('SERENITY_SLOT_NUDGE_ESCALATE_AT', DEFAULT_POLICY.nudgeEscalateAt),
+    // 🔴 允许显式 0 = 关闭强关。⚠️ 但 `num()` 对"非法值"回落到默认 —— 所以这里必须区开
+    //    「显式给 0」与「没给／给错」：前者是 owner 想要的关闭开关，后者是配置写错。
+    idleKillMs: env['SERENITY_SLOT_IDLE_KILL_MS'] === '0'
+      ? 0
+      : num('SERENITY_SLOT_IDLE_KILL_MS', DEFAULT_POLICY.idleKillMs),
   }
 }
 
@@ -172,7 +211,11 @@ export function deriveSlotState(
   if (proc && !proc.alive) return { state: 'orphaned', reasons: ['进程已退出'] }
 
   const idle = now - lease.lastActionAt
-  if (idle > policy.idleMs) reasons.push(`已 ${Math.round(idle / 60_000)} 分钟无动作`)
+  // 🔴 保活期间**不判闲置**（owner 2026-11-24 裁：同意 hold）。
+  //    ⚠️ 但 CPU／内存／占用上限**照判** —— 那三条与"我还在用"无关，
+  //    一个申请了保活却把内存吃满的槽位仍然异常。
+  const holding = lease.holdUntil > now
+  if (!holding && idle > policy.idleMs) reasons.push(`已 ${Math.round(idle / 60_000)} 分钟无动作`)
   if (now - lease.leasedAt > policy.leaseMaxMs) {
     reasons.push(`占用已超 ${Math.round(policy.leaseMaxMs / 60_000)} 分钟上限`)
   }
@@ -235,6 +278,67 @@ export function nudgeText(
     `  ⇒ 还在用：把闲置阈值以下的动作做一次，或先 release 再重新租（会刷新计时）。\n` +
     `  ⇒ 不用了：${escalate}\n` +
     `${rel}`
+  )
+}
+
+/**
+ * 🔴 **强关判定（纯函数，owner 2026-11-24 令）**。
+ *
+ * 「浏览器一直不关的现象严重」⇒ 把"劝"改成"劝不动就关"。
+ *
+ * ## 三条**必须同时成立**（⛔ 少一条就退化成误杀）
+ *
+ * | # | 条件 | 为什么 |
+ * |---|---|---|
+ * | ① | 闲置 ≥ `idleKillMs`（默认 30 min） | owner 裁的阈值 |
+ * | ② | 进程**仍活着** | 进程都没了走 `orphaned` 那条既有路径，⛔ 不走强关 |
+ * | ③ | `nudges ≥ 1`（**至少提醒过一次**） | 🔴 **公平**：不能因为刚拍到它闲置就直接杀 —— 它可能一直在跑长任务、根本没看到提醒。**先提醒、后强关，顺序不可换** |
+ *
+ * 另外两条闸门：
+ * - `idleKillMs === 0` ⇒ **永不强关**（owner 可整体关闭）；
+ * - `holdUntil > now` ⇒ **不动**（保活期内）。
+ *
+ * @returns `null` = 不该强关；否则返回强关原因（用于注入文案与台账留痕）
+ */
+export function shouldForceReap(
+  lease: SlotLease | null,
+  proc: SlotProcReading | null,
+  now: number,
+  policy: SlotPolicy = DEFAULT_POLICY,
+): { idleMin: number; nudges: number } | null {
+  if (!lease) return null
+  if (policy.idleKillMs <= 0) return null          // 闸门：owner 关闭了强关
+  if (lease.holdUntil > now) return null           // 闸门：保活期内
+  if (proc && !proc.alive) return null             // ② 进程已死 ⇒ 走 orphaned 那条
+  if (lease.nudges < 1) return null                // ③ 先提醒、后强关
+  const idle = now - lease.lastActionAt
+  if (idle < policy.idleKillMs) return null        // ① 未到阈值
+  return { idleMin: Math.round(idle / 60_000), nudges: lease.nudges }
+}
+
+/**
+ * 强关后的**告知**文本（注入给占用者）。
+ *
+ * 🔴 判据：**必须三件事都给** ——
+ * ① 发生了什么（被强制回收了，多少分钟没动作）；
+ * ② 损失了什么／没损失什么（浏览器关了；**profile 保留、登录态还在**）；
+ * ③ 下次怎么避免（`hold` 保活），以及怎么继续（重新 acquire）。
+ * ⛔ 不写"你的槽位异常了" —— 那是无法行动的话。
+ */
+export function forceReapText(
+  slot: number,
+  idleMin: number,
+  nudges: number,
+  policy: SlotPolicy = DEFAULT_POLICY,
+): string {
+  return (
+    `[浏览器槽位看守] 槽位 ${slotLabel(slot)} 已被**强制回收**（闲置 ${idleMin} 分钟，之前已提醒 ${nudges} 次）。\n` +
+    `  · 你的浏览器已关闭。**profile 目录保留** ⇒ 登录态还在，重新 acquire 不需要重登。\n` +
+    `  · 若这次是被误杀（例如在做长下载、等一个慢查询），下次请先保活：\n` +
+    `      \`browser_slot hold --slot ${slotLabel(slot)} --reason "<在做什么>" --holdFor <分钟>\`\n` +
+    `  · 要接着用：重新 \`acquire\` 即可。\n` +
+    `  为什么是我：闲置阈值 ${Math.round(policy.idleKillMs / 60_000)} 分钟 —— `
+    + `一个真在干活的浏览器不会静默这么久。`
   )
 }
 

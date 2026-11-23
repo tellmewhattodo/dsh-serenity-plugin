@@ -23,6 +23,8 @@ import {
   doctorSlots,
   listSlots,
   nudgeStaleSlots,
+  forceReapIdleSlots,
+  holdSlot,
   reapSlot,
   releaseSlot,
   slotAx,
@@ -211,6 +213,18 @@ async function run(
       if (n === 0) return '⛔ 需要槽位号：reap 需要 --slot <b1..b20>'
       const reason = typeof args.reason === 'string' && args.reason ? args.reason : 'manual reaping'
       return reapSlot(root, n, reason).detail
+    }
+    case 'hold': {
+      // 🔴 保活（owner 2026-11-24 裁）：长下载／慢查询期间别被闲置强关误杀。
+      const n = normalizeSlotId(String(args.slot ?? ''))
+      if (n === 0) return '⛔ 需要槽位号：hold 需要 --slot <b1..b20>'
+      const mins = num(args.holdFor)
+      if (mins === undefined) {
+        return '⛔ 需要 --holdFor=<分钟>（保活多久）。例：--holdFor 60\n  ⛔ 不接受"永久保活" —— 那会把闲置强关架空。'
+      }
+      const reason = typeof args.reason === 'string' ? args.reason : ''
+      const r = holdSlot(root, sessionId, n, mins, reason)
+      return r.ok ? r.detail : `⛔ ${r.detail}`
     }
     case 'status': {
       const n = normalizeSlotId(String(args.slot ?? ''))
@@ -491,7 +505,7 @@ export function createBrowserSlotTool(ctx: Context) {
     description:
       'Browser slot manager (ACC-level, max 20 Chrome slots). Each slot = one isolated Chrome process with its own profile dir, fixed resolution, and a CDP port (9301+). ' +
       'Slots carry state: free / leased / stale (idle too long, CPU or memory over threshold, lease expired) / orphaned (process died). ' +
-      'Actions: acquire (lease a slot; reuses your existing lease instead of leasing a second one) / release (REQUIRED when done — a background watchman nudges you if you forget) / list (all slots + occupancy) / status --slot <bN> / reap --slot <bN> (force-reclaim an abandoned slot, records a reason) / doctor (self-check, read-only). ' +
+      'Actions: acquire (lease a slot; reuses your existing lease instead of leasing a second one) / release (REQUIRED when done — a background watchman nudges you if you forget, and **force-reclaims after ~30 min of silence**) / list (all slots + occupancy) / status --slot <bN> / hold --slot <bN> --holdFor <minutes> [--reason] (keep-alive: the idle reclaim skips a held slot; use it before long downloads or slow queries — no permanent hold) / reap --slot <bN> (force-reclaim an abandoned slot, records a reason) / doctor (self-check, read-only). ' +
       'PAGE: targets / open / goto / eval / text / html / shot / reload / close / click (text or xy, real mouse events). ' +
       'HIGH-LEVEL (v1.130.0): ax (accessibility-tree snapshot -> stable `ref` like e12345; the only honest answer to "is this control clickable") / press (semantic keys & chords: Enter, Escape, Control+A; non-ASCII text must use `type`) / type (browser text input at the focused element) / fill --ref --value (native setter + input/change so React/Vue actually see it; receipt reports the READ-BACK value) / scroll (real wheel events, so lazy-loading and virtual lists fire) / wait --for <selector:|text:|url:|gone:|js:> (in-page polling; timeout says WHAT it waited for and what it last read) / drag --from --to (multi-step mouseMoved; one-jump drags are ignored by sortablejs & friends) / upload --ref --file (paths must stay inside the CCC root) / downloads (pins the capture dir to _tmp/browser-downloads/<slot>) / dialog (default DISMISS — OK often means delete/pay/publish). ' +
       '🔴 Lease before you drive a browser for evidence, and ALWAYS release when finished — an unreleased slot keeps a Chrome process alive and burns power.',
@@ -499,7 +513,11 @@ export function createBrowserSlotTool(ctx: Context) {
       action: { type: 'string', enum: [...SLOT_ACTIONS], required: true, description: 'Subcommand' },
       slot: { type: 'string', description: 'Slot label for status/release/reap (b1..b20, or 1..20); for acquire = request a specific slot (omit = auto-pick a free one)' },
       wait: { type: 'boolean', description: 'acquire: wait until the CDP endpoint actually answers (2 consecutive probes) before returning. Default false (returns once the process is spawned).' },
-      reason: { type: 'string', description: 'reap: why this slot is being force-reclaimed (recorded).' },
+      reason: { type: 'string', description: 'reap / hold: why this slot is being force-reclaimed, or why it must stay alive (recorded).' },
+      // 🔴 键名必须是 `holdFor`，⛔ 不能叫 `for` —— `wait` 已经占用了 `for`（前缀字符串），
+      //    同一个 schema 对象里两次声明同名键 ⇒ **后者覆盖前者**，`hold --for` 会静默拿到 wait 的
+      //    字符串 schema ⇒ 数字被当成非法值。TS1117 只在 typecheck 里报，单测不构造工具就看不见。
+      holdFor: { type: 'number', description: 'hold: keep-alive minutes (max 240). Use before a long download / slow query, or the idle guard will force-reclaim the slot after ~30 min of silence. No permanent hold — renew it instead.' },
       // ── 页面层（v1.129.0 搬入）与扩展层的参数 ─────────────────────
       //
       // 🔴🔴 **这 7 个参数曾长期缺失**（v1.129.0 ~ v1.129.2）：`run()` 一直在读它们，
@@ -650,6 +668,9 @@ export function registerSlotWatchman(ctx: Context): { dispose: () => void } {
     }
     for (const root of roots) {
       try {
+        // 🔴 **顺序不可换**（owner 2026-11-24 令）：**先提醒、后强关**。
+        //    强关函数内部还有第二道闸（`nudges >= 1`），所以即使这里写反也不会误杀 ——
+        //    但两道闸都要留：一道是流程，一道是函数自身的不变式。
         const res = await nudgeStaleSlots(root, async (r, target, message) => {
           const out = await sendToCognitiveTrajectory(ctx, r, target, message, '浏览器槽位看守')
           return { ok: out.ok, detail: out.detail }
@@ -658,6 +679,18 @@ export function registerSlotWatchman(ctx: Context): { dispose: () => void } {
           console.log(
             `[serenity-hooks] 槽位看守：${slotLabel(n.slot)} (${n.state}) → ${n.trajectory || '(无归属)'} ` +
               `${n.delivered ? '已注入' : '注入失败'}：${n.detail}`,
+          )
+        }
+        // 🔴 强关：把"劝"变成"劝不动就关"（owner：「浏览器一直不关的现象严重」）
+        const killed = await forceReapIdleSlots(root, async (r, target, message) => {
+          const out = await sendToCognitiveTrajectory(ctx, r, target, message, '浏览器槽位看守')
+          return { ok: out.ok, detail: out.detail }
+        })
+        for (const k of killed.reaped) {
+          console.warn(
+            `[serenity-hooks] 槽位强关：${slotLabel(k.slot)} → ${k.trajectory || '(无归属)'} ` +
+              `闲置 ${k.idleMin} 分钟：${k.killDetail}｜` +
+              `告知 ${k.delivered ? '已注入' : '未注入'}：${k.deliverDetail}`,
           )
         }
       } catch (err) {
