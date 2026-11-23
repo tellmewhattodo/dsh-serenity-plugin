@@ -64,6 +64,7 @@ import { normalizeSlotId } from '../../browser/process.js'
 import { refToBackendId, renderAx } from '../../browser/ax.js'
 import { parseXY, xyFormHint } from '../../browser/coords.js'
 import { renderHit } from '../../browser/hit-test.js'
+import { loadDomainSkill, recordVisit, domainSkillPrompt, readVisits, hasDomainSkill } from '../../browser/domain-skill.js'
 
 function renderText(value: unknown): ContentBlock[] {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -182,6 +183,29 @@ function extArgs(args: Record<string, unknown>): Record<string, unknown> {
   return out
 }
 
+/**
+ * `open`/`goto` 回执的**域名说明书尾巴**（owner 2026-11-23 令：浏览器扩展 skill 域名强相关）。
+ *
+ * 🔴 为什么是"回执尾巴"而⛔ 不是新注入点：模型刚打开这个站、正要操作它 ——
+ *    此刻把说明书写进**这次调用的结果**里，时机最准，且**零唤醒风险**
+ *    （`kernel/injection-sites.ts` 那张表的 `wakes` 一轴一行都不用改）。
+ *
+ * 🔴 未命中 ⇒ **返回空串**，回执与今天**逐字相同**：绝大多数站没有说明书，
+ *    给它们加一句"本站无说明书"是每天几十次的纯噪声，会把真信号埋掉。
+ *
+ * ⚠️ 任何异常都吞掉 —— 说明书是旁路，⛔ 不许让"打开网页"因它失败。
+ */
+function domainSkillTail(root: string, url: string, sessionId: string, slot: number): string {
+  try {
+    // 记账**先于**注入：即使读说明书失败，"用过这个站"这个事实也要留下（设计 §改动 2）
+    recordVisit(root, url, sessionId, slot)
+    const hit = loadDomainSkill(root, url)
+    return hit ? hit.text : ''
+  } catch {
+    return ''
+  }
+}
+
 /** 动作实现 */
 async function run(
   ctx: Context,
@@ -206,7 +230,10 @@ async function run(
     case 'release': {
       const n = normalizeSlotId(String(args.slot ?? ''))
       if (n === 0) return '⛔ 需要槽位号：release 需要 --slot <b1..b20>'
-      return releaseSlot(root, sessionId, n).detail
+      const r = releaseSlot(root, sessionId, n)
+      // 🔴 只在**真的释放成功**时才提"写说明书"（owner 裁的触发点就是这里）。
+      //    "本就无人占用"那条路径 released=false ⇒ ⛔ 一个字都不加。
+      return r.detail + (r.released && r.ok ? domainSkillPrompt(root) : '')
     }
     case 'reap': {
       const n = normalizeSlotId(String(args.slot ?? ''))
@@ -255,6 +282,23 @@ async function run(
       }
       lines.push('')
       lines.push('用法：acquire（自动挑空槽，可 --slot 指定）· release（用完必须交还）· status --slot b1')
+      // 🔴 P3 读数面（v1.138.1）：域名台账此前**只有写没有读** —— 那等于"记了但没人能看"，
+      //    而"写了没人读"的机制无法被验，也无法被质疑。这里给它一个最小可见面。
+      //    ⚠️ 只列**前 5 个**（按次数降序）：list 是高频调用的动作，⛔ 不能变成一份长报告。
+      const visits = Object.entries(readVisits(root).domains).sort(
+        (a, b) => b[1].opens - a[1].opens || b[1].lastAt - a[1].lastAt,
+      )
+      if (visits.length > 0) {
+        const missing = visits.filter(([h]) => !hasDomainSkill(root, h)).length
+        lines.push('')
+        lines.push(
+          `域名台账 ${visits.length} 个站${missing > 0 ? `（${missing} 个还没有说明书）` : '（都有说明书）'}：`,
+        )
+        for (const [h, v] of visits.slice(0, 5)) {
+          lines.push(`  ${hasDomainSkill(root, h) ? '✓' : '·'} ${h.padEnd(28)} ${v.opens} 次`)
+        }
+        if (visits.length > 5) lines.push(`  ……另有 ${visits.length - 5} 个（BROWSER/_index.json）`)
+      }
       return lines.join('\n')
     }
     case 'doctor': {
@@ -280,7 +324,7 @@ async function run(
       const url = str(args.url)
       if (!url) return '⛔ 需要 --url=<地址>'
       const id = await slotOpen(root, n, sessionId, url)
-      return `[browser_slot] targetId=${id}`
+      return `[browser_slot] targetId=${id}` + domainSkillTail(root, url, sessionId, n)
     }
     case 'goto': {
       const n = needSlot(args)
@@ -288,7 +332,7 @@ async function run(
       if (!url) return '⛔ 需要 --url=<地址>'
       const target = await needTarget(root, n, sessionId, args)
       await slotGoto(root, n, sessionId, target, url)
-      return `[browser_slot] navigate ${target} → ${url}`
+      return `[browser_slot] navigate ${target} → ${url}` + domainSkillTail(root, url, sessionId, n)
     }
     case 'eval': {
       const n = needSlot(args)
@@ -508,7 +552,8 @@ export function createBrowserSlotTool(ctx: Context) {
       'Actions: acquire (lease a slot; reuses your existing lease instead of leasing a second one) / release (REQUIRED when done — a background watchman nudges you if you forget, and **force-reclaims after ~30 min of silence**) / list (all slots + occupancy) / status --slot <bN> / hold --slot <bN> --holdFor <minutes> [--reason] (keep-alive: the idle reclaim skips a held slot; use it before long downloads or slow queries — no permanent hold) / reap --slot <bN> (force-reclaim an abandoned slot, records a reason) / doctor (self-check, read-only). ' +
       'PAGE: targets / open / goto / eval / text / html / shot / reload / close / click (text or xy, real mouse events). ' +
       'HIGH-LEVEL (v1.130.0): ax (accessibility-tree snapshot -> stable `ref` like e12345; the only honest answer to "is this control clickable") / press (semantic keys & chords: Enter, Escape, Control+A; non-ASCII text must use `type`) / type (browser text input at the focused element) / fill --ref --value (native setter + input/change so React/Vue actually see it; receipt reports the READ-BACK value) / scroll (real wheel events, so lazy-loading and virtual lists fire) / wait --for <selector:|text:|url:|gone:|js:> (in-page polling; timeout says WHAT it waited for and what it last read) / drag --from --to (multi-step mouseMoved; one-jump drags are ignored by sortablejs & friends) / upload --ref --file (paths must stay inside the CCC root) / downloads (pins the capture dir to _tmp/browser-downloads/<slot>) / dialog (default DISMISS — OK often means delete/pay/publish). ' +
-      '🔴 Lease before you drive a browser for evidence, and ALWAYS release when finished — an unreleased slot keeps a Chrome process alive and burns power.',
+      '🔴 Lease before you drive a browser for evidence, and ALWAYS release when finished — an unreleased slot keeps a Chrome process alive and burns power. ' +
+      'DOMAIN SKILL (browser extension skill — per-site know-how): `open`/`goto` automatically append `BROWSER/<domain>/SKILL.md` to their receipt when that site has one (nothing is added when it does not — silence means "no notes for this site yet"). On a successful `release` the receipt lists sites you have used that still have no SKILL.md, with the exact path to write. When a site gives you trouble twice, record what you learned there (four sections: quirks / known traps with how you found them / working sequence / what failed).',
     parameters: {
       action: { type: 'string', enum: [...SLOT_ACTIONS], required: true, description: 'Subcommand' },
       slot: { type: 'string', description: 'Slot label for status/release/reap (b1..b20, or 1..20); for acquire = request a specific slot (omit = auto-pick a free one)' },

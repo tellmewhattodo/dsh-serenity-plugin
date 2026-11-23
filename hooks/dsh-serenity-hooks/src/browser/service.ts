@@ -486,11 +486,17 @@ function stampIdentity(
 }
 
 /** release：交还槽位（**杀进程** + 删记录，⛔ 保留 profile 目录） */
-export function releaseSlot(root: string, sessionId: string, target: number): { ok: boolean; detail: string } {
+export function releaseSlot(
+  root: string,
+  sessionId: string,
+  target: number,
+): { ok: boolean; detail: string; released: boolean } {
   const ledger = readLedger()
   const lease = ledger.leases[String(target)]
   if (!lease) {
-    return { ok: true, detail: `槽位 ${slotLabel(target)} 本就无人占用（无需释放）。` }
+    // 🔴 `released: false` 是**结构性**判据，⛔ 不是文案匹配：什么都没发生，
+    //    所以释放后的"说说你的经验"提示**不该出现**（那条路径上提示它 = 凭空催人写文档）。
+    return { ok: true, detail: `槽位 ${slotLabel(target)} 本就无人占用（无需释放）。`, released: false }
   }
   // 🔴 归属校验：只能释放自己的。⛔ 允许释放别人的会让"互相踩"变成合法动作。
   if (sessionId && lease.sessionId && lease.sessionId !== sessionId) {
@@ -499,6 +505,7 @@ export function releaseSlot(root: string, sessionId: string, target: number): { 
       detail:
         `槽位 ${slotLabel(target)} 不属于你（占用者：${lease.trajectory || lease.sessionId || '未知'}）。\n` +
         `  ⛔ 不代别人释放 —— 它可能正在用。若确信它已废弃，用 \`browser_slot reap <槽>\`（看守动作，会记录原因）。`,
+      released: false,
     }
   }
   const destroyed = destroySlot(target, lease.pid)
@@ -514,6 +521,7 @@ export function releaseSlot(root: string, sessionId: string, target: number): { 
   return {
     ok: true,
     detail: `已释放槽位 ${slotLabel(target)}。${destroyed.detail}`,
+    released: true,
   }
 }
 
