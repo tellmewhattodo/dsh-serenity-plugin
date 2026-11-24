@@ -192,10 +192,17 @@ export function decideGuard(input: GuardInput): GuardDecisionResult {
     }
   }
 
-  // 1) 安全模式：bash 一律禁用（标准语义）
-  // 提示不泄露 safe-mode 机制（safe-mode 对 agent 不可见）：模型视角 = bash 工具不存在
-  if (safeModeOn && toolName === 'bash') {
-    return { deny: `bash: no such tool`, kind: 'deny' }
+  // 1) 安全模式：shell 一律禁用（标准语义）
+  // 提示不泄露 safe-mode 机制（safe-mode 对 agent 不可见）：模型视角 = shell 工具不存在
+  //
+  // 🔴 **2026-11-24 判据从「名字等于 'bash'」改成「名字 ∈ 已知 shell 名」**：
+  //    Windows 上宿主注册的是 `pwsh`（见 {@link shellToolNameFor} 头），
+  //    旧写法在 Windows 上**恒不命中** ⇒ 安全模式静默失效。
+  //    这里用**全集**而不是本平台单名 —— 守卫是纯比较、不经 `restrict`，
+  //    多认一个名字零代价，却能补住「可见性表发射失败」那一格
+  //    （那时模型仍看得见 shell，本守卫是唯一拦截）。
+  if (safeModeOn && SAFE_MODE_SHELL_TOOL_NAMES.includes(toolName)) {
+    return { deny: `${toolName}: no such tool`, kind: 'deny' }
   }
 
   // 2) 携带路径参数：先查越界（读写都拦——安全），再查治理文件/黑名单（仅写类工具，对齐 osp）
@@ -413,6 +420,56 @@ function resolveAgentCwd(exec: ToolExecution): string {
 }
 
 /**
+ * 某个平台上的 **shell 工具真名** —— 安全模式拒绝面的**唯一来源**。
+ *
+ * ## 为什么需要它（2026-11-24 `security-serenity` owner 报障，真机缺陷）
+ *
+ * 判据在这里被写死成了 `'bash'`，而**宿主按平台装不同的 shell provider**，
+ * 注册的工具名因此不同（取证：本机宿主包里 `dsh-tool-pwsh/lib/index.js` 逐字
+ * `defineTool({ name: 'pwsh', … })`，`dsh-tool-bash` 同构但叫 `bash`）：
+ *
+ * | 平台 | 宿主包 | 工具名 |
+ * |---|---|---|
+ * | win32 | `dsh-pwsh-local` ／ `dsh-tool-pwsh` | **`pwsh`** |
+ * | POSIX | `dsh-bash-local` ／ `dsh-tool-bash` | `bash` |
+ *
+ * ⇒ Windows 上 `deny: ['bash']` 指向一个**从未注册的名字**：
+ *   `restrict` 要么整次失败、要么藏掉一个不存在的东西，而**`pwsh` 毫发无损**；
+ *   守卫那句 `toolName === 'bash'` 同样**永不命中**。
+ *   现象 = **安全模式在 Windows 上静默无效，而界面显示"已开启"**。
+ *
+ * ## 🔴 为什么是「按平台取单名」而不是「把两个名字都写进表」
+ *
+ * 宿主 `tools.restrict` 契约逐字：**未知名字会让整次调用失败**。
+ * ⇒ `deny: ['bash','pwsh']` 在**任一**平台上都有一个未注册名 ⇒ 整次失败。
+ * 本仓的升级路径会从错误文案里剔掉未知名再重发一次，所以**不一定**退化到失效，
+ * 但那是**白付一次失败**，且把「本该一次成功」变成「依赖降级路径正确」。
+ * ⇒ **拒绝表只能有本平台的真名**。
+ *
+ * ## 表与守卫为什么**不共用同一个集合**
+ *
+ * - **表**（{@link SAFE_MODE_DENY_TOOLS}）：必须**恰好一个真名**（上面那条契约）。
+ * - **守卫**（{@link decideGuard}）：纯字符串比较、不经过 `restrict`，
+ *   认几个候选名**没有代价**，却能补住「表发射失败」那一格
+ *   （发射失败时模型仍看得见 shell，此时守卫是**唯一的**拦截）。
+ *   ⇒ 故守卫用 {@link SAFE_MODE_SHELL_TOOL_NAMES}（全集），不是这一张。
+ *
+ * ⚠️ **纯函数、参数可注入**：`process.platform` 只在**缺省处**读一次，
+ *   测试可直接喂 `'win32'`。CI 跑在 Linux 上 ⇒ win32 分支**永远走不到**，
+ *   不给它一个可注入的入口，这条判据就**没有任何失败信号**。
+ */
+export function shellToolNameFor(platform: string = process.platform): string {
+  return platform === 'win32' ? 'pwsh' : 'bash'
+}
+
+/**
+ * 已知的 shell 工具名全集 —— **只给守卫用**（见 {@link shellToolNameFor} 的对照说明）。
+ *
+ * 加名字的代价是零（纯比较）；**不加**的代价是「宿主换了 provider 名，安全模式又静默失效」。
+ */
+export const SAFE_MODE_SHELL_TOOL_NAMES: readonly string[] = ['bash', 'pwsh']
+
+/**
  * 安全模式开启时从模型工具列表隐藏的工具 —— **安全模式唯一的开关对象**。
  *
  * 🔴 **2026-11-06 owner 令：「安全模式开关只影响 bash 开关」**。
@@ -420,10 +477,14 @@ function resolveAgentCwd(exec: ToolExecution): string {
  * 该配置键**已整条退役**（见 {@link ALWAYS_DENY_TOOLS} 头的判据变更记录）。
  * ⇒ 本表现在**只有一个条目**，而这不是"还没补全"：**安全模式管的就是它**。
  *
+ * 🔴 **2026-11-24 那个"一个条目"是平台相关的**：值是 `bash` 还是 `pwsh`
+ * 由 {@link shellToolNameFor} 决定（Windows 上宿主注册的是 `pwsh`）。
+ * ⛔ **不要写成字面量、也不要把两个名字都塞进来** —— 理由见该函数头。
+ *
  * write/edit 刻意保留：安全模式要挡的是"起 shell 做任意事"，不是挡文件编辑
  * （编辑受路径越界与黑名单两道门约束，与本开关无关）。
  */
-const SAFE_MODE_DENY_TOOLS = ['bash'] as const
+const SAFE_MODE_DENY_TOOLS: readonly string[] = [shellToolNameFor()]
 
 /**
  * **CCC 内恒隐表** —— 只要会话在 CCC 目录内就隐藏，**与安全模式开关无关**。

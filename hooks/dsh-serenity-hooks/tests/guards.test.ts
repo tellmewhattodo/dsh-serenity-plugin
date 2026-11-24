@@ -9,6 +9,8 @@ import {
   getHostScheduleHiddenDiagnostics,
   computeVisibilitySources,
   ALWAYS_DENY_TOOLS,
+  shellToolNameFor,
+  SAFE_MODE_SHELL_TOOL_NAMES,
 } from '../src/seams/guards.js'
 import { REGISTERED_TOOLS, CONDITIONAL_TOOL_COUNT } from '../src/kernel/invariant.js'
 import { registerImChannel, __resetImChannelsForTest } from '../src/im/channels.js'
@@ -87,7 +89,7 @@ describe('guards: decideGuard 纯决策', () => {
     expect(d.deny).not.toContain('serenity')
   })
 
-  it('安全模式 + write（非 bash）干净路径 → allow（标准语义：只禁 bash）', () => {
+  it('安全模式 + write（非 shell）干净路径 → allow（标准语义：只禁 shell）', () => {
     expect(decideGuard(base({ safeModeOn: true, toolName: 'write', pathArg: 'docs/a.md' })).kind).toBe('allow')
   })
 
@@ -99,6 +101,62 @@ describe('guards: decideGuard 纯决策', () => {
 
   it('安全模式 + 读工具 → allow', () => {
     expect(decideGuard(base({ safeModeOn: true, toolName: 'read' })).kind).toBe('allow')
+  })
+
+  /**
+   * 🔴🔴 2026-11-24 Windows 静默失效缺陷的回归钉（`security-serenity` owner 报障）。
+   *
+   * 缺陷形态：`SAFE_MODE_DENY_TOOLS` 与守卫判据都写死 `'bash'`，而**宿主按平台**
+   * 注册 shell 工具（win32 = `pwsh`，POSIX = `bash`）⇒ Windows 上：
+   * 拒绝表指向一个**未注册名**（`restrict` 整次失败或藏了个不存在的东西），
+   * 守卫那句 `=== 'bash'` **永不命中** ⇒ **安全模式静默无效，界面却显示"已开启"**。
+   *
+   * ## 这组用例为什么必须存在（申请 §6 点名的正是这一点）
+   *
+   * CI 跑在 Linux 上 ⇒ win32 分支**永远走不到** ⇒ 平台条件化代码**没有任何失败信号**。
+   * ⇒ 判据必须能**参数化注入平台**，否则"修好了"这件事在 CI 上无法被检验。
+   */
+  describe('🔴 shell 工具名按平台（Windows 上宿主注册的是 pwsh）', () => {
+    it('shellToolNameFor：win32 ⇒ pwsh，其余平台 ⇒ bash', () => {
+      expect(shellToolNameFor('win32')).toBe('pwsh')
+      expect(shellToolNameFor('darwin')).toBe('bash')
+      expect(shellToolNameFor('linux')).toBe('bash')
+    })
+
+    it('🔴 安全模式 + pwsh ⇒ deny，且提示不泄露安全模式机制（Windows 回归钉）', () => {
+      const d = decideGuard(base({ safeModeOn: true, toolName: 'pwsh' }))
+      expect(d.kind).toBe('deny')
+      // 模型视角只是"这个工具不存在"，不是"你被安全模式挡了"
+      expect(d.deny).toBe('pwsh: no such tool')
+      expect(d.deny).not.toContain('safe mode')
+    })
+
+    it('🔴 正控：安全模式关着时 pwsh 放行（证明上面的 deny 不是恒真）', () => {
+      expect(decideGuard(base({ safeModeOn: false, toolName: 'pwsh' })).kind).toBe('allow')
+    })
+
+    it('bash 与 pwsh 都在守卫的候选集里（守卫是纯比较，多认一个零代价）', () => {
+      expect(SAFE_MODE_SHELL_TOOL_NAMES).toContain('bash')
+      expect(SAFE_MODE_SHELL_TOOL_NAMES).toContain('pwsh')
+    })
+
+    /**
+     * 🔴 **拒绝表必须是「本平台单名」，⛔ 不是全集** —— 这是本修复最容易踩回去的一格。
+     *
+     * 宿主 `tools.restrict` 契约：**清单里有未注册名 ⇒ 整次调用失败**。
+     * ⇒ 表里同时写 `bash` 与 `pwsh`，在任一平台上都有一个未注册名。
+     * （本仓会从错误文案剔未知名重发，所以不必然失效，但那是**白付一次失败**
+     *  ＋ 把「一次成功」降级成「依赖降级路径正确」。）
+     *
+     * ⚠️ 本用例跑在 Linux 上，只能断言"当前平台是 bash 且**长度为 1**"；
+     *    win32 那一侧由 `shellToolNameFor('win32')` 的参数化用例覆盖。
+     */
+    it('🔴 安全模式拒绝表 = 本平台单名（⛔ 全集：未注册名会让 restrict 整次失败）', () => {
+      writeFileSync(join(dir, '.serenity-safe-on'), 'x')
+      const deny = denyOf('safeMode', dir)
+      expect(deny.length).toBe(1)
+      expect(deny).toEqual([shellToolNameFor()])
+    })
   })
 
   it('路径越界 → deny', () => {
@@ -279,15 +337,17 @@ describe('safe-mode 工具隐藏（源 = computeVisibilitySources.safeMode）', 
     writeFileSync(join(dir, '.opencode', 'serenity.json'), JSON.stringify({ safeMode: { hiddenTools: list } }))
   }
 
-  it('安全模式开 → 只隐藏 bash；write/edit 保留', () => {
+  it('安全模式开 → 只隐藏 shell 工具（本平台真名）；write/edit 保留', () => {
     writeFileSync(join(dir, '.serenity-safe-on'), 'x')
     const deny = denyOf('safeMode', dir)
-    expect(deny).toEqual(['bash'])
+    // 🔴 2026-11-24：值随平台（Windows 上宿主注册 `pwsh`）。⛔ 不写死 'bash'
+    //    —— 写死会让本用例在 win32 上假红，或（更糟）把"平台相关"这件事重新藏起来。
+    expect(deny).toEqual([shellToolNameFor()])
     expect(deny).not.toContain('write')
     expect(deny).not.toContain('edit')
   })
 
-  it('无安全模式标记 → 本源不贡献任何 deny（bash 也不藏）', () => {
+  it('无安全模式标记 → 本源不贡献任何 deny（shell 工具也不藏）', () => {
     expect(denyOf('safeMode', dir)).toEqual([])
   })
 
@@ -297,16 +357,16 @@ describe('safe-mode 工具隐藏（源 = computeVisibilitySources.safeMode）', 
     //    所以配置面已同批清空（本机 .opencode/serenity.json）。
     writeFileSync(join(dir, '.serenity-safe-on'), 'x')
     declareHidden(['workflow', 'job_kill'])
-    expect(denyOf('safeMode', dir)).toEqual(['bash'])
+    expect(denyOf('safeMode', dir)).toEqual([shellToolNameFor()])
   })
 
-  it('声明读坏 ≠ 安全模式失效：仍然只藏 bash（不抛、不告警）', () => {
+  it('声明读坏 ≠ 安全模式失效：仍然只藏 shell 工具（不抛、不告警）', () => {
     writeFileSync(join(dir, '.serenity-safe-on'), 'x')
     mkdirSync(join(dir, '.opencode'), { recursive: true })
     writeFileSync(join(dir, '.opencode', 'serenity.json'), '{ bad json')
     const src = computeVisibilitySources('s-test', dir).find((x) => x.id === 'safeMode')!
     expect(src.ok).toBe(true)
-    expect([...src.deny]).toEqual(['bash'])
+    expect([...src.deny]).toEqual([shellToolNameFor()])
     expect(src.error).toBeUndefined()
   })
 })

@@ -49,6 +49,9 @@ import { readAdvancedSettings } from '../kernel/config.js'
 import { humorBlock } from './humor.js'
 import { workRegisterBlock } from './work-register.js'
 import { isTrajectoryConstrained, readTrajectoryConstraintAt } from '../trajectory/policy/profile.js'
+// 🔴 纯函数，只读 `process.platform`（缺省参数处读一次）；不引入循环依赖 ——
+//    `guards.ts` 不 import 本文件（已核）。判据：「shell 工具真名」只有**唯一来源**。
+import { shellToolNameFor } from './guards.js'
 import { createTrajectoryPromptReader, trajectoryPromptBlock } from '../trajectory/prompt.js'
 import { planPromptInjection, type RawPromptInjection } from '../trajectory/prompt-injection.js'
 
@@ -527,7 +530,10 @@ export function safeModeBlock(root: string): string {
     'sail unaccompanied.',
     '',
     'Operational details:',
-    '- bash is disabled (hidden and blocked)',
+    // 🔴 2026-11-24：shell 工具名是**平台相关**的（Windows 是 `pwsh`）。
+    //    写死 `bash` 会让 Windows 上的模型读到一句关于不存在的工具的说明，
+    //    而真正被禁的那件东西没被点名（D151 同族：退役/错位词条是零信号熵）。
+    `- ${shellToolNameFor()} is disabled (hidden and blocked)`,
     '- blacklist rules apply to file paths',
     '- CCC governance files (.serenity, .serenity-safe-on) are protected from agent writes',
     '- other read/write tools remain available, subject to path-escape and blacklist guards',
