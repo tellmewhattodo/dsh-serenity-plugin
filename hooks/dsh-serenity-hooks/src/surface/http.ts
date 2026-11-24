@@ -17,6 +17,7 @@ import { extname, join } from 'node:path'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { hostService, hostSessions } from '../host/access.js'
+import { withRouteDisposal } from '../host/effect.js'
 import { getStatus, setSafeMode } from './status.js'
 import { DEFAULT_SERENITY_CONFIG_PATHS, readTrajectorySubscriptions } from '../kernel/ccc.js'
 import { parseTrajectoryCode, trajectoryDescOf } from '../trajectory/core.js'
@@ -248,6 +249,11 @@ export function resolveWorkspace(ctx: Context, params: { sessionId?: string; wor
 export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}): void {
   const configPaths = opts.configPaths ?? DEFAULT_SERENITY_CONFIG_PATHS
 
+  // 🔴 2026-11-24 真机事故修复：本函数注册 9 条路由，此前**全部丢弃 disposer**
+  //    ⇒ 插件卸下时无人摘除，同进程再装配即撞宿主那条 duplicate route throw（整份插件判失败）。
+  //    修法 = 经 withRouteDisposal 转发，路由定义一字未改。见 host/effect.ts 的成因全文。
+  const webServer = withRouteDisposal(ctx, 'serenity status api routes', ctx.webServer)
+
   // 🔴 2026-10-14：`GET /serenity/cheap-workers` 已随 background 模式一并退场 ——
   // 它是**进度文件**的读口，而进度文件只由 background 写；该模式删除后永不会有生产者。
   // 🔴 2026-10-28：cheap-worker 工具本体也整条下线 ⇒ 这条路的两个端点都**永远不会有消费者**。
@@ -256,7 +262,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   // /serenity/image-upload：图片落盘（S142 图片自动识别基础设施——WebUI 粘贴图片 →
   // 模型不支持图片时自动存 _tmp/images_from_user/，agent 经 CCC vlm MSM 自主处理）。
   // client 专属（x-serenity-ui 头）；类型白名单 + 10MB 上限 + CCC 根内写入。
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: UPLOAD_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -285,7 +291,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   // /serenity/file-upload：任意文件落盘（v1.24.1——粘贴非图片文件自动存
   // _tmp/files_from_user/，agent 经 CCC 既有 MSM（pdf-extract/archive-extract 等）自主处理）。
   // client 专属（x-serenity-ui 头）；可执行扩展名拒绝 + 10MB 上限 + CCC 根内写入。
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: FILE_UPLOAD_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -311,7 +317,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
     },
   })
 
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: ROUTE_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -356,7 +362,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   // 不依赖任何具体 CCC。client 专属头）
   // GET  → wire 形态（密码 hash 永不返回；accounts 只含 id/user/hasPassword）
   // PUT  → wire patch 应用（新账号必须带 pass；既有账号 pass 空=保留原 hash）
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: CONFIG_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -400,7 +406,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   // /serenity/cccs：候选认知容器列表（v1.26.2；**原**为设置面板「开放容器」白名单选择的数据源——
   // 该面板区已随面 E 退役，2026-10-15；本端点本身保留，仍是 CCC 枚举的只读口）
   // 只读；与 轨迹约束调试页/微信桥**同一** listCccs——工作区注册表 ∪ 持久化会话 ∪ live）
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: CCCS_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -432,7 +438,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   // ⚠️ **只读**：本端点**不接受写**。订阅表是**配置**，改了要热生效的语义尚未定义
   //    （CRO 开关那种热生效是另一套机制，⛔ 不要顺手把它当模板）⇒ 只读先上线，
   //    写面等 owner 明确要"页面里改订阅"再做（D85：一次只改一件事）。
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: SUBSCRIPTIONS_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -498,7 +504,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   // GET /serenity/weixin/login?key=<loginKey> → { status, accountId?, tokenSaved?, error? }
   // POST { action: 'remove-account', ccc, accountId } → 移除（serenity.json + localstore + 停桥）
   // POST { action: 'save-routes', ccc, routes } / { action: 'set-enabled', ccc, enabled }
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: WEIXIN_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -699,7 +705,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   })
 
   // GET /serenity/weixin/login?key=<loginKey>：扫码状态轮询（面板 1s 间隔）
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: `${WEIXIN_PATH}/login`,
     handler: async (req: IncomingMessage, res: ServerResponse) => {
@@ -767,7 +773,7 @@ export function registerStatusApi(ctx: Context, opts: StatusApiRegistration = {}
   // GET  → 预览（dryRun：列出将删会话，不删）
   // POST { action:'cleanup', olderThanDays } → 执行物理删（x-serenity-ui 头限定——WebUI 按钮）
   const SESSION_CLEANUP_PATH = '/serenity/session-cleanup'
-  ctx.webServer.register({
+  webServer.register({
     kind: 'exact',
     path: SESSION_CLEANUP_PATH,
     handler: async (req: IncomingMessage, res: ServerResponse) => {

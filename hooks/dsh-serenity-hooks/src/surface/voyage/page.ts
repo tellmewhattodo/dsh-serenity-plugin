@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { injectVoyageVocab, injectVoyageVersion, scanVoyageLiveVocab } from './vocab.js'
 import { findPackageRoot, ACC_VERSION } from '../../kernel/constants.js'
+import { withRouteDisposal } from '../../host/effect.js'
 // 类型引用：拉入 webserver 的 cordis 声明增强（ctx.webServer）；运行时擦除
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
@@ -92,7 +93,8 @@ export function registerVoyageApi(
   ctx: Context,
   opts: { assetPath?: string; resolveRoot?: (req: IncomingMessage) => string | null } = {},
 ): void {
-  ctx.webServer.register({
+  // 🔴 2026-11-24 同一处修复：路由 disposer 必须交给拆卸登记，否则再装配即撞宿主 duplicate route。
+  withRouteDisposal(ctx, 'serenity voyage api route', ctx.webServer).register({
     kind: 'exact',
     path: VOYAGE_PATH,
     handler: (req: IncomingMessage, res: ServerResponse) => {

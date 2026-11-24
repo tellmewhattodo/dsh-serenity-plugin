@@ -56,3 +56,55 @@ export function registerDisposer(ctx: unknown, label: string, cleanup: () => voi
     return false
   }
 }
+
+/** 与宿主 `webServer.register` 同形的最小结构（避免为一次调用引入 webserver 类型依赖） */
+interface RouteRegistrar {
+  register: (route: { kind: 'exact' | 'prefix'; path: string; handler: unknown }) => () => void
+}
+
+/**
+ * 把一个 HTTP 路由注册器包成「注册即撤销」。
+ *
+ * ## 为什么必须有这一层（2026-11-24 真机事故）
+ *
+ * 宿主 `WebServer.register()` 只把 disposer **返回**给调用方，**自己不代管**
+ * （`dsh-host-webserver` 逐字：同路径第二次注册 `throw new Error('webserver: duplicate … route')`；
+ * 同类的 `listen()` 反而走 `ctx.effect` ⇒ **拆卸登记是调用方的责任**）。
+ *
+ * 我们此前 11 处注册**全部丢弃返回值** ⇒ 路由挂在宿主表上、插件卸下时无人摘除。
+ * 后果不是"泄漏一点内存"：同一进程内再装配一次就撞上那条 throw，
+ * 而宿主对插件抛错的处理是**整份插件判失败** ⇒ 工具面与附带服务面一起消失，
+ * 而宿主本身照常运行（现象：ACC「突然没了」）。
+ *
+ * ## 形态
+ *
+ * 返回一个与 `ctx.webServer` 同形的对象，`register()` 内部照旧调用真宿主并把
+ * disposer 交给 `registerDisposer`。既有调用点**只改传入的对象**，路由定义一个字不动。
+ *
+ * @param ctx 宿主插件上下文（交给 `registerDisposer` 登记拆卸）
+ * @param label 日志标签，指明是哪一面
+ * @param webServer 真宿主服务（可能是测试替身）
+ * @returns 同形对象；`effect` 不可用时仍照常注册（响亮降级，见 `registerDisposer`）
+ */
+export function withRouteDisposal<T extends object>(ctx: unknown, label: string, webServer: T): T {
+  const real = webServer as unknown as RouteRegistrar
+  const disposers: Array<() => void> = []
+  registerDisposer(ctx, label, () => {
+    // 逆序摘除：与注册顺序相反，避免中间态出现"父先没了子还在"
+    for (let i = disposers.length - 1; i >= 0; i--) {
+      try {
+        disposers[i]?.()
+      } catch (err) {
+        console.warn(`[serenity-hooks] ✗ 路由摘除失败（${label} #${i}）: ${String((err as Error)?.message ?? err)}`)
+      }
+    }
+    disposers.length = 0
+  })
+  const proxy = Object.create(webServer as object) as T
+  ;(proxy as unknown as RouteRegistrar).register = ((route: { kind: 'exact' | 'prefix'; path: string; handler: unknown }) => {
+    const dispose = real.register(route)
+    if (typeof dispose === 'function') disposers.push(dispose)
+    return dispose
+  }) as RouteRegistrar['register']
+  return proxy
+}

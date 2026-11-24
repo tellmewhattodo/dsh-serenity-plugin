@@ -14,6 +14,65 @@
 
 ---
 
+## v1.139.3 — 2026-11-24（🔴 路由注册丢弃 disposer：一次重装配就能让整份插件消失）
+
+> 来源 = **owner 报障**：「切换了一下黑白主题，然后 ACC 就报错了，dsh 本身没崩」。
+> 宿主设置面给出的原因逐字：`webserver: duplicate exact route "/serenity/image-upload"`。
+
+### 一、真因（宿主源码 ＋ 本仓源码逐字对读）
+
+宿主 `WebServer.register()` **只把 disposer 返回给调用方，自己不代管**：
+
+```js
+register(route) {
+  const table = route.kind === "exact" ? this.exact : this.prefixes;
+  if (table.has(route.path)) throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`);
+  table.set(route.path, route);
+  return () => { table.delete(route.path); };   // ← 返回，但不登记
+}
+```
+
+而**同一个类**的 `listen()` 走的是 `ctx.effect(...)`
+⇒ 拆卸登记**是调用方的责任**，不登记就等于把路由永久钉在宿主表上。
+
+本仓此前 **11 处**注册（`surface/http.ts` 9 处 ＋ `surface/voyage/page.ts` 1 处 ＋ faces 注释所述形态）
+**全部丢弃返回值** ⇒ 同一进程内再装配一次即撞上那条 `throw`，
+而宿主对插件抛错的处理是**整份插件判失败** ⇒ 工具面与附带服务面一起消失，宿主本身照常运行。
+
+### 二、改法
+
+`host/effect.ts` 新增 `withRouteDisposal(ctx, label, webServer)`：返回与宿主服务**同形的对象**，
+`register()` 内部照旧调用真宿主，并把 disposer 交给既有的 `registerDisposer`（该机构的注释本就写着
+「注册即效果」，只是从未被用在这类注册上）。
+
+- **路由定义一个字未改** —— 调用点只换传入的对象，风险面因此最小；
+- 摘除**逆序**执行，避免中间态出现「父先没了子还在」；
+- 宿主缺 `ctx.effect` 时**响亮降级**（照常注册 + 告警），⛔ 不让插件启动成为单点。
+
+### 三、判据（本版最值钱的一条）
+
+**既有 fixtures 对这一类失效结构性无判别力**：它们的 `register` 都是 `() => { push(...) }`，
+既不返回 disposer、也不查重 ⇒ 测试全绿而真机炸。
+⇒ 新用例 `tests/route-disposal.test.ts` **显式复刻宿主的拒绝语义**（同路径第二次 ⇒ throw）。
+
+**变异检验**：注掉撤销登记那一行 ⇒ 精确红 **3 条**，其中 C2 抛出的就是**真机那条报错原文**
+（`duplicate exact route "/x"`）⇒ 判据有判别力，不是空转。恢复即绿。
+
+### 四、门禁
+
+`test` 250 files / **3841** tests（＋7）／ `coverage` **91.82%** ／
+`typecheck-host 0.2.2-rc.1`（node 100 ＋ client 193 文件）／ `build` ／ `pack-check` **194 文件** ／ `version` 四面。
+
+### 五、⚠️ 未证明的一格（如实登记）
+
+**「切换主题 ⇒ 装配再跑一次」这一环我没有拿到证据。**
+我查过网页端产物里没有热重载字样，主题设置变更也没有被本插件以那种方式监听。
+⇒ 现在有两种可能并存：① 主题切换间接引起重挂（即本缺陷被触发）；② 另有独立的重复注册源。
+本版修的是**无论如何都错的那一处**（路由不撤），⛔ 不把 ① 写成结论。
+若下次再出现同样现象，请把宿主给出的原因原文给我 —— 若仍是同一条路径，则 ② 需要另查。
+
+---
+
 ## v1.139.2 — 2026-11-24（🔴 Windows 上安全模式是静默空转：拒绝表与守卫都写死了 `bash`）
 
 > 来源 = **`security-serenity` CCC 的 owner** 提交的变更申请（件 `ACC-safe-mode-win32-upgrade-request.md`）。
@@ -3449,6 +3508,7 @@ test **212 files / 3330** ✅ ／ coverage **95.33%** ✅ ／ build ✅ ／ pack
 
 | 版本 | 日期 | 一句话 |
 |---|---|---|
+| v1.139.3 | 2026-11-24 | 🔴 **路由注册丢弃 disposer：一次重装配就让整份插件消失**（owner 报障「切主题后 ACC 报错，dsh 没崩」）：宿主 `WebServer.register()` 只**返回** disposer、**自己不代管**（同类的 `listen()` 反而走 `ctx.effect`）⇒ 本仓 11 处注册全丢返回值 ⇒ 再装配即撞 `duplicate exact route`，而宿主对插件抛错是**整份判失败**。改法 = `withRouteDisposal()` 把 disposer 交给既有 `registerDisposer`，**路由定义一字未改**。🔴 判据沉在**替身要会真拒绝**：既有 fixtures 的 `register` 不返回 disposer 也不查重 ⇒ 结构性无判别力。变异注掉登记行 ⇒ 精确红 3 条，其中 C2 抛的正是真机原文。⚠️ **「切主题⇒重挂」这一环未取证**，⛔ 未写成结论 |
 | v1.139.2 | 2026-11-24 | 🪟 🔴 **Windows 上安全模式是静默空转**（`security-serenity` owner 报障）：拒绝表与守卫都写死 `'bash'`，而宿主在 win32 注册的是 **`pwsh`** ⇒ 表指向未注册名、守卫永不命中、界面仍显示"已开启"。修法 = 抽 `shellToolNameFor(platform)` **单一来源**；🔴 **表只放本平台单名**（`restrict` 对未知名整次失败），**守卫用全集**（纯比较、不经 restrict，能补住表发射失败那一格）。申请推荐的「候选名 ∩ 已注册名」**未采用** —— 本仓 2026-10-22 真机事故证明 `tools.get()` 全局视图查 agent-plane 工具恒 undefined，会把在册名判成未注册。三处变异各自精确红（1／1／4） |
 | v1.139.1 | 2026-11-24 | 🌐 **A129 批次 3**：六处漏网回执改英文（`reasons[]`／`renderHit` 四条／域台账提示／`tailLogHint`／git 三处／空壳告警）。🔴 **最值钱的是判据**：「回执文案」不止 `return` 后面的字符串 —— `reasons[]` 是**被回执渲染的数据字段**，静态 grep 一次都搜不到，**只有真机跑一次 `list` 才看见它夹着中文** ⇒ 验收「英文是否全覆盖」只能靠真机看输出 |
 | v1.139.0 | 2026-11-24 | 🌐 **A129 工具回执英文化（批次 1＋2）**：`browser_slot` 全部回执／拒绝／提醒／强关告知 ＋ `cognitive_trajectory` 4 处，全改英文并压短。🔴 先报了一条与预期不符的读数（注释不进上下文、全仓 800+ 处、英文不比中文短多少 —— 真省的是删解释）；🔴 连带 15 条断言跟着改，其中一条原本拿**单个汉字**当判据 |
