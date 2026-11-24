@@ -180,7 +180,9 @@ describe('D9/D10/D11 释放提示（判据 5 ／ 6，设计点名最容易写错
     recordVisit(ROOT, 'https://example.com/', 's', 1)
     const t = domainSkillPrompt(ROOT)
     expect(t).toContain('example.com')
-    expect(t).toContain('累计 2 次')
+    // A129 批次 3：文案改英文后，钉**次数与单位**（⛔ 放宽成"含 example.com 就算"）——
+    // 这一格的判别力在于「提示里必须写清用过几次」，那是它值不值得写的唯一依据。
+    expect(t).toContain('2 open(s)')
     expect(t).toContain('BROWSER/example.com/SKILL.md')
     // 四段模板必须在（否则模型不知道按什么结构写）
     expect(t).toContain('已知坑')

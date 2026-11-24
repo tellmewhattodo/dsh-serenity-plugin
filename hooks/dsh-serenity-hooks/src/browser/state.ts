@@ -208,7 +208,7 @@ export function deriveSlotState(
   if (!lease) return { state: 'free', reasons: [] }
 
   const reasons: string[] = []
-  if (proc && !proc.alive) return { state: 'orphaned', reasons: ['进程已退出'] }
+  if (proc && !proc.alive) return { state: 'orphaned', reasons: ['process exited'] }
 
   const idle = now - lease.lastActionAt
   // 🔴 保活期间**不判闲置**（owner 2026-11-24 裁：同意 hold）。

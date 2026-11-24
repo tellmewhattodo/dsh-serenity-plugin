@@ -394,7 +394,7 @@ export function domainSkillPrompt(cccRoot: string): string {
 
     const lines = shown.map(([host, v]) => {
       const p = domainSkillPath(cccRoot, host)
-      return `  · ${host}　累计 ${v.opens} 次　⛔ 还没有说明书\n      → ${p}`
+      return `  · ${host}　${v.opens} open(s)　⛔ no notes yet\n      → ${p}`
     })
     if (rest > 0) lines.push(`  · 另有 ${rest} 个站用过但没有说明书（这张表在 BROWSER/_index.json）`)
 

@@ -978,12 +978,12 @@ function tailLogHint(logPath: string, maxLines = 6): string {
     const lines = text.split('\n').filter((l) => /ERROR|FATAL|Missing|Authorization|failed|Exiting/.test(l))
     if (lines.length > 0) {
       const shown = lines.slice(-maxLines)
-      return `  ⇒ Chrome 自己的输出（最后 ${shown.length} 行关键报错）：\n` + shown.map((l) => `     ${l.trim()}`).join('\n')
+      return `  ⇒ Chrome's own output (last ${shown.length} key error lines):\n` + shown.map((l) => `     ${l.trim()}`).join('\n')
     }
   } catch {
-    /* 日志还没写出来 */
+    /* log not written yet */
   }
-  return `  ⇒ 日志：${logPath}`
+  return `  ⇒ log: ${logPath}`
 }
 
 /** CDP 就绪探测（`/json/version` 能返回 JSON 即就绪） */

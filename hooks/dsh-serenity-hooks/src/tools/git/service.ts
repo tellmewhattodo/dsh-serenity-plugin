@@ -121,7 +121,7 @@ function hasRemote(root: string): boolean {
 
 /** 推送成功与否的**唯一**核验指令（给使用者，也写进回执） */
 function verifyHint(branch: string): string {
-  return `🔴 核验（唯一判据）：git ls-remote origin ${branch}，或 git fetch && git rev-parse origin/${branch} —— 与本地 HEAD 比对。**不要采信任何回执。**`
+  return `🔴 Verification (the only honest check): git ls-remote origin ${branch}, or git fetch && git rev-parse origin/${branch} — compare against local HEAD. **Do not trust any receipt.**`
 }
 
 const REJECTED_TEXT = (branch: string): string =>
@@ -296,7 +296,7 @@ export function runGit(root: string, args: GitArgs): JsonValue {
       const branch = getCurrentBranch(root)
       const fetchResult = git(root, ['fetch', 'origin', branch], netTimeout())
       if (fetchResult.timedOut) {
-        return `[TIMEOUT] git fetch 在 ${netTimeout() / 1000}s 内未结束 —— **是否已拉到【未确认】**；未做合并。`
+        return `[TIMEOUT] git fetch did not finish within ${netTimeout() / 1000}s — **whether it fetched is UNCONFIRMED**; no merge performed.`
       }
       if (!fetchResult.ok) return `[WARN] fetch failed:\n${fetchResult.stderr || fetchResult.stdout}`
       const revResult = git(root, ['rev-list', '--count', 'HEAD..FETCH_HEAD'])
@@ -304,7 +304,7 @@ export function runGit(root: string, args: GitArgs): JsonValue {
       if (revResult.stdout === '0' || revResult.stdout === '') return 'Already up to date.'
       const mergeResult = git(root, ['merge', '--ff-only', 'FETCH_HEAD'])
       if (mergeResult.timedOut) {
-        return `[TIMEOUT] git merge 在 ${localTimeout() / 1000}s 内未结束 —— **合并是否完成【未确认】**。`
+        return `[TIMEOUT] git merge did not finish within ${localTimeout() / 1000}s — **whether the merge completed is UNCONFIRMED**.`
       }
       if (mergeResult.ok) {
         const msg = mergeResult.stdout || 'Pulled successfully.'

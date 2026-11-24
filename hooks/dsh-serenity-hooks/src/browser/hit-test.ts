@@ -83,13 +83,13 @@ export function renderHit(v: HitVerdict): string {
   switch (v.kind) {
     case 'ok':
       return v.node
-        ? `命中 <${v.node.nodeName.toLowerCase()}${v.node.id ? ` id="${v.node.id}"` : ''}>`
-        : '命中（未取反查节点）'
+        ? `hit <${v.node.nodeName.toLowerCase()}${v.node.id ? ` id="${v.node.id}"` : ''}>`
+        : 'hit (no node resolved)'
     case 'blocked':
-      return `🔴 实际命中的不是你指定的元素：${v.why}`
+      return `🔴 The hit is NOT the element you named: ${v.why}`
     case 'blank':
-      return '🔴 这个点上没有元素（页面留白／坐标算错了）'
+      return '🔴 No element at that point (page whitespace / wrong coordinates)'
     case 'offscreen':
-      return `🔴 ${v.why} ⇒ 先 scroll 再点，⛔ 别"点一下试试"`
+      return `🔴 ${v.why} ⇒ scroll first, then click — ⛔ do not "just try clicking"`
   }
 }

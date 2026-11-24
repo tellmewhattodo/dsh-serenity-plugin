@@ -61,7 +61,13 @@ describe('judgeHit：三种"其实没点到目标"的形态各自说得清', () 
 
   it('H8 blank 的回执要指出两个可能（留白 / 坐标算错），⛔ 不说"点击成功"', () => {
     const s = renderHit(judgeHit({ inViewport: true, viewport: VP }))
-    expect(s).toContain('没有元素')
-    expect(s).not.toContain('成功')
+    expect(s).toContain('No element')
+    // 两个可能各自都要说到（用例名就是这条要求，⛔ 只钉一个词）
+    expect(s).toContain('whitespace')
+    expect(s).toContain('coordinates')
+    // ⛔ 不读成"点到了"：原文钉的是"不许出现成功字样"，换成英文后等值是 success；
+    // 另加一条结构钉 —— `hit <tag>` 是 ok 分支的形状，blank 分支绝不许长出它。
+    expect(s).not.toContain('success')
+    expect(s).not.toContain('hit <')
   })
 })

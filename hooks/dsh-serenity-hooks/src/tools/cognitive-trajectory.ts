@@ -1004,6 +1004,6 @@ function renderWakeEntry(e: WakeEntry): string {
  * @returns 提示文本；无异常 → null（**通过就静默**）
  */
 function advisoryHint(dirName: string, mdPath: string): string | null {
-  if (!existsSync(mdPath)) return `⚠ ${dirName}: 目录存在但没有 SESSION.md（空壳）——本次激活会失败，先补正文或改用 create`
+  if (!existsSync(mdPath)) return `⚠ ${dirName}: directory exists but has no SESSION.md (empty shell) — activation will fail; write the body first, or use create`
   return null
 }

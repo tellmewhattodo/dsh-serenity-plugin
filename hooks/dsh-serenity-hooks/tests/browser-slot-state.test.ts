@@ -149,7 +149,7 @@ describe('提醒时机与文本（同值歧义：四成因必须四种动作）'
   })
 
   it('⑭ 🔴 orphaned 与 stale 的文本**不同**，且都写明具体动作', () => {
-    const a = nudgeText(1, 'orphaned', ['进程已退出'], P)
+    const a = nudgeText(1, 'orphaned', ['process exited'], P)
     const b = nudgeText(1, 'stale', ['已 20 分钟无动作'], P)
     expect(a).not.toEqual(b)
     // orphaned 的正确动作是"重新租一个"，不是"管好你的浏览器"
