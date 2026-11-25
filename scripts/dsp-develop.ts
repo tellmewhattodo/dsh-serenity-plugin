@@ -601,7 +601,7 @@ function syncPackageReadme(): void {
   console.log(`[dsp-develop] ✓ 包内 README 已同步（README.md → hooks/dsh-serenity-hooks/README.md，${out.length} 字节）`)
 }
 
-function cmdPublish(): void {
+function cmdPublish(rest: string[] = []): void {
   // npm publish @shgroup/dsh-serenity-hooks（cwd=hooks；凭据走 ~/.npmrc；publishConfig.access=public 已声明）
   // 发布前先构建（lib/ 最新）；npm cache 指向可写临时目录（沙箱 ~/.npm 只读）
   // v1.17.4：显式 --registry https://registry.npmjs.org/ —— ~/.npmrc 默认 registry 可能指向
@@ -622,11 +622,22 @@ function cmdPublish(): void {
   //   ⛔ **不是"少验了一次类型"**：typecheck 仍是发布前的必过门，只是从 2 次变 1 次。
   //   判据可证伪 = 故意引入一个类型错误，发布链必须仍在此处红。
   verifyLockfile()
-  cmdTypecheck()
-  cmdTest()
-  cmdBuild({ skipTypecheck: true })
-  syncPackageReadme()
-  verifyTarball()
+  // 🔴 2026-11-25（实测代价）：整条链在前置门禁上就要 ~163s(typecheck) + ~34s(测试) + build，
+  //    而 MSM 调用有 **600s 硬上限** ⇒ 一次超时后，**npm publish 那一段根本没执行**，
+  //    但回执里前面全是 ✓ ⇒ 看起来像"发布过了"。实测：1.139.4 首跑超时，registry 仍 404。
+  //    重跑整条链等于把已经绿过的门禁**再跑一遍**（不增加任何验证，只增加撞上限的概率）。
+  //    ⇒ 加 `--skip-gates`：**只在门禁已在本轮单独逐项跑绿**时使用，直接做上传那段。
+  //    ⚠️ 它跳过的是"重复执行"，⛔ 不是"跳过验证"：谁用它，谁就要能指出门禁是哪一次跑的。
+  const skipGates = rest.includes('--skip-gates')
+  if (skipGates) {
+    console.log('[dsp-develop] ⚠️ --skip-gates：跳过前置门禁（假定本轮已单独跑绿），直接上传')
+  } else {
+    cmdTypecheck()
+    cmdTest()
+    cmdBuild({ skipTypecheck: true })
+    syncPackageReadme()
+    verifyTarball()
+  }
   const cache = join(process.env.HOME ?? '', '.cache', 'npm-publish')
   const r = run('npm', ['publish', '--access', 'public', '--registry', 'https://registry.npmjs.org/'], {
     cwd: HOOKS_DIR,
@@ -3924,7 +3935,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         break
       }
       case 'squash-history': cmdSquashHistory(rest[0]); break
-      case 'publish': cmdPublish(); break
+      case 'publish': cmdPublish(rest); break
       // 落地判据可单独调用（发布后复核 / 事后审计都用它）——**只读**，不改任何东西。
       // ⚠️ 判据 = **三个读数任一为真** ⇒「上架成立」。
       // 🔴 2026-10-11 实测（S142）：**三读数全假时只能说"未确认"，不能说"真没有"** ——
