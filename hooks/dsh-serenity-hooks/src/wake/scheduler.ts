@@ -791,7 +791,7 @@ function renameCarrierTitle(
     //    读口缺失 ⇒ 按旧行为写（不引入回归）。
     const prefix = namingTitleFor(info)
     const read = readCurrentTitle(titles, session)
-    if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix)) return ', 保留用户标题'
+    if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix, read.sourceKind)) return ', 保留用户标题'
     titles.rename(session, namingTitleFor(info))
     return ', titled'
   } catch (err) {

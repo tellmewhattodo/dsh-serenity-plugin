@@ -839,9 +839,22 @@ export function namingTitleFor(active: ActiveSessionInfo, summary?: string): str
  * @param expectedPrefix 我们这一轮本该生成的标题前缀（`namingTitleFor` 去掉概括部分）
  * @returns true = 跳过重命名（保留用户的名字）；false = 可以写
  */
-export function shouldKeepUserTitle(currentTitle: string | undefined, expectedPrefix: string): boolean {
+export function shouldKeepUserTitle(
+  currentTitle: string | undefined,
+  expectedPrefix: string,
+  sourceKind?: string,
+): boolean {
   if (typeof currentTitle !== 'string' || currentTitle.trim() === '') return false
   if (expectedPrefix === '') return false
+  // 🔴🔴 **机器生成的标题一律不算"用户改过"**（2026-11-25 真机回归后订正）。
+  //
+  // 宿主 `dsh-session-title` 自带**自动命名**：首条 user 消息落盘时它会自己 append 一条
+  // `source: { kind: 'fallback' }`（取前若干词），装了 LLM provider 时则是
+  // `source: { kind: 'provider' }`。这两类**都不是人改的** —— 它们是机器抢在我们前面写的。
+  // 只看形状（v1.139.4 初版）会把它们判成"用户改过 ⇒ 保留"，于是**我们永远不改名**，
+  // 侧栏就一直显示宿主自动起的名字 —— 那正是 owner 报的「新建轨迹自动命名坏了」。
+  // ⇒ **判据必须是二维的**：先问「谁写的」（source），再问「是不是我们写的」（形状）。
+  if (sourceKind === 'fallback' || sourceKind === 'provider') return false
   const t = currentTitle.trim()
   // 精确等于前缀（无概括那一版，如 `S142-2026-08-24`）也算我们自己写的
   if (t === expectedPrefix) return false
@@ -859,13 +872,23 @@ export function shouldKeepUserTitle(currentTitle: string | undefined, expectedPr
  * @param session 目标会话
  */
 export function readCurrentTitle(
-  titles: { get?: (session: unknown) => { title?: unknown } | undefined } | undefined,
+  titles: { get?: (session: unknown) => { title?: unknown; source?: unknown } | undefined } | undefined,
   session: unknown,
-): { state: 'unreadable' } | { state: 'ok'; title: string | undefined } {
+): { state: 'unreadable' } | { state: 'ok'; title: string | undefined; sourceKind?: string } {
   if (!titles || typeof titles.get !== 'function') return { state: 'unreadable' }
   try {
     const snap = titles.get(session)
-    return { state: 'ok', title: typeof snap?.title === 'string' ? snap.title : undefined }
+    const title = typeof snap?.title === 'string' ? snap.title : undefined
+    // 🔴 宿主快照里 `source` 是 `{ kind: 'user' | 'fallback' | 'provider' }`
+    //    （`dsh-session-title` 的 `copySessionTitleSource` 逐字三种）。
+    //    取它不是为了信它（我们自己 rename 也标 user），而是为了**排除机器生成的两类**
+    //    —— 见 shouldKeepUserTitle 的第二维判据。
+    const kind = (snap?.source as { kind?: unknown } | undefined)?.kind
+    return {
+      state: 'ok',
+      title,
+      ...(typeof kind === 'string' ? { sourceKind: kind } : {}),
+    }
   } catch {
     // 读口在、但这次读失败 ⇒ 也是"读不到"⇒ 保守侧（调用方不覆盖）
     return { state: 'unreadable' }

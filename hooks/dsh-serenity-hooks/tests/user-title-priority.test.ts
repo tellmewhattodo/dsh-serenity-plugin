@@ -68,6 +68,82 @@ describe('shouldKeepUserTitle — 形状判据', () => {
   })
 })
 
+/**
+ * 🔴🔴 2026-11-25 真机回归（owner：「新建轨迹自动命名坏了」）—— 这一组是本轮**新增**的，
+ * 也是当初那 12 条用例**结构上看不见**的一格。
+ *
+ * ## 当初错在哪（必须留住，否则还会再犯）
+ *
+ * v1.139.4 初版的判据**只有形状一维**：「不符合 `<S编号>-<日期>` 就当作人改过」。
+ * 它默认了一个**未经验证的前提**：会话上出现的标题只有两种来源 —— 我们写的、人写的。
+ *
+ * 真机推翻了它：宿主 `dsh-session-title` **自带自动命名**（首条 user 消息时 append），
+ * 两种机器来源：
+ *   · `source.kind = 'fallback'` —— 取首条消息前若干词（确定性兜底）
+ *   · `source.kind = 'provider'` —— 装了 LLM 标题 provider 时由模型生成
+ * 这两类**都不是人改的**。旧判据把宿主自动起的名当成"用户的自定义标题"⇒ 一律保留
+ * ⇒ **我们永远不改名** ⇒ 侧栏一直显示宿主那串自动名字。
+ *
+ * ⇒ 判据必须是**二维**的：① 谁写的（source，用来**排除**机器生成）
+ *   ② 是不是我们写的（形状，用来识别我们上一轮写的）。
+ *
+ * ⚠️ 注意 `source.kind === 'user'` **仍然不能**当作"人改的"——我们自己 rename 也标 user
+ *    （见本文件头注）。所以 source 这一维**只用来排除 fallback/provider**，正着用不能用。
+ */
+describe('shouldKeepUserTitle — 第二维：排除宿主自动生成的标题（真机回归）', () => {
+  const P = 'S142-2026-08-24'
+
+  it('C15 host fallback 标题（首条消息前几词）⇒ 必须允许我们改名（⛔ 不保留）', () => {
+    // 真机形态：宿主取首条用户消息开头当标题，如「在 dsh 中配置 Ollama 订阅」
+    expect(shouldKeepUserTitle('在 dsh 中配置 Ollama 订阅', P, 'fallback')).toBe(false)
+  })
+
+  it('C16 host provider 标题（LLM 生成）⇒ 必须允许我们改名', () => {
+    expect(shouldKeepUserTitle('Ollama 订阅配置讨论', P, 'provider')).toBe(false)
+  })
+
+  it('C17 真实人工改的标题（source=user 且形状不符）⇒ 仍要保留（⛔ 别把它一起放开）', () => {
+    expect(shouldKeepUserTitle('我的私人笔记本', P, 'user')).toBe(true)
+  })
+
+  it('C18 source 缺失（旧服务/替身）⇒ 退回纯形状判据，行为与 v1.139.4 一致', () => {
+    expect(shouldKeepUserTitle('我的私人笔记本', P, undefined)).toBe(true)
+    expect(shouldKeepUserTitle(`${P}-新概括`, P, undefined)).toBe(false)
+  })
+
+  it('C19 我们自己写的标题 + source=user（我们 rename 就标 user）⇒ 允许覆盖', () => {
+    expect(shouldKeepUserTitle(`${P}-旧概括`, P, 'user')).toBe(false)
+  })
+
+  it('C20 fallback 但**恰好**等于我们的前缀 ⇒ 仍然允许写（两维都不拦）', () => {
+    expect(shouldKeepUserTitle(P, P, 'fallback')).toBe(false)
+  })
+})
+
+describe('readCurrentTitle — 必须把 source 一并读出来', () => {
+  it('C21 宿主快照含 source ⇒ 透出 sourceKind', () => {
+    const titles = { get: () => ({ title: '宿主自动名', source: { kind: 'fallback' } }) }
+    expect(readCurrentTitle(titles, {})).toEqual({
+      state: 'ok',
+      title: '宿主自动名',
+      sourceKind: 'fallback',
+    })
+  })
+
+  it('C22 快照无 source ⇒ 不给 sourceKind 键（⛔ 不给一个假的默认值）', () => {
+    const titles = { get: () => ({ title: '某标题' }) }
+    const r = readCurrentTitle(titles, {})
+    expect(r.state).toBe('ok')
+    expect('sourceKind' in r).toBe(false)
+  })
+
+  it('C23 source.kind 非字符串 ⇒ 不透出（脏数据不参与判据）', () => {
+    const titles = { get: () => ({ title: '某标题', source: { kind: 123 } }) }
+    const r = readCurrentTitle(titles, {})
+    expect('sourceKind' in r).toBe(false)
+  })
+})
+
 describe('readCurrentTitle — 「读口缺失」与「读到空标题」必须分开', () => {
   it('C11 服务没有 `get` ⇒ unreadable（结构上无法判断）', () => {
     expect(readCurrentTitle({}, {})).toEqual({ state: 'unreadable' })

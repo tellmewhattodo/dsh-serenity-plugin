@@ -554,7 +554,7 @@ function renameAfterRebuild(ctx: Context, agent: Agent, pending: PendingRebuild)
     //    读口缺失 ⇒ 按旧行为写（不引入回归）。
     const prefix = namingTitleFor(info)
     const read = readCurrentTitle(titles, agent.session)
-    if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix)) {
+    if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix, read.sourceKind)) {
       console.log(`[serenity-hooks] rebuild 后保留用户自定义标题，不覆盖: ${read.title ?? ''}`)
       return
     }

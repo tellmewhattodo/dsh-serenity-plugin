@@ -386,7 +386,7 @@ export function renameDshSessionOnUse(
   session: unknown,
   titles: {
     rename: (session: unknown, title: string) => unknown
-    get?: (session: unknown) => { title?: unknown } | undefined
+    get?: (session: unknown) => { title?: unknown; source?: unknown } | undefined
   } | undefined,
   active: ActiveSessionInfo,
   summary?: string,
@@ -399,8 +399,13 @@ export function renameDshSessionOnUse(
   //    因为宿主把**我们自己**的 rename 也标成 user（那样会把自己焊死）。
   //    🔴 读口缺失（替身/旧形态服务）⇒ 按旧行为直接写，不引入回归。
   const prefix = namingTitleFor(active)
-  const read = readCurrentTitle(titles, session)
-  if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix)) {
+  // 传 `get` 时把 source 也读出来（第二维判据：机器生成的标题不算用户改过）
+  const titlesWithGet = titles as {
+    rename: (session: unknown, title: string) => unknown
+    get?: (session: unknown) => { title?: unknown; source?: unknown } | undefined
+  }
+  const read = readCurrentTitle(titlesWithGet, session)
+  if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix, read.sourceKind)) {
     return { ok: true, title: read.title ?? '', kept: true }
   }
   try {
