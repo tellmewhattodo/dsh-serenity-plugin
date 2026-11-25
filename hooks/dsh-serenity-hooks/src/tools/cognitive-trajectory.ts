@@ -65,6 +65,8 @@ import {
   DEFAULT_SESSION_SCOPE,
   getActiveSessionInfo,
   namingTitleFor,
+  readCurrentTitle,
+  shouldKeepUserTitle,
   summarize,
   type ActiveSessionInfo,
   type CreateSessionResult,
@@ -382,13 +384,25 @@ interface RenameOnUseDeps {
 export function renameDshSessionOnUse(
   deps: RenameOnUseDeps,
   session: unknown,
-  titles: { rename: (session: unknown, title: string) => unknown } | undefined,
+  titles: {
+    rename: (session: unknown, title: string) => unknown
+    get?: (session: unknown) => { title?: unknown } | undefined
+  } | undefined,
   active: ActiveSessionInfo,
   summary?: string,
-): { ok: true; title: string } | { ok: false; reason: string } {
+): { ok: true; title: string; kept?: false } | { ok: true; title: string; kept: true } | { ok: false; reason: string } {
   if (!deps.sessionTitleAvailable) return { ok: false, reason: 'sessionTitle service unavailable' }
   if (!titles || typeof titles.rename !== 'function') return { ok: false, reason: 'sessionTitle service unavailable' }
   const title = namingTitleFor(active, summary)
+  // 🔴 owner 2026-11-25：用户手改的标题优先，不覆盖。
+  //    判据 = 形状（见 core.ts 的 shouldKeepUserTitle）—— ⛔ 不看 source.kind，
+  //    因为宿主把**我们自己**的 rename 也标成 user（那样会把自己焊死）。
+  //    🔴 读口缺失（替身/旧形态服务）⇒ 按旧行为直接写，不引入回归。
+  const prefix = namingTitleFor(active)
+  const read = readCurrentTitle(titles, session)
+  if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix)) {
+    return { ok: true, title: read.title ?? '', kept: true }
+  }
   try {
     titles.rename(session, title)
     return { ok: true, title }
@@ -440,7 +454,10 @@ export function renameDshSessionForActive(
       info,
       summary,
     )
-    if (result.ok) {
+    if (result.ok && result.kept) {
+      // 出声（D186：守卫可以拒绝，但不许不出声）—— 否则"没改"会表现成"改了没用"
+      console.log(`[serenity-hooks] 保留用户自定义标题，不覆盖: ${result.title}`)
+    } else if (result.ok) {
       console.log(`[serenity-hooks] dsh 会话已重命名: ${String((dshSession as { id?: string }).id ?? '?')} → ${result.title}`)
     } else {
       console.warn(`[serenity-hooks] dsh 会话重命名未执行: ${result.reason}`)

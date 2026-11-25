@@ -54,6 +54,8 @@ import {
   parseSessionContextFromEvents,
   extractSessionMdPathFromText,
   namingTitleFor,
+  readCurrentTitle,
+  shouldKeepUserTitle,
   parseTrajectoryCode,
   sessionEvents,
 } from './core.js'
@@ -539,9 +541,21 @@ function renameAfterRebuild(ctx: Context, agent: Agent, pending: PendingRebuild)
     const sessionId = parseTrajectoryCode(dirName) ?? dirName.replace(/^\d{4}-\d{2}-\d{2}--/, '')
     const info = { sessionId, dirName, mdPath }
     const title = namingTitleFor(info, pending.summary)
-    const titles = hostService<{ rename?: (session: unknown, title: string) => unknown }>(ctx, 'sessionTitle')
+    const titles = hostService<{
+      rename?: (session: unknown, title: string) => unknown
+      get?: (session: unknown) => { title?: unknown } | undefined
+    }>(ctx, 'sessionTitle')
     if (!titles || typeof titles.rename !== 'function') {
       console.warn('[serenity-hooks] rebuild 后重命名跳过: sessionTitle 服务不可用')
+      return
+    }
+    // 🔴 owner 2026-11-25：用户手改的标题优先，不覆盖（判据 = 形状，见 core.ts）。
+    //    这一处正是 owner 亲历的场景：「上下文交接以后我得重命名会被覆盖」。
+    //    读口缺失 ⇒ 按旧行为写（不引入回归）。
+    const prefix = namingTitleFor(info)
+    const read = readCurrentTitle(titles, agent.session)
+    if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix)) {
+      console.log(`[serenity-hooks] rebuild 后保留用户自定义标题，不覆盖: ${read.title ?? ''}`)
       return
     }
     // 方法调用保 this 绑定（v1.23.2 教训：不解构 rename 后裸调用）

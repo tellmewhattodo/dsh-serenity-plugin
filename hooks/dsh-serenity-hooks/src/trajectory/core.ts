@@ -808,6 +808,72 @@ export function namingTitleFor(active: ActiveSessionInfo, summary?: string): str
   return active.dirName
 }
 
+/**
+ * 是否应当**跳过**重命名（用户手改过的标题优先级最高，不覆盖）。
+ *
+ * ## 需求来源（owner 2026-11-25 原话）
+ *
+ * 「就是上下文交接以后我得重命名会被覆盖」「按理说自己重命名的应该是优先级最高的吧」
+ * ⇒ 用户手工起的名字**必须压过**我们按 `编号-日期-概括` 自动生成的名字。
+ *
+ * ## 为什么⛔不能直接看宿主 `source.kind === 'user'`
+ *
+ * 宿主 `sessionTitle.rename()` —— **我们自己改名走的也是它** —— 落盘的来源**恒为**
+ * `{ kind: 'user' }`（`dsh-session-title` 逐字：`session.append('session/title', { … source: { kind: 'user' } })`）。
+ * ⇒ 若把"来源=user"当作"人改的"，**连我们自己每次 regenerate 都会被自己挡住**，
+ *   概要再也更新不了（那是把功能焊死，不是尊重用户）。
+ *
+ * ## 判据：认**形状**，不认来源
+ *
+ * 我们生成的标题必然以 `<S编号>-<日期>` 开头（无日期时以 `<S编号>` 开头）。
+ * ⇒ **当前标题不符合这个前缀** ⟺ 用户改过 ⟺ 不动它。
+ * ⇒ 符合前缀 ⇒ 那（几乎必然）是我们上一轮写的，允许用新概括覆盖。
+ *
+ * 🔴 **"读不到"≠"用户改过"**（2026-11-25 首次实现写错的地方）：
+ *   会话**还没有标题**时（新建载体、替身服务不提供读口）⇒ 我们起**第一个**名字，
+ *   那是"命名"而不是"覆盖"，**必须允许**。
+ *   把它判成"保留"会让整条命名链在服务形态不完整时**整体失效**
+ *   （实证：一次错误收窄让 11 条既有用例全红，功能等于被自己焊死）。
+ *
+ * @param currentTitle 会话当前标题（`undefined`／空串 = 尚无标题）
+ * @param expectedPrefix 我们这一轮本该生成的标题前缀（`namingTitleFor` 去掉概括部分）
+ * @returns true = 跳过重命名（保留用户的名字）；false = 可以写
+ */
+export function shouldKeepUserTitle(currentTitle: string | undefined, expectedPrefix: string): boolean {
+  if (typeof currentTitle !== 'string' || currentTitle.trim() === '') return false
+  if (expectedPrefix === '') return false
+  const t = currentTitle.trim()
+  // 精确等于前缀（无概括那一版，如 `S142-2026-08-24`）也算我们自己写的
+  if (t === expectedPrefix) return false
+  // 前缀 + `-` + 概括 ⇒ 我们自己写的（允许换新概括）
+  return !t.startsWith(`${expectedPrefix}-`)
+}
+
+/**
+ * 读会话当前标题；**读口本身缺失时返回 `null`**（= 结构上无法判断，与"读到空标题"分开）。
+ *
+ * 🔴 这两种情形必须分开（2026-11-25 首次实现把它们混成一个值）：
+ *   - `null`  ⇒ 宿主服务**没有读口** ⇒ 无法判断 ⇒ 调用方**按旧行为**直接写（不引入回归）
+ *   - `''`    ⇒ 读到了，但**尚无标题** ⇒ 不是覆盖 ⇒ 允许写
+ * @param titles 宿主 sessionTitle 服务对象（可能是替身/旧形态）
+ * @param session 目标会话
+ */
+export function readCurrentTitle(
+  titles: { get?: (session: unknown) => { title?: unknown } | undefined } | undefined,
+  session: unknown,
+): { state: 'unreadable' } | { state: 'ok'; title: string | undefined } {
+  if (!titles || typeof titles.get !== 'function') return { state: 'unreadable' }
+  try {
+    const snap = titles.get(session)
+    return { state: 'ok', title: typeof snap?.title === 'string' ? snap.title : undefined }
+  } catch {
+    // 读口在、但这次读失败 ⇒ 也是"读不到"⇒ 保守侧（调用方不覆盖）
+    return { state: 'unreadable' }
+  }
+}
+
+
+
 /** 内存活跃会话：scope（dsh 会话 id）→ 会话信息（不落盘；并行多会话各自 key 隔离） */
 const activeStore = new Map<string, ActiveSessionInfo>()
 /** 全局最近活跃（对齐 osp lastActive；供无 scope 上下文使用） */

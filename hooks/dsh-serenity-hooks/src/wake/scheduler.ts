@@ -29,7 +29,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { basename, join } from 'node:path'
 import { existsSync, realpathSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { findSession, namingTitleFor, parseTrajectoryCode, sessionsRoot, trajectoryDescOf } from '../trajectory/core.js'
+import { findSession, namingTitleFor, readCurrentTitle, shouldKeepUserTitle, parseTrajectoryCode, sessionsRoot, trajectoryDescOf } from '../trajectory/core.js'
 import { buildCarrierOpening, deliverCarrierOpening } from '../trajectory/user-carrier.js'
 import { listBoundSessionIds, appendBound, carrierState } from '../trajectory/bound.js'
 import { hostAliveProbe } from '../trajectory/alive.js'
@@ -774,17 +774,25 @@ function renameCarrierTitle(
     // 🔴 传**整个服务对象**、以方法形态调用 `titles.rename(...)`。
     //    ⛔ 绝不 `const { rename } = titles`：解构丢 `this` 是本仓踩过的坑（v1.23.2），
     //    宿主方法内部要 `this.ctx.sessions.get(...)` 校验会话是否 live。
-    const titles = hostService<{ rename?: (session: unknown, title: string) => unknown }>(ctx, 'sessionTitle')
+    const titles = hostService<{
+      rename?: (session: unknown, title: string) => unknown
+      get?: (session: unknown) => { title?: unknown } | undefined
+    }>(ctx, 'sessionTitle')
     if (!titles || typeof titles.rename !== 'function') return ', ⚠️ 标题未写（sessionTitle 不可用）'
     const session = (agent as { session?: unknown }).session
     if (!session || typeof session !== 'object') return ', ⚠️ 标题未写（无 session）'
     // 与 `use` 完全同一条派生路径（含 S### 的「编号-日期」与目录名回退）。
-    const title = namingTitleFor({
+    const info = {
       sessionId: parseTrajectoryCode(dirName) ?? dirName,
       dirName,
       mdPath: join(root, 'AGENT_SESSIONS', dirName, 'SESSION.md'),
-    })
-    titles.rename(session, title)
+    }
+    // 🔴 owner 2026-11-25：用户手改的标题优先，不覆盖（判据 = 形状，见 core.ts）。
+    //    读口缺失 ⇒ 按旧行为写（不引入回归）。
+    const prefix = namingTitleFor(info)
+    const read = readCurrentTitle(titles, session)
+    if (read.state === 'ok' && shouldKeepUserTitle(read.title, prefix)) return ', 保留用户标题'
+    titles.rename(session, namingTitleFor(info))
     return ', titled'
   } catch (err) {
     // 不抛：标题失败不该让一条能送达的消息判成失败。
