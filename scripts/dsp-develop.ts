@@ -3766,6 +3766,43 @@ function collectJsFiles(dir: string, out: string[] = []): string[] {
 }
 
 /**
+ * findMissingRelativeImports — 装机产物里**相对 js import 指向不存在文件**的那些处。
+ *
+ * ## 为什么它必须是独立可测的纯函数（而不是埋在 cmdVerifyInstalled 里）
+ *
+ * 🔴 这条判据来自 2026-11-24 深夜的真缺陷（续 477）：`deploy` 与 `npm-install` 是**两次独立构建**，
+ * tsdown 的 chunk 名带**内容哈希** ⇒ 混用会留下"新 `index.js` ＋ 旧 chunk"的混杂目录，
+ * 失效点在**按需 import 那一刻**（`Cannot find module .../rebuild-<hash>.js`）。
+ * 当时本命令用三条 must 验过、**全绿，然后照样炸** —— 因为它只问"字面量在不在"，
+ * 对「同一版本号、不同批次」**结构性无判别力**。
+ *
+ * 所以：**判据本身必须先被证明会变红**（否则我只是又加了一条恒绿的字面量）。
+ * 抽成纯函数 ⇒ 测试喂它一份**故意缺 chunk 的合成产物**，看它是不是精确点出那一处。
+ *
+ * @param texts 文件名 → 内容（只用来取 import 说明符与判断目标是否存在）
+ * @param exists 目标是否存在（注入以便测试，⛔ 不用真 fs 造目录）
+ */
+export function findMissingRelativeImports(
+  texts: ReadonlyMap<string, string>,
+  exists: (p: string) => boolean,
+  joinPath: (base: string, spec: string) => string,
+  dirOf: (p: string) => string,
+): Array<{ from: string; spec: string }> {
+  // 装机产物是 tsdown 打包结果，相对 js 引用只出现两种形态：`from "./x.js"` 与 `import("./x.js")`。
+  // ⚠️ 刻意**不解析 AST、不复刻 bundler**：复刻出的语义一旦与产物不符，就会得到与事实相反的结论。
+  const re = /(?:from\s*|import\s*\(\s*)["'](\.\.?\/[^"']+\.js)["']/g
+  const missing: Array<{ from: string; spec: string }> = []
+  for (const [file, text] of texts) {
+    const base = dirOf(file)
+    for (const m of text.matchAll(re)) {
+      const spec = m[1] as string
+      if (!exists(joinPath(base, spec))) missing.push({ from: basename(file), spec })
+    }
+  }
+  return missing
+}
+
+/**
  * cmdVerifyInstalled — **装完之后只验装机产物**（2026-11-21，本轨迹手工做过五遍后机械化）。
  *
  * ## 它替代的是哪一段手工流程
@@ -3880,6 +3917,35 @@ function cmdVerifyInstalled(argv: string[]): void {
     hits.slice(0, 3).map((h) => `\n      ${h.file}:${h.line}  ${h.text}`).join('')
     + (hits.length > 3 ? `\n      …另有 ${hits.length - 3} 处` : '')
   const problems: string[] = []
+  // ③-pre 引用完整性：**入口点名的 chunk 必须真的在盘上**
+  //
+  // 🔴 本步由 2026-11-24 深夜那次真缺陷逼出（续 477），它当时**用本命令验过三条 must 全绿仍炸**：
+  //    `deploy`（本仓构建）与 `npm-install`（registry tarball）是**两次独立构建**，而 tsdown 的
+  //    chunk 名带**内容哈希** ⇒ 两者混用会留下"新 `index.js` + 旧 chunk"的混杂目录，
+  //    失效点在**按需 import 那一刻**（`Cannot find module .../rebuild-<hash>.js`），
+  //    ⛔ 不在安装时、⛔ 也不在任何字面量里。
+  //    ⇒ **「同一版本号」≠「同一批产物」**；本命令原先只问"字面量在不在"，故对这类混杂**结构性无判别力**。
+  //    判据形状与 D141「测过 ≠ 验过」同族：判据必须落在**只有真产物才会满足**的那个关系上。
+  //
+  // 判据刻意**不解析 AST**：装机产物是 tsdown 打包结果，相对 js 引用只出现在
+  // `from "./x.js"` 与 `import("./x.js")` 两种形态里；正则足够，且不会像复刻 bundler 那样判错。
+  const relJsRefRe = /(?:from\s*|import\s*\(\s*)["'](\.\.?\/[^"']+\.js)["']/g
+  const missingRefs = findMissingRelativeImports(texts, existsSync, join, dirname)
+  const refCount = new Set<string>()
+  for (const [f, t] of texts) {
+    const base = dirname(f)
+    for (const m of t.matchAll(relJsRefRe)) refCount.add(join(base, m[1] as string))
+  }
+  if (missingRefs.length > 0) {
+    problems.push(`引用完整性：${missingRefs.length} 处相对 import 指向**盘上不存在的文件**`
+      + '\n      🔴 根因多半是 `deploy` 与 `npm-install` 混用（两次构建的 chunk 哈希不同，目录里新旧混杂）'
+      + '\n      ⇒ 处置：重跑 `dsp-develop deploy` 铺回**单一批次**的完整产物；⛔ 不要去拷旧 chunk 回来（那是伪造产物）'
+      + missingRefs.slice(0, 5).map((r) => `\n      ${r.from} → ${r.spec}`).join('')
+      + (missingRefs.length > 5 ? `\n      …另有 ${missingRefs.length - 5} 处` : ''))
+  } else {
+    console.log(`[dsp-develop] ✓ 引用完整性：${refCount.size} 个相对 js 引用的目标**全部在盘上**`
+      + '（这一格专防"同一版本号、不同批次"的混杂目录）')
+  }
   for (const lit of must) {
     const hits = hit(lit)
     if (hits.length === 0) {
