@@ -2,21 +2,42 @@
  * system-prompt.ts — Induction（成员装配机制，specs v1.5.0 命名）装配文本构造
  *
  * 机制：把新实例（新会话 / rebuild 重建 / 新 agent）引入为轨迹成员的装配机制——本文件装配的文本
- * 即 Induction 骨架（8 块五层，specs README §5）：A 主体定义（ACC/Principles/CCE）→ B 质量规范（EAP）
- * → C 状态调节（状态块）→ D 工作供给（SKILL/Tools）→ E 任务指示（Session），稳定→易变装配序；
- * Metaphor 为 A 层世界模型记忆钩渲染层（不计入 8 块骨架）。
+ * 即 Induction 骨架（**specs 口径 = 8 内容块 × 五层**，README §5）：A 主体定义（ACC/Principles/CCE）
+ * → B 质量规范（EAP）→ C 状态调节（状态块）→ D 工作供给（SKILL/Tools）→ E 任务指示（Session），
+ * 稳定→易变装配序；Metaphor 为 A 层世界模型记忆钩渲染层（不计入 8 块骨架）。
+ *
+ * 🔴🔴 **两个计数必须分开看，⛔ 别把它们当成同一个数** —— 2026-11-27 由 butler 追问逼出，实测确认：
+ *   · **specs 的「8 块」= 内容骨架的层计数**，它**没有收进** v1.135.0 之后新增的三块无条件内容
+ *     （Soul ／ Operator Creed ／ Work Register）⇒ 它是**落后于实现的**，按它数装配会少数三块。
+ *   · **`tests/system-prompt-block-inventory.test.ts` 的「9 / 13」= 标题串的个数**（缺省态 9、条件全开 13）。
+ *   两者**不是同一分类法**，也**不能互相推导**：一个是"内容骨架"的层，一个是"装配产物里出现了几个
+ *   `=== Serenity … ===`"。⇒ 要判装配，**只信那条 `toEqual`**；要判分层学术口径，去 specs。
+ *   ⚠️ 我此前把这一行写成「8 块五层」而下面是 0/1b/5b/c/d 的编号 ⇒ **那正是下面「这份清单会漂」那段控诉的形态**：
+ *   描述装配的注释自己先漂了。编号已改成「装配序」而非"块号"，就是为了不再暗示它与 8 对得上。
  *
  * **完全对齐 opencode-serenity-plugin 的 system.transform 注入内容**（compacting.ts）：
- * 结构（v1.19.8 精简，S142 重建视角 R↓）：
- *   1. `=== Serenity ACC ===`        — 身份（ACC/CCC 模型 ＋ 路径约定；**v1.124.0 起不含工具清单**）
- *   2. `=== Serenity Metaphor ===`   — 世界模型（三层隐喻域：船/航行/船员）
- *   3. `=== Serenity Principles ===` — 信念/边界（认知容器本体论 + 操作边界，v1.19.8 合并原 Constraints）
- *   4. `=== Serenity CCE ===`        — 时间约束（5 行为约束 + H_op，逐字对齐 osp）
- *   5. `=== Serenity EAP ===`        — 质量（E↑ R↓ S↑ 自检）
- *   6. 状态块（条件）                — Safe Mode / Localstore
- *   7. SKILL.md 全文                 — 该 CCC 顶层入口 skill 全量原文（不截断）
- *   7b. `=== Serenity Tools ===`     — **只剩 MSM 调用示例**（v1.124.0：工具清单已删，见 toolsBlock 注释）
- *   8. `=== Serenity Session ===`    — 活跃会话（id + dirName + mdPath + todowrite 首位约定）
+ * **装配序**（v1.19.8 精简，S142 重建视角 R↓；⚠️ 下面这些 **是装配位序，⛔ 不是 specs 的"块号"**）：
+ *   0. `=== Serenity Soul ===`         — 灵魂（"我是什么"；owner 2026-11-15 亲手正文，v1.136.2）
+ *   1. `=== Serenity ACC ===`          — 身份（ACC/CCC 模型 ＋ 路径约定；**v1.124.0 起不含工具清单**）
+ *   1b. `=== Serenity Operator Creed ===` — 宪章（"凭什么下判断"，v1.135.0）
+ *   2. `=== Serenity Metaphor ===`     — 世界模型（三层隐喻域：船/航行/船员）
+ *   3. `=== Serenity Principles ===`   — 信念/边界（认知容器本体论 + 操作边界，v1.19.8 合并原 Constraints）
+ *   4. `=== Serenity CCE ===`          — 时间约束（5 行为约束 + H_op，逐字对齐 osp）
+ *   5. `=== Serenity EAP ===`          — 质量（E↑ R↓ S↑ 自检）
+ *   5b. `=== Serenity Humor ===`（条件）— 脱口秀闲笔（D287；缺省关，会话 id 作种子）
+ *   5c. `=== Serenity Persona ===`（条件）— 表达层（⛔ 与 EAP 并存，**不置换**；specs 的 §5.5a 记的是旧语义"替换"，以本行为准）
+ *   5d. `=== Serenity Work Register ===` — 工作语域（v1.124.0；**缺省开**，见 work-register.ts）
+ *   6. 状态块（条件）                  — Safe Mode / Localstore
+ *   7. SKILL.md 全文                   — 该 CCC 顶层入口 skill 全量原文（不截断）
+ *   7b. `=== Serenity MSM ===`         — **只剩 MSM 调用示例**（v1.124.0：工具清单已删，标题随内容改）
+ *   8. `=== Serenity Session ===`（条件）— 活跃会话（id + dirName + mdPath + todowrite 首位约定）
+ *   ＋ `=== Serenity Trajectory Prompt ===`（条件）— 按 `trajectory.json` 的 prompt 段决定 append / replace
+ *
+ * 🔴 **这份清单会漂，而且漂了没有任何信号** —— 2026-11-27 实测：它曾漏掉 Soul／Creed／Work Register
+ * 三块，且仍写着 `Serenity Tools`（该标题 v1.124.0 已改）。**当时没有任何测试变红**，
+ * 因为它只是注释，而既有断言只查"我找的那几块在不在"，从不问"还有没有别的"。
+ * ⇒ 现在由 `tests/system-prompt-block-inventory.test.ts` 用**标题集合闭合**钉住真实装配；
+ *   改装配顺序或增删块时，那份 `toEqual` 会先红。⛔ 不要再靠"记得回来改注释"。
  *
  * 注册：**全局** ctx `systemPrompt.section`（对齐 plan-mode 官方惯例），text 回调按
  * `context.agent` 的 cwd 动态解析 CCC 根 → 返回完整注入文本；非 CCC/无 agent 返回空。
