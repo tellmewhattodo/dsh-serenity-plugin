@@ -227,9 +227,16 @@ describe('system-prompt 头注：块清单与装配产物必须一致（注释�
     }
 
     const named = titlesNamedInHeaderComment()
-    expect(named.length, '头注里一个标题都没抓到 ⇒ 取数域坏了（防"两边都是空集"假绿）').toBeGreaterThan(5)
     // ⚠️ 反引号里的 `=== Serenity … ===` 是**模式**（省略号），不是某个真标题 ⇒ 过滤掉省略号项。
-    const namedReal = named.filter((h) => !h.includes('…'))
-    expect([...new Set(namedReal)].sort()).toEqual([...emitted].sort())
+    const namedReal = [...new Set(named.filter((h) => !h.includes('…')))].sort()
+    const emittedReal = [...emitted].sort()
+
+    // 🔴🔴 哨兵必须钉在**真正参与比较的那两个集合上**，⛔ 不是钉在过滤前的中间值上。
+    //    （本用例第一版就犯了这个错：哨兵钉 `named.length`，而比较用 `namedReal` ——
+    //      若过滤条件写错把全部滤掉，哨兵照样绿，`[] == []` 也照样绿。已改。）
+    //    两侧都要有：抽取器死掉 / 产物侧一个标题都没取到，都会让 `toEqual` 在空集上空转。
+    expect(namedReal.length, '头注侧抽取为空 ⇒ 取数域坏了（防"两边都是空集"假绿）').toBeGreaterThan(5)
+    expect(emittedReal.length, '产物侧抽取为空 ⇒ 同上').toBeGreaterThan(5)
+    expect(namedReal).toEqual(emittedReal)
   })
 })
