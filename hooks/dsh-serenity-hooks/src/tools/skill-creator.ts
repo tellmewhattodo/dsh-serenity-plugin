@@ -384,7 +384,17 @@ export function createSkillCreatorTool() {
           ].join('\n')
         }
         return insp.state === 'ok'
-          ? `${layering}\n\n${body}\n\n👉 A3 ＋ A1/A2 都过了。语义档（文字是否真遵守模型/公理）走 \`review\`。`
+          ? [
+              layering,
+              '',
+              body,
+              '',
+              '👉 A3 ＋ A1/A2 都过了 —— 🔴 **这只说明「它是按标准写出来的」，⛔ 不说明「它有用」。**',
+              '   本命令回答的是**形式**（顶层是不是桩、参考件有没有被点名、模型里的公理在不在）；',
+              '   它**没有回答**「用上它之后我们犯的错有没有变少」——那需要另一样东西：',
+              '   **一次它能拦住、而当时没人拦住的真实失败**（没有这个，它只是写得规整，⛔ 不是有价值）。',
+              '   ⇒ 语义档（文字是否真遵守模型/公理）走 `review`；**有效性**两档都回答不了，只能靠实测。',
+            ].join('\n')
           : `${layering}\n\n${body}\n\n👉 修完**重跑本命令**（本仓教训：「检查没跑」与「检查通过」必须分得开）。`
       }
 
@@ -393,6 +403,8 @@ export function createSkillCreatorTool() {
       if (!existsSync(ttl)) {
         return formatSkillOntologyInspection(name, inspectSkillOntology(dir, { root }))
           + `\n\n（\`review\` 需要 \`${SKILL_ONTOLOGY_FILE}\`；普通 skill 没有可审的模型 —— 这不是错误。）`
+          + '\n\n🔴 **没有模型 ≠ 已经够好**：本 skill 只走到「形式」那一档（A3）。'
+          + '\n   它**没有被回答**的是：用上它之后我们犯的错有没有变少 —— 那需要一次真实的失败来证明，⛔ 不是本命令能给的。'
       }
       const r = runOntologyCli(['compliance', ttl, '--skills', join(root, '.opencode', 'skills')], { cwd: root })
       return [
@@ -403,6 +415,13 @@ export function createSkillCreatorTool() {
         '',
         '⚠️ 这是 **C 档（半机械）**：它给的是**逐条要回答的问题清单**，不是"通过/不通过"。',
         '   请**逐条回答**；发现文字与模型不符 ⇒ 改文字或改 ttl，然后重跑 `check`。',
+        '',
+        '🔴 **档位说明（三种不同的问题，别混成一个"好"）**：',
+        '   · `check` = **形式**：是不是按标准写出来的（顶层非桩／参考件被点名／公理在不在）',
+        '   · `review` = **语义**：文字有没有真的遵守它自己写的模型/公理',
+        '   · **有效性** = 「用上它之后我们犯的错有没有变少」—— 🔴 **本命令和 `check` 都回答不了**，',
+        '     它只能由**一次真实的、它本该拦住而当时没人拦住的失败**来证明。',
+        '   ⇒ 即使本命令逐条答完，也 ⛔ 不等于"这个 skill 有用"。',
       ]
         .filter((s) => s !== '')
         .join('\n')
