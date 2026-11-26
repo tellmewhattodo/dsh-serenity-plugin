@@ -27,7 +27,8 @@
  *   5b. `=== Serenity Humor ===`（条件）— 脱口秀闲笔（D287；缺省关，会话 id 作种子）
  *   5c. `=== Serenity Persona ===`（条件）— 表达层（⛔ 与 EAP 并存，**不置换**；specs 的 §5.5a 记的是旧语义"替换"，以本行为准）
  *   5d. `=== Serenity Work Register ===` — 工作语域（v1.124.0；**缺省开**，见 work-register.ts）
- *   6. 状态块（条件）                  — Safe Mode / Localstore
+ *   6. `=== Serenity Safe Mode ===`（条件）— 安全模式（`.serenity-safe-on` 存在时才有）
+ *      `=== Serenity Localstore ===`（条件）— 本地凭据策略（`localstore.json` 存在时才有）
  *   7. SKILL.md 全文                   — 该 CCC 顶层入口 skill 全量原文（不截断）
  *   7b. `=== Serenity MSM ===`         — **只剩 MSM 调用示例**（v1.124.0：工具清单已删，标题随内容改）
  *   8. `=== Serenity Session ===`（条件）— 活跃会话（id + dirName + mdPath + todowrite 首位约定）

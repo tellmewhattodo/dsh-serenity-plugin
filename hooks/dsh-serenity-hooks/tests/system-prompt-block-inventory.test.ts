@@ -40,10 +40,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { serenitySystemPrompt } from '../src/seams/system-prompt.js'
+import { useSession, resetActiveSessionStore } from '../src/trajectory/core.js'
 
 let dir: string
 let cfg: string
@@ -83,6 +84,9 @@ beforeEach(() => {
 afterEach(() => {
   if (oldEnv === undefined) delete process.env.SERENITY_HOOKS_CONFIG
   else process.env.SERENITY_HOOKS_CONFIG = oldEnv
+  // 🔴 `useSession` 写的是**模块级内存 Map** ⇒ 不重置会污染后续用例
+  //    （本仓 `osp-alignment.test.ts` 同款，见其 `resetActiveSessionStore` 用法）
+  resetActiveSessionStore()
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -144,5 +148,88 @@ describe('system-prompt 装配：块清单闭合（多一个/少一个都必须�
     // 一旦有人把标题改回去，报错会直接说是哪一格坏了，而不是让人对着一长串 diff 找。
     const text = serenitySystemPrompt(dir)
     expect(headingsIn(text)).not.toContain('Serenity Tools')
+  })
+})
+
+/**
+ * 🔴 **头注里那份块清单本身，也要有闸**（2026-11-27，butler 的追问逼出的第二层）
+ *
+ * 上一个 describe 钉住的是**装配产物**。但**头注**是同一事实的**第二份手写副本** ——
+ * 而它已经漂过：曾经漏掉 Soul／Creed／Work Register，且仍写着 `Serenity Tools`（v1.124.0 已改），
+ * **当时没有任何测试变红**（它只是注释）。同一形态当夜出现两次，两次都是我造成的。
+ *
+ * ⇒ 判据：**头注里点名的标题集合，必须与装配产物的标题集合完全相等**（双向）。
+ *
+ * 单侧性（⛔ 别让这条变成"改一个字就红"的仪式）：
+ *   · 只提取**反引号里的 `=== Serenity … ===`** ⇒ 散文措辞怎么改都不影响；
+ *   · 只有**增删块／改名块**才会红 —— 那正是我们要它红的事。
+ *
+ * 🔴 这条刻意**不**断言注释里的散文内容（为什么加这一块、版本号、口径说明）——
+ *    那些是知识，不是契约。钉散文＝每次改措辞都红＝第一次红就被无视（同 #538）。
+ */
+describe('system-prompt 头注：块清单与装配产物必须一致（注释也是第二真相源）', () => {
+  /** 取头注（文件开头那块 JSDoc 结束标记之前）里被反引号包住的全部块标题 */
+  function titlesNamedInHeaderComment(): string[] {
+    const src = readFileSync(new URL('../src/seams/system-prompt.ts', import.meta.url), 'utf8')
+    // ⚠️ 这个结束标记只能写成字符串，⛔ 不能把它的字面形态写进本文件的注释 ——
+    //    注释里出现它会把本函数自己的 JSDoc **提前关闭**（本文件已踩：连报两次
+    //    Transform failed，第二次的 "Unterminated string literal" 真因就是这个）。
+    const headerEnd = src.indexOf('*/')
+    if (headerEnd < 0) throw new Error('找不到头注结束标记 —— 判据的取数域失效了，⛔ 别让它静默变空')
+    const header = src.slice(0, headerEnd)
+    // ⚠️ 目标标题在头注里被反引号包住，而反引号**不能出现在正则字面量或注释里**
+    //    （解析器会把它当成模板串开头；本文件已连踩两次，esbuild 当场报 Transform failed）。
+    //    ⇒ 用 fromCharCode 取那个字符，再用 RegExp 构造器 —— ⛔ 别改回字面量。
+    const BT = String.fromCharCode(96)
+    const named = new RegExp('=== (Serenity [^' + BT + ']+?) ===', 'g')
+    return [...header.matchAll(named)].map((m) => m[1]!)
+  }
+
+  it('🔴 头注点名的标题集合 == 产物的标题集合（缺一个、多一个、写错一个都必须红）', () => {
+    // 产物侧取**条件全开**的那一轮（头注描述的是完整清单，含条件块）
+    writeFileSync(join(dir, '.serenity-safe-on'), 'now')
+    writeFileSync(join(dir, 'localstore.json'), '{"credentials":{"K":"v"}}\n')
+    writeFileSync(
+      cfg,
+      JSON.stringify({
+        persona: { mode: 'big-fish', overrideText: 'You are a big fish.' },
+        humor: { enabled: true, bits: ['a piece of stand-up'] },
+      }),
+    )
+    const emitted = new Set(headingsIn(serenitySystemPrompt(dir, 'scope-x', undefined, 'session-x')))
+
+    // `=== Serenity Session ===` 只在**有活跃会话**时出现 ⇒ 按 `osp-alignment.test.ts:212-217` 同款建：
+    // 先落一份 SESSION.md（`useSession` 会真去盘上找这个会话，⛔ 光写内存 Map 不够）
+    const sessDir = '2026-01-01--S001--probe'
+    mkdirSync(join(dir, 'AGENT_SESSIONS', sessDir), { recursive: true })
+    writeFileSync(join(dir, 'AGENT_SESSIONS', sessDir, 'SESSION.md'), '# test')
+    useSession(dir, 'S001', 'scope-sess')
+    for (const h of headingsIn(serenitySystemPrompt(dir, 'scope-sess', undefined, 'session-x'))) emitted.add(h)
+
+    // 轨迹块只有传了 dirName 才出现，而头注里点了它 ⇒ 判据要按"可能出现的全集"比
+    const trajProbe = mkdtempSync(join(tmpdir(), 'sp-traj-'))
+    try {
+      writeFileSync(join(trajProbe, '.serenity'), 'test')
+      mkdirSync(join(trajProbe, 'AGENT_SESSIONS', '2026-01-01--S001--x'), { recursive: true })
+      writeFileSync(
+        join(trajProbe, 'AGENT_SESSIONS', '2026-01-01--S001--x', 'PROMPT.md'),
+        '# 轨迹章程\n正文',
+      )
+      mkdirSync(join(trajProbe, '.opencode', 'skills', 'other-serenity'), { recursive: true })
+      writeFileSync(
+        join(trajProbe, '.opencode', 'skills', 'other-serenity', 'SKILL.md'),
+        '---\nname: other-serenity\ndescription: 系统入口\n---\n顶层入口原文内容',
+      )
+      const withTraj = serenitySystemPrompt(trajProbe, 'scope-x', '2026-01-01--S001--x', 'session-x')
+      for (const h of headingsIn(withTraj)) emitted.add(h)
+    } finally {
+      rmSync(trajProbe, { recursive: true, force: true })
+    }
+
+    const named = titlesNamedInHeaderComment()
+    expect(named.length, '头注里一个标题都没抓到 ⇒ 取数域坏了（防"两边都是空集"假绿）').toBeGreaterThan(5)
+    // ⚠️ 反引号里的 `=== Serenity … ===` 是**模式**（省略号），不是某个真标题 ⇒ 过滤掉省略号项。
+    const namedReal = named.filter((h) => !h.includes('…'))
+    expect([...new Set(namedReal)].sort()).toEqual([...emitted].sort())
   })
 })
