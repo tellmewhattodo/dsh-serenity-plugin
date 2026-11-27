@@ -297,18 +297,91 @@ export async function pageHtml(slot: number, targetId: string, max = 4000): Prom
 }
 
 /**
+ * 截图回退链（纯函数 —— 抽出来才能做变异检验）。
+ *
+ * 🔴 为什么它必须是纯函数：判据「三条路按序走、某条成功即停、全失败才抛」若埋在
+ *    `screenshot()` 里就没法被"故意弄坏"（承本仓 `findMissingRelativeImports` 的先例）。
+ *    抽出来之后，注入一个全抛的 send ⇒ 能精确断言"它试了几条、按什么序、最后抛不抛"。
+ *
+ * ⚠️ 顺序不是随意的：`default` 最先（能出帧时语义最准），再退到不要求合成器提交新帧的
+ *    两条。**空 data 与抛错同等对待** —— CDP 可能"成功"返回空串，写出来是 0 字节文件，
+ *    那比报错更坏（调用方以为截到了）。
+ */
+export const SHOT_ATTEMPTS = [
+  { via: 'default', params: { format: 'png' } },
+  { via: 'fromSurface=false', params: { format: 'png', fromSurface: false } },
+  { via: 'beyondViewport', params: { format: 'png', fromSurface: false, captureBeyondViewport: true } },
+] as const
+
+export type ShotVia = (typeof SHOT_ATTEMPTS)[number]['via']
+
+/**
+ * 按序尝试截图，返回第一路的 data 与其 `via`；全失败 ⇒ 抛（含最后一条原因）。
+ *
+ * @param send 执行一次 CDP 调用（测试可注入恒抛/恒空的替身）
+ */
+export async function tryShotChain(
+  send: (params: Record<string, unknown>) => Promise<Record<string, unknown>>,
+): Promise<{ data: string; via: ShotVia }> {
+  let lastErr: unknown = null
+  for (const a of SHOT_ATTEMPTS) {
+    try {
+      const r = await send(a.params as unknown as Record<string, unknown>)
+      const data = String(r.data ?? '')
+      if (data === '') {
+        lastErr = new Error(`Page.captureScreenshot(${a.via}) 返回空 data`)
+        continue
+      }
+      return { data, via: a.via }
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  throw new Error(
+    `三条路全部失败（窗口可能被锁屏/遮挡，帧未合成）：${String((lastErr as Error)?.message ?? lastErr)}`,
+  )
+}
+
+/**
  * 截图并存盘。
  *
  * 🔴 落点**必须在 CCC 根内**（`resolveInside` 语义在这里手写，因为本层不知道 CCC 根）：
  *    调用方传进来的 `outAbs` 必须已经通过越界检查 —— 本函数只负责写。
  *    ⛔ 不在这里自己算根：那会造出第二个「根在哪」的判定点。
+ *
+ * 🔴🔴 **锁屏/遮挡 ⇒ 截图超时**（2026-11-27 owner 报障，真机复现）。
+ *
+ *    **机理**：headed Chrome 在窗口不可见（锁屏、切走、最小化）时，宿主**停止为该 tab 合成帧**。
+ *    而 `Page.captureScreenshot` 默认语义是「**等下一帧**」⇒ 帧永远不来 ⇒ 挂到超时。
+ *    ⚠️ 这**不是**我们的 flag 配错：我们**刻意不加** `--disable-renderer-backgrounding` 那组
+ *    （2026-11-09 耗电事故的教训，见 `process.ts`），所以节流是**预期行为**。
+ *    ⇒ 同族已诊断先例 = 本文件 `scrollAt()` 的 wheel 挂住：同一台机器上
+ *      `--headless=new` 实例发同一条命令**立刻返回** ⇒ 根因在「headed + 不可见」这一档。
+ *    ⇒ 修法见 `tryShotChain()`：**短超时 + 回退**，⛔ 不是"把超时调大"。
+ *
+ *    ⚠️ **诚实边界**：后两路**不能保证**在所有页面上出正确的图（合成器完全停止时像素可能是空的）。
+ *    它们消除的是**20 秒挂死**，不是"锁屏时一定能截到正确的图"。
+ *    真锁屏下如需稳定取证，正解是**解锁**或**用无头实例重开该页**（改取证条件，需 owner 决定）。
  */
-export async function screenshot(slot: number, targetId: string, outAbs: string): Promise<void> {
+export async function screenshot(
+  slot: number,
+  targetId: string,
+  outAbs: string,
+): Promise<{ via: ShotVia; ms: number }> {
+  const started = Date.now()
   const conn = attach(await wsConnect(await pageWsUrl(slot, targetId)))
   try {
-    const r = await cdpRaw(conn, 'Page.captureScreenshot', { format: 'png' }, 20_000)
+    /** 每一路都短超时：等一个不会来的帧，等多久都是白等 */
+    const ATTEMPT_MS = 4000
+    const r = await tryShotChain((params) => cdpRaw(conn, 'Page.captureScreenshot', params, ATTEMPT_MS))
     mkdirSync(dirname(outAbs), { recursive: true })
-    writeFileSync(outAbs, Buffer.from(String(r.data ?? ''), 'base64'))
+    writeFileSync(outAbs, Buffer.from(r.data, 'base64'))
+    return { via: r.via, ms: Date.now() - started }
+  } catch (e) {
+    throw new Error(
+      `[browser_slot] shot ${String((e as Error)?.message ?? e)} —— ` +
+        `这不是超时设得小，是页面没有可取的帧。解锁屏幕或改用无头实例取证。`,
+    )
   } finally {
     conn.ws.close()
   }

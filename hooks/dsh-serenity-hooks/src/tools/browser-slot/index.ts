@@ -378,8 +378,14 @@ async function run(
       const n = needSlot(args)
       const target = await needTarget(root, n, sessionId, args)
       const out = str(args.out) ?? `_tmp/browser-shots/shot-${target.slice(0, 8)}-${Date.now()}.png`
-      const rel = await slotShot(root, n, sessionId, target, out)
-      return `[browser_slot] shot → ${rel}`
+      const r = await slotShot(root, n, sessionId, target, out)
+      // 🔴 回退路径必须**在回执里可见**（承 cdp.ts 的诚实边界）：
+      //    非 `default` 意味着「这张图不是标准合成路径拍的」，锁屏/遮挡下像素可能不等价。
+      const warn =
+        r.via === 'default'
+          ? ''
+          : ` (⚠️ NON-STANDARD PATH — window was likely locked/occluded; pixels may differ from a normal capture)`
+      return `[browser_slot] shot → ${r.rel} [via ${r.via}, ${r.ms}ms]${warn}`
     }
     case 'reload': {
       const n = needSlot(args)

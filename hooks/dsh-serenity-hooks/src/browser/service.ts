@@ -1095,19 +1095,25 @@ export async function slotHtml(
   return v
 }
 
-/** 截图（落点必须在 CCC 根内） */
+/**
+ * 截图（落点必须在 CCC 根内）。
+ *
+ * 🔴 返回 `via` 与耗时，⛔ 不吞掉：`screenshot()` 在窗口不可见（锁屏/遮挡）时会回退到
+ *    「从页面像素取帧」那两条路，而它们**与标准路径不等价**（见 `cdp.ts` 头注的诚实边界）。
+ *    ⇒ 回执必须让调用方看见这张图是哪条路拍的，否则它会以为拿到的是标准截图。
+ */
 export async function slotShot(
   root: string,
   slot: number,
   sessionId: string,
   targetId: string,
   outRel: string,
-): Promise<string> {
+): Promise<{ rel: string; via: string; ms: number }> {
   assertSlotOwned(root, slot, sessionId)
   const abs = resolveShotPath(root, outRel)
-  await screenshot(slot, targetId, abs)
+  const r = await screenshot(slot, targetId, abs)
   pageTouched(root, slot)
-  return outRel
+  return { rel: outRel, via: r.via, ms: r.ms }
 }
 
 /** 重载（可先装探针脚本） */

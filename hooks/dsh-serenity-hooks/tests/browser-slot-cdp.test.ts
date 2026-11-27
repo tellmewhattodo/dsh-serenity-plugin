@@ -17,7 +17,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { tmpdir } from 'node:os'
-import { probeCdpOnce, resolveShotPath, __test } from '../src/browser/cdp.js'
+import { probeCdpOnce, resolveShotPath, tryShotChain, __test } from '../src/browser/cdp.js'
 
 describe('截图落点：越界检查（安全边界，⛔ 不能只在真机上验）', () => {
   it('① CCC 根内的相对路径 ⇒ 解析成根内绝对路径', () => {
@@ -78,5 +78,78 @@ describe('内部导出面（⛔ 生产代码不该用）', () => {
     expect(Object.keys(__test).sort()).toEqual(['attach', 'cdpRaw'])
     expect(typeof __test.attach).toBe('function')
     expect(typeof __test.cdpRaw).toBe('function')
+  })
+})
+
+/**
+ * 🔴 **锁屏截图超时的修法：回退链**（2026-11-27 owner 报障）
+ *
+ * 根因不是"超时太小"，而是 headed Chrome 在窗口不可见时**停止为该 tab 合成帧**，
+ * 而默认截图语义是"等下一帧" ⇒ 永远等不到。⇒ 短超时 + 回退。
+ *
+ * 本组钉的是**链的行为**（用注入的 send，⛔ 不假装在模拟 CDP 协议）：
+ *   · 第一路成功 ⇒ **只试一次**（不许把成功路径也拖成三次）
+ *   · 第一路抛 ⇒ 落到第二路，`via` 必须如实报第二路（⛔ 不许冒报 default）
+ *   · **空 data 与抛错同等对待** —— 那是 0 字节文件，比报错更坏
+ *   · 全失败 ⇒ 抛，且**文案必须说"没有可取的帧"**（⛔ 不许让人去调超时）
+ */
+describe('截图回退链（锁屏/遮挡时不得挂死）', () => {
+  it('⑨ 第一路成功 ⇒ 只试一次，且 via = default', async () => {
+    let calls = 0
+    const r = await tryShotChain(async () => {
+      calls++
+      return { data: 'AAAA' }
+    })
+    expect(calls, '第一路成功却还继续试 ⇒ 白等两轮超时').toBe(1)
+    expect(r.via).toBe('default')
+  })
+
+  it('⑩ 🔴 第一路抛 ⇒ 落第二路，且 via **如实**报第二路（⛔ 不许冒报 default）', async () => {
+    const seen: unknown[] = []
+    const r = await tryShotChain(async (params) => {
+      seen.push(params)
+      if (seen.length === 1) throw new Error('CDP Page.captureScreenshot 超时 4000ms')
+      return { data: 'BBBB' }
+    })
+    expect(seen.length).toBe(2)
+    expect(r.via).toBe('fromSurface=false')
+    // 第二路必须真的改了口径（否则"回退"只是把同一条命令再发一次）
+    expect(seen[1]).toMatchObject({ fromSurface: false })
+  })
+
+  it('⑪ 🔴 空 data **不算成功** ⇒ 必须继续走下一路（否则写出 0 字节文件）', async () => {
+    let calls = 0
+    const r = await tryShotChain(async () => {
+      calls++
+      if (calls === 1) return { data: '' } // "成功"但空 —— 最阴的一格
+      return { data: 'CCCC' }
+    })
+    expect(calls).toBe(2)
+    expect(r.via).toBe('fromSurface=false')
+  })
+
+  it('⑫ 三路全失败 ⇒ 抛，且文案指向"没有可取的帧"（⛔ 别让人去调超时）', async () => {
+    let calls = 0
+    await expect(
+      tryShotChain(async () => {
+        calls++
+        throw new Error('超时')
+      }),
+    ).rejects.toThrow(/没有可取的帧|帧未合成/)
+    expect(calls, '必须把三条路**都**试过才放弃').toBe(3)
+  })
+
+  it('⑬ 顺序是固定的三条：default → fromSurface=false → beyondViewport', async () => {
+    const seen: Record<string, unknown>[] = []
+    await tryShotChain(async (params) => {
+      seen.push(params)
+      throw new Error('x')
+    }).catch(() => undefined)
+    expect(seen.length).toBe(3)
+    expect(seen[0]).toMatchObject({ format: 'png' })
+    expect(seen[1]).toMatchObject({ fromSurface: false })
+    expect(seen[2]).toMatchObject({ fromSurface: false, captureBeyondViewport: true })
+    // 结构性判据：第三路必须带上第二路的口径（⛔ 从 default 直接跳 beyondViewport）
+    expect(seen[2]!.captureBeyondViewport).toBe(true)
   })
 })
