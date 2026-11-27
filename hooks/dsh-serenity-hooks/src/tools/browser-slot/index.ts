@@ -379,8 +379,18 @@ async function run(
       const target = await needTarget(root, n, sessionId, args)
       const out = str(args.out) ?? `_tmp/browser-shots/shot-${target.slice(0, 8)}-${Date.now()}.png`
       const r = await slotShot(root, n, sessionId, target, out)
-      // 🔴 回退路径必须**在回执里可见**（承 cdp.ts 的诚实边界）：
-      //    非 `default` 意味着「这张图不是标准合成路径拍的」，锁屏/遮挡下像素可能不等价。
+      // 🔴 补拍必须**在回执里明说**，⛔ 不许静默替代：
+      //    无头实例是另一个浏览器、全新 profile ⇒ 没有登录态/滚动位置/表单状态。
+      //    调用方若以为这是原页面截图，会据此对错误的事实下结论。
+      if (r.rescued) {
+        return (
+          `[browser_slot] shot → ${r.rel} [via headless-rescue, ${r.ms}ms]\n` +
+          `⚠️ RESCUED, NOT THE ORIGINAL PAGE — the headed window could not produce a frame ` +
+          `(screen locked / window occluded), so a separate headless browser opened the same URL and shot that. ` +
+          `⇒ Same address, but **different session state**: no login, no scroll position, no form input, ` +
+          `no in-memory SPA state. Treat anything state-dependent in this image as unverified.`
+        )
+      }
       const warn =
         r.via === 'default'
           ? ''

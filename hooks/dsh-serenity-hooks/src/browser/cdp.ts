@@ -387,6 +387,57 @@ export async function screenshot(
   }
 }
 
+/**
+ * 🔴 **可降级的截图**：headed 取不到帧 ⇒ 返回 `null`（⛔ 不抛），让调用方决定要不要补拍。
+ *
+ * 为什么要这个变体（2026-11-28 真机取证）：
+ *   · 锁屏时 headed/Wayland 档的**四条取帧通路全部失败**（captureScreenshot ×3 ＋ startScreencast），
+ *     而同一时刻 `text`/`eval` 正常 ⇒ 不是通道坏了，是**这个档根本不提交帧**。
+ *   · 同一时刻另起 `--headless=new` 实例能立刻拍到**正确的图**。
+ *   ⇒ 「取不到帧」是一个**正常且可预期**的结果，调用方应当能接手，
+ *     而不是只能收一个异常（异常会让人以为"这里炸了"，而其实只是"这张拍不了"）。
+ *
+ * ⚠️ 写盘只在成功时发生；失败时 **⛔ 不留下 0 字节文件**。
+ */
+export async function screenshotOrNull(
+  slot: number,
+  targetId: string,
+  outAbs: string,
+): Promise<{ via: ShotVia; ms: number } | null> {
+  const started = Date.now()
+  const conn = attach(await wsConnect(await pageWsUrl(slot, targetId)))
+  try {
+    const ATTEMPT_MS = 4000
+    let r: { data: string; via: ShotVia }
+    try {
+      r = await tryShotChain((params) => cdpRaw(conn, 'Page.captureScreenshot', params, ATTEMPT_MS))
+    } catch {
+      return null
+    }
+    mkdirSync(dirname(outAbs), { recursive: true })
+    writeFileSync(outAbs, Buffer.from(r.data, 'base64'))
+    return { via: r.via, ms: Date.now() - started }
+  } finally {
+    conn.ws.close()
+  }
+}
+
+/** 取某 target 的当前 URL（补拍要用它开同一页） */
+export async function pageUrl(slot: number, targetId: string): Promise<string> {
+  const conn = attach(await wsConnect(await pageWsUrl(slot, targetId)))
+  try {
+    const v = await cdpRaw(conn, 'Runtime.evaluate', {
+      expression: 'location.href',
+      returnByValue: true,
+    }, 8000)
+    return String((v.result as { value?: unknown } | undefined)?.value ?? '')
+  } catch {
+    return ''
+  } finally {
+    conn.ws.close()
+  }
+}
+
 /** 重载，可选先装「新文档脚本」（要在应用发请求之前挂探针时用） */
 export async function reloadPage(
   slot: number,

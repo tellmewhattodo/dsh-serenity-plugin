@@ -11,8 +11,8 @@
  *   注入走 `sendToCognitiveTrajectory`（现成通道，语义 = 已注入，不证已执行）。
  */
 
-import { existsSync, mkdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import {
   DEFAULT_POLICY,
   HOLD_MAX_MINUTES,
@@ -63,15 +63,18 @@ import {
   openTab,
   pageHtml,
   pageText,
+  pageUrl,
   pressKey,
   reloadPage,
   resolveShotPath,
   screenshot,
+  screenshotOrNull,
   scrollAt,
   uploadFiles,
   waitForInPage,
   type CdpTarget,
 } from './cdp.js'
+import { headlessShot } from './headless-shot.js'
 import {
   EXT_DIR_REL,
   buildExtPayload,
@@ -1098,9 +1101,13 @@ export async function slotHtml(
 /**
  * 截图（落点必须在 CCC 根内）。
  *
- * 🔴 返回 `via` 与耗时，⛔ 不吞掉：`screenshot()` 在窗口不可见（锁屏/遮挡）时会回退到
- *    「从页面像素取帧」那两条路，而它们**与标准路径不等价**（见 `cdp.ts` 头注的诚实边界）。
- *    ⇒ 回执必须让调用方看见这张图是哪条路拍的，否则它会以为拿到的是标准截图。
+ * 🔴 **两级策略**（2026-11-28 真机取证后定，⛔ 不是拍脑袋）：
+ *   ① 先在**原页面**上拍（标准路径 / 三条变体）—— 这是唯一能保住登录态与滚动位置的路径。
+ *   ② 原页面拍不到（锁屏时四条取帧通路全挂）⇒ 用**无头实例打开同一 URL 补拍**。
+ *
+ * ⚠️ **补拍不是原页取证**：全新 profile ⇒ 没有登录态、没有滚动位置、没有表单状态。
+ *    ⇒ 返回值里 `rescued=true` 必须一路传到回执上，⛔ 不许静默替代。
+ *    ⇒ 原页面取不到、补拍也失败 ⇒ 抛错（⛔ 不许返回空图冒充成功）。
  */
 export async function slotShot(
   root: string,
@@ -1108,12 +1115,37 @@ export async function slotShot(
   sessionId: string,
   targetId: string,
   outRel: string,
-): Promise<{ rel: string; via: string; ms: number }> {
+): Promise<{ rel: string; via: string; ms: number; rescued: boolean }> {
   assertSlotOwned(root, slot, sessionId)
   const abs = resolveShotPath(root, outRel)
-  const r = await screenshot(slot, targetId, abs)
+
+  // ① 原页面
+  const direct = await screenshotOrNull(slot, targetId, abs)
+  if (direct !== null) {
+    pageTouched(root, slot)
+    return { rel: outRel, via: direct.via, ms: direct.ms, rescued: false }
+  }
+
+  // ② 补拍：拿原 target 的 URL，开一个无头实例重拍
+  const url = await pageUrl(slot, targetId)
+  if (url === '') {
+    throw new Error(
+      '[browser_slot] shot 原页面取不到帧，且读不到它的当前地址 ⇒ 无法补拍。' +
+        '（锁屏时最常见；解锁屏幕或换一个能读地址的目标）',
+    )
+  }
+  const started = Date.now()
+  const res = await headlessShot(url)
+  if (res.data === '') {
+    throw new Error(
+      `[browser_slot] shot 原页面取不到帧（锁屏/遮挡），补拍也失败：${res.error ?? '未知原因'}。` +
+        `这不是超时问题——该档在窗口不可见时不提交帧。`,
+    )
+  }
+  mkdirSync(dirname(abs), { recursive: true })
+  writeFileSync(abs, Buffer.from(res.data, 'base64'))
   pageTouched(root, slot)
-  return { rel: outRel, via: r.via, ms: r.ms }
+  return { rel: outRel, via: 'headless-rescue', ms: Date.now() - started, rescued: true }
 }
 
 /** 重载（可先装探针脚本） */
